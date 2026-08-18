@@ -1,0 +1,143 @@
+import { create } from 'zustand';
+import type { GameMap, GameOptions, GameSession, RomDef, SaveDef, TileDef } from './types';
+import type { NetInfo, Room } from './net';
+import { idbAll, idbGet, idbPut } from './db';
+import { builtinTiles } from './assets';
+import { setVolume } from './sound';
+
+export type Screen =
+  | 'menu' | 'create' | 'join' | 'load' | 'lobby' | 'game'
+  | 'mapEditor' | 'tileEditor' | 'taskEditor' | 'emulator' | 'options';
+
+interface Toast { id: number; text: string; kind: 'info' | 'ok' | 'err'; }
+
+interface AppState {
+  screen: Screen;
+  setScreen: (s: Screen) => void;
+
+  options: GameOptions;
+  setOptions: (p: Partial<GameOptions>) => void;
+
+  tiles: TileDef[];
+  maps: GameMap[];
+  roms: RomDef[];
+  saves: SaveDef[];
+  refresh: () => Promise<void>;
+
+  toasts: Toast[];
+  toast: (text: string, kind?: Toast['kind']) => void;
+
+  room: Room | null;
+  netInfo: NetInfo;
+  selfId: string;
+  session: GameSession | null;
+  sessionMap: GameMap | null;
+  boot: (room: Room, isHost: boolean, session: GameSession | null, map: GameMap | null) => void;
+  setSession: (s: GameSession | null) => void;
+  setNetInfo: (n: NetInfo) => void;
+  leaveRoom: () => void;
+}
+
+const mkSelfId = () => `p-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+export const useApp = create<AppState>()((set, get) => ({
+  screen: 'menu',
+  setScreen: (s) => set({ screen: s }),
+
+  options: {
+    name: 'ИГРОК',
+    broadcast: true,
+    autoReloadOnViolation: true,
+    showCellNumbers: true,
+    volume: 0.6,
+  },
+  setOptions: (p) => {
+    const options = { ...get().options, ...p };
+    setVolume(options.volume);
+    set({ options });
+    try { localStorage.setItem('retropolia-options', JSON.stringify({ state: { options } })); } catch { /* noop */ }
+  },
+
+  tiles: [],
+  maps: [],
+  roms: [],
+  saves: [],
+  refresh: async () => {
+    const [tiles, maps, roms, saves] = await Promise.all([
+      idbAll<TileDef>('tiles'),
+      idbAll<GameMap>('maps'),
+      idbAll<RomDef>('roms'),
+      idbAll<SaveDef>('saves'),
+    ]);
+    let tileList = tiles.map((e) => e.value);
+    if (tileList.length === 0) {
+      const seeds = builtinTiles();
+      await Promise.all(seeds.map((t) => idbPut('tiles', t.id, t)));
+      tileList = seeds;
+    }
+    const sortMaps = maps.map((e) => e.value).sort((a, b) => b.updatedAt - a.updatedAt);
+    set({
+      tiles: tileList.sort((a, b) => Number(!!a.builtin) - Number(!!b.builtin) || a.createdAt - b.createdAt),
+      maps: sortMaps,
+      roms: roms.map((e) => e.value).sort((a, b) => a.name.localeCompare(b.name)),
+      saves: saves.map((e) => e.value).sort((a, b) => a.slot - b.slot),
+    });
+  },
+
+  toasts: [],
+  toast: (text, kind = 'info') => {
+    const id = Date.now() + Math.random();
+    set((st) => ({ toasts: [...st.toasts.slice(-3), { id, text, kind }] }));
+    setTimeout(() => set((st) => ({ toasts: st.toasts.filter((t) => t.id !== id) })), 4200);
+  },
+
+  room: null,
+  netInfo: { online: false, local: true, links: 0 },
+  selfId: mkSelfId(),
+  session: null,
+  sessionMap: null,
+  boot: (room, _isHost, session, map) => set({ room, session, sessionMap: map, screen: 'lobby' }),
+  setSession: (s) => set({ session: s }),
+  setNetInfo: (n) => set({ netInfo: n }),
+  leaveRoom: () => {
+    const r = get().room;
+    if (r) r.close();
+    set({ room: null, session: null, sessionMap: null, netInfo: { online: false, local: true, links: 0 } });
+  },
+}));
+
+// Восстанавливаем сохранённые опции при старте
+export async function initApp() {
+  try {
+    const raw = localStorage.getItem('retropolia-options');
+    if (raw) {
+      const parsed = JSON.parse(raw) as { state?: { options?: Partial<GameOptions> } };
+      if (parsed.state?.options) useApp.getState().setOptions(parsed.state.options);
+    }
+  } catch { /* noop */ }
+  await useApp.getState().refresh();
+}
+
+export async function getRomData(romId: string): Promise<ArrayBuffer | null> {
+  const buf = await idbGet<ArrayBuffer>('blobs', `rom-${romId}`);
+  return buf ?? null;
+}
+
+export async function getBlobText(key: string): Promise<string | null> {
+  const v = await idbGet<string>('blobs', key);
+  return v ?? null;
+}
+
+export { idbGet };
+
+import { useEffect, useState } from 'react';
+export function useBlobImage(id?: string): string | null {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let on = true;
+    if (!id) { setUrl(null); return; }
+    idbGet<string>('blobs', id).then((v) => { if (on) setUrl(v ?? null); }).catch(() => { if (on) setUrl(null); });
+    return () => { on = false; };
+  }, [id]);
+  return url;
+}

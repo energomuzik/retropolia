@@ -1,0 +1,173 @@
+export type CellType = 'task' | 'bonus' | 'trap';
+
+export interface PlacedTile {
+  x: number;
+  y: number;
+  tileId: string;
+  rot: number; // 0..3, шаги по 90°
+}
+
+export interface TaskDef {
+  romId: string;
+  saveId: string;
+  title: string;
+  desc: string;
+  imageId?: string; // ключ в blobs
+}
+
+export interface CellDef {
+  n: number; // порядковый номер (1-based), он же index+1 в массиве cells
+  x: number;
+  y: number;
+  type: CellType;
+  task?: TaskDef | null;
+}
+
+export type EffectType =
+  | 'move' // сдвиг по треку на value (вперёд/назад)
+  | 'teleport' // переход на ячейку с номером value
+  | 'jail' // «отпуск»: пропуск value ходов
+  | 'wrongway' // «не туда»: прыжок на случайную ячейку-ловушку/бонус, иначе назад
+  | 'extraTurn' // доп. ход текущего
+  | 'skipTurn' // пропуск хода текущего
+  | 'playerExtra' // доп. ход игрока target
+  | 'playerSkip' // пропуск хода игрока target
+  | 'addMin' | 'subMin' // минуты текущему
+  | 'addTries' | 'subTries'; // попытки текущему
+
+export interface CardEffect {
+  type: EffectType;
+  value: number;
+  target: number; // 1-based номер игрока (для playerExtra/playerSkip)
+}
+
+export interface CardDef {
+  id: string;
+  kind: 'bonus' | 'trap';
+  name: string;
+  desc: string;
+  imageId?: string;
+  effect: CardEffect;
+}
+
+export interface GameMap {
+  id: string;
+  name: string;
+  cols: number;
+  rows: number;
+  tiles: PlacedTile[];
+  cells: CellDef[];
+  bonusCards: CardDef[];
+  trapCards: CardDef[];
+  ready: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TileDef {
+  id: string;
+  name: string;
+  gw: number; // размер в клетках сетки по X
+  gh: number;
+  dataUrl: string;
+  builtin?: boolean;
+  createdAt: number;
+}
+
+export interface RomDef {
+  id: string;
+  name: string;
+  fileName: string;
+  ext: string;
+  size: number;
+  createdAt: number;
+}
+
+export interface SaveDef {
+  id: string;
+  romId: string;
+  slot: number;
+  name: string;
+  state: unknown; // JSON снапшот jsnes
+  createdAt: number;
+}
+
+export interface SessionSnapshot {
+  id: string;
+  name: string;
+  mapName: string;
+  code: string;
+  state: GameSession;
+  createdAt: number;
+}
+
+/* ---------- runtime ---------- */
+
+export interface PlayerState {
+  id: string;
+  name: string;
+  color: number; // индекс палитры
+  ready: boolean;
+  isHost: boolean;
+  secLeft: number;
+  triesLeft: number;
+  pos: number; // индекс в cells
+  alive: boolean;
+  skipTurns: number;
+  extraTurn: boolean;
+}
+
+export interface ChallengeState {
+  cellIdx: number;
+  mode: 'time' | 'tries' | null;
+  startedAt: number;
+  accMs: number;
+  loads: number;
+  reloadId: number;
+  status: 'choose' | 'playing' | 'voting';
+  approvals: string[];
+  violations: string[];
+}
+
+export interface GameSession {
+  v: number;
+  code: string;
+  mapId: string;
+  phase: 'lobby' | 'rollOff' | 'playing' | 'over';
+  players: PlayerState[];
+  rollOffIdx: number;
+  rollOffValues: Record<string, number>;
+  turn: number;
+  dice: { a: number; b: number; roll: number } | null;
+  moving: { player: string; path: number[]; ts: number } | null;
+  awaitPost: boolean;
+  challenge: ChallengeState | null;
+  pendingCard: { card: CardDef; player: string; done: boolean } | null;
+  captured: Record<number, string>;
+  sessionTasks: Record<number, TaskDef>;
+  winner: string | null;
+  log: string[];
+  startedAt: number;
+}
+
+export interface GameOptions {
+  name: string;
+  broadcast: boolean;
+  autoReloadOnViolation: boolean;
+  showCellNumbers: boolean;
+  volume: number; // 0..1
+}
+
+export interface NetMsg {
+  mid: string;
+  from: string;
+  t: string;
+  p?: unknown;
+}
+
+export const APP_VERSION = 3;
+export const START_SEC = 60 * 60;
+export const START_TRIES = 60;
+export const SKIP_COST = 5;
+export const PLAYER_COLORS = ['#ff5d5d', '#5aa9ff', '#35d46f', '#ffcf3f'];
+export const PLAYER_NAMES = ['КРАСНЫЙ', 'СИНИЙ', 'ЗЕЛЁНЫЙ', 'ЖЁЛТЫЙ'];
