@@ -51,6 +51,7 @@ export const useApp = create<AppState>()((set, get) => ({
     autoReloadOnViolation: true,
     showCellNumbers: true,
     volume: 0.6,
+    streamFps: 10,
   },
   setOptions: (p) => {
     const options = { ...get().options, ...p };

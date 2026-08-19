@@ -83,18 +83,21 @@ export default function GameScreen() {
 
   /* ---------- трансляция (NES; SEGA-экран ядро рисует само) ---------- */
   const streaming = options.broadcast && myTurn && ch?.status === 'playing' && !isSega;
+  const streamMs = Math.round(1000 / Math.min(30, Math.max(2, options.streamFps || 10)));
   useEffect(() => {
     if (!streaming || !room) return;
     const t = setInterval(() => {
       const c = emuCanvasRef.current;
       if (!c) return;
       try {
-        const data = c.toDataURL('image/jpeg', 0.42);
+        // на высоких FPS сильнее жмём кадр, чтобы не забивать канал
+        const q = streamMs <= 50 ? 0.34 : 0.42;
+        const data = c.toDataURL('image/jpeg', q);
         room.send('stream', { from: me, name: mePlayer?.name ?? '?', data, ts: Date.now() } satisfies StreamPacket);
       } catch { /* noop */ }
-    }, 180);
+    }, streamMs);
     return () => clearInterval(t);
-  }, [streaming, room, me, mePlayer?.name]);
+  }, [streaming, streamMs, room, me, mePlayer?.name]);
 
   useEffect(() => {
     return streamBus.on((p) => {
@@ -564,7 +567,7 @@ export default function GameScreen() {
                     )}
                     {info && ch.mode === 'tries' && (
                       <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-gold">
-                        ЗАГРУЗОК: {info.loads} / {(mePlayer?.triesLeft ?? 0) + info.loads}
+                        ОСТАЛОСЬ: {Math.max(0, (mePlayer?.triesLeft ?? 0) - info.loads)} ПОП. · ЗАГРУЗОК {info.loads}
                       </span>
                     )}
                     {ch.status === 'voting' && (

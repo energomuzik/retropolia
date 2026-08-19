@@ -167,6 +167,7 @@ export interface GameOptions {
   autoReloadOnViolation: boolean;
   showCellNumbers: boolean;
   volume: number; // 0..1
+  streamFps: number; // кадры в секунду трансляции экрана эмулятора
 }
 
 export interface NetMsg {
