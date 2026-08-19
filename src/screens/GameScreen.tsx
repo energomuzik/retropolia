@@ -8,6 +8,7 @@ import { cardArt, cartridgeArt } from '../assets';
 import NesBox, { type NesApi } from '../NesBox';
 import SegaBox, { type SegaApi } from '../SegaBox';
 import { saveSessionSnapshot } from './Lobby';
+import KeyBinder from '../KeyBinder';
 import { Field, GhostBtn, Ic, Modal, PxBtn } from '../ui';
 import { PLAYER_COLORS, SKIP_COST } from '../types';
 import type { TaskDef } from '../types';
@@ -25,6 +26,10 @@ export default function GameScreen() {
   const [viewMode, setViewMode] = useState<'follow' | 'world'>('follow');
   const [peekMap, setPeekMap] = useState(false);
   const [worldZoom, setWorldZoom] = useState(1);
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const [isFs, setIsFs] = useState(false);
+  const emuWrapRef = useRef<HTMLDivElement>(null);
+  const prevPeekRef = useRef(false);
   const [shake, setShake] = useState<{ holding: boolean; a: number; b: number }>({ holding: false, a: 1, b: 1 });
   const [romBuf, setRomBuf] = useState<ArrayBuffer | null>(null);
   const [saveState, setSaveState] = useState<unknown>(null);
@@ -110,6 +115,44 @@ export default function GameScreen() {
     const t = setInterval(() => setTick((x) => x + 1), 500);
     return () => clearInterval(t);
   }, []);
+
+  /* ---------- полный экран эмулятора ---------- */
+  useEffect(() => {
+    const fn = () => setIsFs(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', fn);
+    return () => document.removeEventListener('fullscreenchange', fn);
+  }, []);
+  const toggleFs = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => undefined);
+    } else {
+      emuWrapRef.current?.requestFullscreen().catch(() => useApp.getState().toast('Браузер запретил полный экран', 'err'));
+    }
+  };
+
+  /* ---------- карта мира поверх задания: эмулятор не сбрасывается, а встаёт на паузу ---------- */
+  useEffect(() => {
+    if (peekMap && !prevPeekRef.current) {
+      const cur = useApp.getState();
+      const sess = cur.session;
+      const c = sess?.challenge;
+      const act = sess ? sess.players[sess.turn % sess.players.length] : null;
+      if (c && c.status === 'playing' && c.started && !c.paused && act?.id === cur.selfId) {
+        dispatch({ t: 'togglePause', id: cur.selfId });
+      }
+    }
+    prevPeekRef.current = peekMap;
+  }, [peekMap]);
+
+  /* ---------- сброс модалок при смене челленджа ---------- */
+  useEffect(() => {
+    const c = s?.challenge;
+    if (!c || c.status === 'choose') {
+      setControlsOpen(false);
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => undefined);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s?.challenge?.cellIdx, s?.challenge?.status]);
 
   /* ---------- очередь hops при moving ---------- */
   useEffect(() => {
@@ -492,8 +535,9 @@ export default function GameScreen() {
         </Modal>
       )}
 
-      {/* ---------- челлендж ---------- */}
-      {ch && task && !peekMap && (
+      {/* ---------- челлендж: не размонтируется под картой мира, чтобы эмулятор не сбрасывался ---------- */}
+      {ch && task && (
+        <div className={peekMap ? 'hidden' : undefined}>
         <Modal
           title={`Ячейка №${ch.cellIdx + 1} · ${task.title}`}
           icon={Ic.cart(16)}
@@ -578,9 +622,20 @@ export default function GameScreen() {
                   </div>
 
                   <div className="grid lg:grid-cols-[1fr_190px] gap-3 items-start">
-                    <div>
+                    <div className="min-w-0">
                       {myTurn ? (
-                        romBuf ? (
+                        <>
+                          <div className="flex items-center justify-between mb-1.5 gap-2">
+                            <span className="tick-label text-faint">
+                              {isFs ? 'ESC — выход из полного экрана' : ch.paused ? 'эмулятор на паузе' : ''}
+                            </span>
+                            <GhostBtn small onClick={toggleFs}>
+                              {isFs ? Ic.cross(12) : Ic.map(12)} {isFs ? 'Свернуть' : 'Во весь экран'}
+                            </GhostBtn>
+                          </div>
+                          <div ref={emuWrapRef} className={isFs ? 'bg-[#05070f] h-full w-full flex items-center justify-center p-4' : ''}>
+                            <div style={isFs ? { width: isSega ? 'min(92vw, calc(88vh * 1.3333))' : 'min(92vw, calc(88vh * 1.0667))' } : undefined}>
+                        {romBuf ? (
                           isSega ? (
                             <SegaBox
                               key={emuKey}
@@ -606,7 +661,10 @@ export default function GameScreen() {
                           <div className="aspect-[256/240] bg-black border-[3px] border-edge flex items-center justify-center">
                             <span className="font-pixel text-[8px] text-faint blink-hard">ЗАГРУЗКА РОМА…</span>
                           </div>
-                        )
+                        )}
+                            </div>
+                          </div>
+                        </>
                       ) : streamFresh ? (
                         <div className="border-[3px] border-edge bg-black">
                           <img src={stream!.data} alt="Трансляция" className="w-full" />
@@ -644,6 +702,7 @@ export default function GameScreen() {
                           <GhostBtn className="w-full" onClick={() => dispatch({ t: 'skip', id: me, instant: true, spentMs: 0, loads: 0 })}>
                             {Ic.bolt(13)} Заплатить {SKIP_COST} и пропустить
                           </GhostBtn>
+                          <GhostBtn className="w-full" onClick={() => setControlsOpen(true)}>{Ic.gear(13)} Управление</GhostBtn>
                         </>
                       )}
                       {myTurn && (ch.status === 'playing' || ch.status === 'voting') && (
@@ -656,8 +715,13 @@ export default function GameScreen() {
                             disabled={ch.status === 'voting'}
                             onClick={() => dispatch({ t: 'togglePause', id: me })}
                           >
-                            {ch.paused ? `${Ic.play(13)}` : `${Ic.pause(13)}`} {ch.paused ? 'Продолжить' : 'Пауза'}
+                            {ch.paused ? Ic.play(13) : Ic.pause(13)} {ch.paused ? 'Продолжить' : 'Пауза'}
                           </GhostBtn>
+                          {ch.paused && ch.status === 'playing' && (
+                            <GhostBtn className="w-full border-magma/60 text-magma" onClick={() => setControlsOpen(true)}>
+                              {Ic.gear(13)} Сменить управление
+                            </GhostBtn>
+                          )}
                           <PxBtn color="teal" className="w-full" onClick={() => dispatch({ t: 'declareDone', id: me })}>{Ic.check(14)} Прошёл задание</PxBtn>
                           <GhostBtn
                             className="w-full"
@@ -702,6 +766,7 @@ export default function GameScreen() {
             </div>
           </div>
         </Modal>
+        </div>
       )}
 
       {/* ---------- пик карты поверх модалок ---------- */}
@@ -711,7 +776,23 @@ export default function GameScreen() {
             <span className="font-display uppercase text-gold text-sm flex items-center gap-2">{Ic.map(15)} Карта мира — игра продолжается</span>
             <PxBtn small className="ml-auto" onClick={() => setPeekMap(false)}>{Ic.cross(12)} Вернуться</PxBtn>
           </div>
-          <div className="text-center text-faint tick-label pt-2">Камера вернётся к игроку автоматически при важных событиях</div>
+          <div className="text-center text-faint tick-label pt-2">Эмулятор поставлен на паузу — вернитесь и нажмите «Продолжить»</div>
+        </div>
+      )}
+
+      {/* ---------- смена управления (клавиатура + джойстик) во время задания ---------- */}
+      {controlsOpen && (
+        <div className="fixed inset-0 z-[95] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-[rgba(4,6,14,0.88)]" onClick={() => setControlsOpen(false)} />
+          <div className="relative pixel-panel pixel-corners pop-in w-full max-w-xl p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-magma">{Ic.gear(18)}</span>
+              <span className="font-display uppercase tracking-wider text-paper text-sm">Управление эмулятором</span>
+              <span className="tick-label text-gold ml-2">применяется сразу</span>
+              <GhostBtn small className="ml-auto" onClick={() => setControlsOpen(false)}>{Ic.cross(12)} Закрыть</GhostBtn>
+            </div>
+            <KeyBinder compact />
+          </div>
         </div>
       )}
 

@@ -166,8 +166,10 @@ export interface GameOptions {
   broadcast: boolean;
   autoReloadOnViolation: boolean;
   showCellNumbers: boolean;
-  volume: number; // 0..1
+  volume: number; // 0..1 — громкость эффектов интерфейса
   streamFps: number; // кадры в секунду трансляции экрана эмулятора
+  emuSound: boolean; // звук эмуляторов вкл/выкл
+  emuVolume: number; // 0..1 — громкость звука эмуляторов
 }
 
 export interface NetMsg {

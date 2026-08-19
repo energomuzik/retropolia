@@ -72,7 +72,8 @@ export default function SegaBox({
     slot.style.height = '100%';
     host.appendChild(slot);
 
-    const vol = useApp.getState().options.volume;
+    const opts = useApp.getState().options;
+    const vol = opts.emuSound ? (opts.emuVolume ?? 1) : 0;
     const w = window as unknown as Record<string, unknown>;
     w.EJS_player = `#${divId}`;
     w.EJS_core = coreFor(ext);
@@ -129,24 +130,45 @@ export default function SegaBox({
     };
     onApi?.(api);
 
-    const script = document.createElement('script');
-    script.src = `${EJS_DATA}loader.js`;
-    script.async = true;
-    script.onerror = () => setStatus('error');
-    document.body.appendChild(script);
+    if (!document.querySelector('script[data-ejs-loader]')) {
+      const script = document.createElement('script');
+      script.src = `${EJS_DATA}loader.js`;
+      script.async = true;
+      script.dataset.ejsLoader = '1';
+      script.onerror = () => setStatus('error');
+      document.body.appendChild(script);
+    }
 
     return () => {
+      const w = window as unknown as Record<string, unknown>;
       try {
         const emu = getEjs();
-        if (emu?.destroy) emu.destroy();
-        else if (emu?.exit) emu.exit();
+        // останавливаем ядро и звук
+        (emu as { gameManager?: { exit?: () => void; pause?: () => void } } | null)?.gameManager?.pause?.();
+        (emu as { gameManager?: { exit?: () => void } } | null)?.gameManager?.exit?.();
+        // официальная функция уничтожения EmulatorJS (закрывает аудио-контексты)
+        (w.EJS_terminate as (() => void) | undefined)?.();
       } catch { /* noop */ }
-      script.remove();
+      try {
+        w.EJS_emulator = null;
+        w.EJS_gameUrl = '';
+        w.EJS_ready = undefined;
+      } catch { /* noop */ }
       host.innerHTML = '';
       URL.revokeObjectURL(url);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [romData, ext, resetKey]);
+
+  // настоящая пауза ядра (кадры + звук), если она доступна
+  useEffect(() => {
+    if (status !== 'ready') return;
+    try {
+      const gm = (getEjs() as { gameManager?: { pause?: () => void; play?: () => void } } | null)?.gameManager;
+      if (paused) gm?.pause?.();
+      else gm?.play?.();
+    } catch { /* noop */ }
+  }, [paused, status]);
 
   // внешняя пауза: у ядра нет публичного pause, поэтому просто стопорим кадры оверлеем
   // (таймер задания при этом честно останавливается движком)

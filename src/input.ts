@@ -23,21 +23,28 @@ export const DEFAULT_KEYS: Record<PadAction, string> = {
 
 export interface EmuPrefs {
   keys: Record<PadAction, string>;
+  gpad: Record<PadAction, number>; // индекс кнопки W3C-геймпада на каждое действие
   gamepad: boolean;
   smoothing: boolean;
 }
+
+export const DEFAULT_GPAD: Record<PadAction, number> = {
+  UP: 12, DOWN: 13, LEFT: 14, RIGHT: 15,
+  A: 0, B: 1, SELECT: 8, START: 9,
+};
 
 const PREFS_KEY = 'retropolia-emu-prefs';
 export const PREFS_EVENT = 'retropolia-prefs-changed';
 
 export function loadEmuPrefs(): EmuPrefs {
-  const base: EmuPrefs = { keys: { ...DEFAULT_KEYS }, gamepad: true, smoothing: false };
+  const base: EmuPrefs = { keys: { ...DEFAULT_KEYS }, gpad: { ...DEFAULT_GPAD }, gamepad: true, smoothing: false };
   try {
     const raw = localStorage.getItem(PREFS_KEY);
     if (!raw) return base;
     const p = JSON.parse(raw) as Partial<EmuPrefs>;
     return {
       keys: { ...base.keys, ...(p.keys ?? {}) },
+      gpad: { ...base.gpad, ...(p.gpad ?? {}) },
       gamepad: p.gamepad !== false,
       smoothing: !!p.smoothing,
     };

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { NES } from 'jsnes';
 import {
-  ACTION_TO_BTN, GPAD_BUTTONS, GPAD_DEADZONE, PREFS_EVENT,
+  ACTION_TO_BTN, GPAD_DEADZONE, PREFS_EVENT,
   loadEmuPrefs, type EmuPrefs, type PadAction,
 } from './input';
 import { useApp } from './store';
@@ -91,7 +91,8 @@ export default function NesBox({
       audio = new AudioContext();
       proc = audio.createScriptProcessor(2048, 0, 2);
       proc.onaudioprocess = (e) => {
-        const vol = useApp.getState().options.volume;
+        const o = useApp.getState().options;
+        const vol = o.emuSound ? (o.emuVolume ?? 1) : 0;
         const L = e.outputBuffer.getChannelData(0);
         const R = e.outputBuffer.getChannelData(1);
         for (let i = 0; i < L.length; i++) {
@@ -158,8 +159,10 @@ export default function NesBox({
         const player = gi + 1;
         const prev = padPrev.get(gi);
         const curBtn: boolean[] = [];
-        // кнопки
-        for (const [bi, action] of GPAD_BUTTONS) {
+        // кнопки (раскладка геймпада — из настроек, можно менять на лету)
+        for (const action of Object.keys(prefsRef.current.gpad) as PadAction[]) {
+          const bi = prefsRef.current.gpad[action];
+          if (bi == null || bi >= gp.buttons.length) continue;
           const pressed = !!gp.buttons[bi]?.pressed;
           curBtn[bi] = pressed;
           const was = prev?.buttons[bi] ?? false;
