@@ -128,7 +128,21 @@ export default function MenuScreen() {
   return (
     <div className="h-full crt-grid-bg relative overflow-hidden">
       <div className="absolute inset-0 starfield opacity-60 pointer-events-none" />
-      <div className="relative z-10 h-full max-w-6xl mx-auto px-6 py-6 flex flex-col">
+      <div className="relative z-10 h-full max-w-6xl mx-auto px-6 py-4 flex flex-col">
+        {/* бегущая строка — сверху, чтобы не перекрывать пункты меню */}
+        <div className="mb-4 border-y-2 border-edge bg-[rgba(7,9,18,0.6)] overflow-hidden py-1.5 shrink-0">
+          <div className="marquee-x whitespace-nowrap font-pixel text-[9px] text-dim">
+            {[0, 1].map((k) => (
+              <span key={k}>
+                {TIPS.map((t, i) => (
+                  <span key={i} className="mx-6">
+                    <span className="text-gold">◆</span> {t}
+                  </span>
+                ))}
+              </span>
+            ))}
+          </div>
+        </div>
         {/* шапка */}
         <div className="flex items-end justify-between gap-6 flex-wrap">
           <div>
@@ -188,21 +202,7 @@ export default function MenuScreen() {
           </div>
         </div>
 
-        {/* бегущая строка */}
-        <div className="mt-5 border-y-2 border-edge bg-[rgba(7,9,18,0.6)] overflow-hidden py-2">
-          <div className="marquee-x whitespace-nowrap font-pixel text-[9px] text-dim">
-            {[0, 1].map((k) => (
-              <span key={k}>
-                {TIPS.map((t, i) => (
-                  <span key={i} className="mx-6">
-                    <span className="text-gold">◆</span> {t}
-                  </span>
-                ))}
-              </span>
-            ))}
-          </div>
-        </div>
-        <div className="flex items-center justify-between mt-2 pb-1">
+        <div className="flex items-center justify-between mt-3 pb-1 shrink-0">
           <span className="tick-label text-faint">RETROPOLIA v1.0 · локальная библиотека в IndexedDB</span>
           <span className="tick-label text-faint">© 8-BIT DREAMS</span>
         </div>

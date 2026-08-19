@@ -1,22 +1,15 @@
 import { useEffect, useRef } from 'react';
-import { NES, Controller } from 'jsnes';
+import { NES } from 'jsnes';
+import {
+  ACTION_TO_BTN, GPAD_BUTTONS, GPAD_DEADZONE, PREFS_EVENT,
+  loadEmuPrefs, type EmuPrefs, type PadAction,
+} from './input';
+import { useApp } from './store';
 
 export interface NesApi {
   snapshot: () => unknown;
   reload: (state?: unknown) => void;
 }
-
-const KEYMAP: Record<string, number> = {
-  ArrowUp: Controller.BUTTON_UP,
-  ArrowDown: Controller.BUTTON_DOWN,
-  ArrowLeft: Controller.BUTTON_LEFT,
-  ArrowRight: Controller.BUTTON_RIGHT,
-  KeyX: Controller.BUTTON_A,
-  KeyZ: Controller.BUTTON_B,
-  Enter: Controller.BUTTON_START,
-  ShiftLeft: Controller.BUTTON_SELECT,
-  ShiftRight: Controller.BUTTON_SELECT,
-};
 
 function bufToBinary(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
@@ -46,13 +39,22 @@ export default function NesBox({
   enabledRef.current = enabled;
   const stateRef = useRef<unknown>(initialState);
   stateRef.current = initialState;
-  const apiRef = useRef<NesApi | null>(null);
+  const prefsRef = useRef<EmuPrefs>(loadEmuPrefs());
 
   useEffect(() => {
     const cv = canvasRef.current!;
     const ctx2 = cv.getContext('2d')!;
     const img = ctx2.createImageData(256, 240);
     const buf32 = new Uint32Array(img.data.buffer);
+
+    const applyPrefs = () => {
+      const p = prefsRef.current;
+      cv.style.imageRendering = p.smoothing ? 'auto' : 'pixelated';
+      ctx2.imageSmoothingEnabled = p.smoothing;
+    };
+    applyPrefs();
+    const onPrefs = () => { prefsRef.current = loadEmuPrefs(); applyPrefs(); };
+    window.addEventListener(PREFS_EVENT, onPrefs);
 
     let audio: AudioContext | null = null;
     let proc: ScriptProcessorNode | null = null;
@@ -85,10 +87,11 @@ export default function NesBox({
       audio = new AudioContext();
       proc = audio.createScriptProcessor(2048, 0, 2);
       proc.onaudioprocess = (e) => {
+        const vol = useApp.getState().options.volume;
         const L = e.outputBuffer.getChannelData(0);
         const R = e.outputBuffer.getChannelData(1);
         for (let i = 0; i < L.length; i++) {
-          if (rp !== wp) { L[i] = lb[rp]; R[i] = rb[rp]; rp = (rp + 1) % RSIZE; }
+          if (rp !== wp) { L[i] = lb[rp] * vol; R[i] = rb[rp] * vol; rp = (rp + 1) % RSIZE; }
           else { L[i] = 0; R[i] = 0; }
         }
       };
@@ -113,9 +116,85 @@ export default function NesBox({
         } catch { /* noop */ }
       },
     };
-    apiRef.current = api;
     onApi?.(api);
     registerCanvas?.(cv);
+
+    /* ---------- клавиатура: раскладка из настроек, игрок №1 ---------- */
+    const press = (action: PadAction, down: boolean) => {
+      if (!enabledRef.current) return;
+      try {
+        if (down) nes.buttonDown(1, ACTION_TO_BTN[action]);
+        else nes.buttonUp(1, ACTION_TO_BTN[action]);
+      } catch { /* noop */ }
+    };
+    const down = (e: KeyboardEvent) => {
+      const p = prefsRef.current;
+      const action = (Object.keys(p.keys) as PadAction[]).find((a) => p.keys[a] === e.code);
+      if (action && enabledRef.current) {
+        e.preventDefault();
+        press(action, true);
+      }
+    };
+    const up = (e: KeyboardEvent) => {
+      const p = prefsRef.current;
+      const action = (Object.keys(p.keys) as PadAction[]).find((a) => p.keys[a] === e.code);
+      if (action) press(action, false);
+    };
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+
+    /* ---------- геймпады: pad 0 → игрок 1, pad 1 → игрок 2 ---------- */
+    const padPrev: Map<number, { buttons: boolean[]; axes: number[] }> = new Map();
+    const pollGamepads = () => {
+      if (!prefsRef.current.gamepad) { padPrev.clear(); return; }
+      let pads: (Gamepad | null)[] = [];
+      try { pads = Array.from(navigator.getGamepads?.() ?? []); } catch { return; }
+      pads.forEach((gp, gi) => {
+        if (!gp || gi > 1) return;
+        const player = gi + 1;
+        const prev = padPrev.get(gi);
+        const curBtn: boolean[] = [];
+        // кнопки
+        for (const [bi, action] of GPAD_BUTTONS) {
+          const pressed = !!gp.buttons[bi]?.pressed;
+          curBtn[bi] = pressed;
+          const was = prev?.buttons[bi] ?? false;
+          if (pressed && !was) {
+            try { nes.buttonDown(player, ACTION_TO_BTN[action]); } catch { /* noop */ }
+          } else if (!pressed && was) {
+            try { nes.buttonUp(player, ACTION_TO_BTN[action]); } catch { /* noop */ }
+          }
+        }
+        // левый стик
+        const ax = gp.axes[0] ?? 0;
+        const ay = gp.axes[1] ?? 0;
+        const pax = prev?.axes[0] ?? 0;
+        const pay = prev?.axes[1] ?? 0;
+        const d = GPAD_DEADZONE;
+        const dirs: [PadAction, number, number][] = [
+          ['LEFT', ax, pax], ['RIGHT', ax, pax], ['UP', ay, pay], ['DOWN', ay, pay],
+        ];
+        const nowL = ax < -d, wasL = pax < -d;
+        const nowR = ax > d, wasR = pax > d;
+        const nowU = ay < -d, wasU = pay < -d;
+        const nowD = ay > d, wasD = pay > d;
+        void dirs;
+        try {
+          if (nowL && !wasL) nes.buttonDown(player, ACTION_TO_BTN.LEFT);
+          if (!nowL && wasL) nes.buttonUp(player, ACTION_TO_BTN.LEFT);
+          if (nowR && !wasR) nes.buttonDown(player, ACTION_TO_BTN.RIGHT);
+          if (!nowR && wasR) nes.buttonUp(player, ACTION_TO_BTN.RIGHT);
+          if (nowU && !wasU) nes.buttonDown(player, ACTION_TO_BTN.UP);
+          if (!nowU && wasU) nes.buttonUp(player, ACTION_TO_BTN.UP);
+          if (nowD && !wasD) nes.buttonDown(player, ACTION_TO_BTN.DOWN);
+          if (!nowD && wasD) nes.buttonUp(player, ACTION_TO_BTN.DOWN);
+        } catch { /* noop */ }
+        padPrev.set(gi, {
+          buttons: curBtn,
+          axes: [ax, ay],
+        });
+      });
+    };
 
     let raf = 0;
     let last = performance.now();
@@ -128,28 +207,16 @@ export default function NesBox({
         let n = 0;
         while (acc >= FRAME && n < 3) { nes.frame(); acc -= FRAME; n++; }
       }
+      pollGamepads();
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
-
-    const down = (e: KeyboardEvent) => {
-      const b = KEYMAP[e.code];
-      if (b !== undefined && enabledRef.current) {
-        e.preventDefault();
-        nes.buttonDown(0, b);
-      }
-    };
-    const up = (e: KeyboardEvent) => {
-      const b = KEYMAP[e.code];
-      if (b !== undefined) nes.buttonUp(0, b);
-    };
-    window.addEventListener('keydown', down);
-    window.addEventListener('keyup', up);
 
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
+      window.removeEventListener(PREFS_EVENT, onPrefs);
       registerCanvas?.(null);
       try { proc?.disconnect(); } catch { /* noop */ }
       if (audio) void audio.close().catch(() => undefined);

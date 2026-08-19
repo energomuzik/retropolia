@@ -137,11 +137,16 @@ export default function TaskEditor() {
 
   const saveTask = async () => {
     if (!map || selCell === null) return;
-    if (!fRom || !fSave) { sfx.fail(); toast('Выберите ром и сохранение', 'err'); return; }
+    const romIsNes = roms.find((r) => r.id === fRom)?.ext === 'nes';
+    if (!fRom || (romIsNes && !fSave)) {
+      sfx.fail();
+      toast(romIsNes ? 'Выберите ром и сохранение' : 'Выберите ром', 'err');
+      return;
+    }
     let imageId: string | undefined = fImg || undefined;
     const nextMap = JSON.parse(JSON.stringify(map)) as GameMap;
     const task: TaskDef = {
-      romId: fRom, saveId: fSave,
+      romId: fRom, saveId: fSave || undefined,
       title: fTitle.trim() || romName(fRom),
       desc: fDesc.trim() || 'Пройдите фрагмент игры, как договорились игроки.',
       imageId,
@@ -356,15 +361,23 @@ export default function TaskEditor() {
                     {roms.length === 0 && (
                       <p className="text-[11px] text-magma">Ромов пока нет — загрузите их в «Запуске эмулятора».</p>
                     )}
-                    <Field label={`Сохранение · ${romSaves.length}`}>
-                      <select className="field-in w-full px-2 py-2 text-sm" value={fSave} onChange={(e) => setFSave(e.target.value)}>
-                        <option value="">— выберите сохранение —</option>
-                        {romSaves.map((s) => <option key={s.id} value={s.id}>Слот {s.slot} · {s.name}</option>)}
-                      </select>
-                    </Field>
-                    {fRom && romSaves.length === 0 && (
-                      <p className="text-[11px] text-gold">У этого рома нет сохранений — создайте их в эмуляторе.</p>
-                    )}
+                    {roms.find((r) => r.id === fRom)?.ext === 'nes' ? (
+                      <>
+                        <Field label={`Сохранение · ${romSaves.length}`}>
+                          <select className="field-in w-full px-2 py-2 text-sm" value={fSave} onChange={(e) => setFSave(e.target.value)}>
+                            <option value="">— выберите сохранение —</option>
+                            {romSaves.map((s) => <option key={s.id} value={s.id}>Слот {s.slot} · {s.name}</option>)}
+                          </select>
+                        </Field>
+                        {fRom && romSaves.length === 0 && (
+                          <p className="text-[11px] text-gold">У этого рома нет сохранений — создайте их в эмуляторе.</p>
+                        )}
+                      </>
+                    ) : fRom ? (
+                      <p className="text-[11px] text-magma">
+                        Это ром SEGA — слот не нужен, задание стартует с начала ромa (сохранения встроены в ядро эмулятора).
+                      </p>
+                    ) : null}
                     <Field label="Название ячейки">
                       <input className="field-in w-full px-3 py-2 text-sm" placeholder="Например: Felix — уровень 3" value={fTitle} onChange={(e) => setFTitle(e.target.value)} />
                     </Field>

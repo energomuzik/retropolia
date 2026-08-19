@@ -6,6 +6,7 @@ import { cellTaskOf, fmtClock, spentInfo } from '../engine';
 import { effectLabel } from './TaskEditor';
 import { cardArt, cartridgeArt } from '../assets';
 import NesBox, { type NesApi } from '../NesBox';
+import SegaBox from '../SegaBox';
 import { saveSessionSnapshot } from './Lobby';
 import { Field, GhostBtn, Ic, Modal, PxBtn } from '../ui';
 import { PLAYER_COLORS, SKIP_COST } from '../types';
@@ -42,7 +43,10 @@ export default function GameScreen() {
   const myTurn = !!active && active.id === me;
   const ch = s?.challenge ?? null;
   const task = s && map && ch ? cellTaskOf(s, map, ch.cellIdx) : null;
-  const romName = task ? st.roms.find((r) => r.id === task.romId)?.name ?? 'ROM' : '';
+  const taskRom = task ? st.roms.find((r) => r.id === task.romId) : undefined;
+  const isSega = !!taskRom && taskRom.ext !== 'nes';
+  const segExt = (taskRom?.fileName.split('.').pop() ?? 'md').toLowerCase();
+  const romName = taskRom?.name ?? 'ROM';
   const taskImg = useBlobImage(task?.imageId);
   const cardImg = useBlobImage(s?.pendingCard?.card.imageId);
 
@@ -68,14 +72,15 @@ export default function GameScreen() {
   const reloadId = ch?.reloadId ?? 0;
   useEffect(() => {
     if (reloadId > 0) {
-      nesApiRef.current?.reload(saveState ?? undefined);
+      if (isSega) setEmuKey((k) => k + 1); // SEGA: перезапуск рома с начала
+      else nesApiRef.current?.reload(saveState ?? undefined);
       sfx.alarm();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadId]);
+  }, [reloadId, isSega]);
 
-  /* ---------- трансляция ---------- */
-  const streaming = options.broadcast && myTurn && ch?.status === 'playing';
+  /* ---------- трансляция (NES; SEGA-экран ядро рисует само) ---------- */
+  const streaming = options.broadcast && myTurn && ch?.status === 'playing' && !isSega;
   useEffect(() => {
     if (!streaming || !room) return;
     const t = setInterval(() => {
@@ -480,7 +485,7 @@ export default function GameScreen() {
                 <div className="tick-label text-gold mb-1">Задание</div>
                 {task.desc}
               </div>
-              <div className="tick-label text-faint">Ром: {romName} · {st.roms.find((r) => r.id === task.romId)?.ext.toUpperCase() ?? 'NES'}</div>
+              <div className="tick-label text-faint">Ром: {romName} · {taskRom?.ext === 'nes' ? 'NES' : 'SEGA'}</div>
               {ownerName && owner !== active?.id && (
                 <div className="hud-chip pixel-corners px-3 py-2 text-[11px] text-magma border-magma">
                   Хозяин ячейки: {ownerName} — потраченные ресурсы уйдут ему
@@ -550,14 +555,18 @@ export default function GameScreen() {
                     <div>
                       {myTurn ? (
                         romBuf ? (
-                          <NesBox
-                            key={emuKey}
-                            romData={romBuf}
-                            initialState={saveState ?? undefined}
-                            enabled={ch.status === 'playing'}
-                            onApi={(a) => { nesApiRef.current = a; }}
-                            registerCanvas={(c) => { emuCanvasRef.current = c; }}
-                          />
+                          isSega ? (
+                            <SegaBox key={emuKey} romData={romBuf} ext={segExt} resetKey={emuKey} />
+                          ) : (
+                            <NesBox
+                              key={emuKey}
+                              romData={romBuf}
+                              initialState={saveState ?? undefined}
+                              enabled={ch.status === 'playing'}
+                              onApi={(a) => { nesApiRef.current = a; }}
+                              registerCanvas={(c) => { emuCanvasRef.current = c; }}
+                            />
+                          )
                         ) : (
                           <div className="aspect-[256/240] bg-black border-[3px] border-edge flex items-center justify-center">
                             <span className="font-pixel text-[8px] text-faint blink-hard">ЗАГРУЗКА РОМА…</span>
@@ -575,7 +584,11 @@ export default function GameScreen() {
                         <div className="aspect-[256/240] bg-black border-[3px] border-edge flex flex-col items-center justify-center gap-2">
                           <span className="text-dim">{Ic.eye(28)}</span>
                           <span className="font-pixel text-[8px] text-faint text-center px-4">
-                            {options.broadcast ? 'ЖДЁМ КАДРЫ ТРАНСЛЯЦИИ…' : 'ТРАНСЛЯЦИЯ ВЫКЛЮЧЕНА В ОПЦИЯХ'}
+                            {isSega
+                              ? 'SEGA: ЭКРАН ИГРОКА РИСУЕТ ЯДРО — ТРАНСЛЯЦИЯ НЕДОСТУПНА'
+                              : options.broadcast
+                                ? 'ЖДЁМ КАДРЫ ТРАНСЛЯЦИИ…'
+                                : 'ТРАНСЛЯЦИЯ ВЫКЛЮЧЕНА В ОПЦИЯХ'}
                           </span>
                         </div>
                       )}
@@ -704,9 +717,13 @@ function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => v
   const romSaves = saves.filter((x) => x.romId === romId);
 
   const apply = () => {
-    if (!romId || !saveId) { useApp.getState().toast('Выберите ром и сохранение', 'err'); return; }
+    const romIsNes = roms.find((r) => r.id === romId)?.ext === 'nes';
+    if (!romId || (romIsNes && !saveId)) {
+      useApp.getState().toast(romIsNes ? 'Выберите ром и сохранение' : 'Выберите ром', 'err');
+      return;
+    }
     const task: TaskDef = {
-      romId, saveId,
+      romId, saveId: saveId || undefined,
       title: title.trim() || (roms.find((r) => r.id === romId)?.name ?? 'Задание'),
       desc: desc.trim() || 'Задание, придуманное игроком на этой сессии.',
     };
@@ -730,12 +747,16 @@ function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => v
               {roms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
             </select>
           </Field>
-          <Field label="Сохранение">
-            <select className="field-in w-full px-2 py-2 text-sm" value={saveId} onChange={(e) => setSaveId(e.target.value)}>
-              <option value="">— выбрать —</option>
-              {romSaves.map((x) => <option key={x.id} value={x.id}>Слот {x.slot} · {x.name}</option>)}
-            </select>
-          </Field>
+          {roms.find((r) => r.id === romId)?.ext === 'nes' ? (
+            <Field label="Сохранение">
+              <select className="field-in w-full px-2 py-2 text-sm" value={saveId} onChange={(e) => setSaveId(e.target.value)}>
+                <option value="">— выбрать —</option>
+                {romSaves.map((x) => <option key={x.id} value={x.id}>Слот {x.slot} · {x.name}</option>)}
+              </select>
+            </Field>
+          ) : romId ? (
+            <p className="text-[11px] text-magma">Ром SEGA — стартует с начала, слот не требуется.</p>
+          ) : null}
           <Field label="Название">
             <input className="field-in w-full px-3 py-2 text-sm" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Chip'n'Dale 2 — босс" />
           </Field>

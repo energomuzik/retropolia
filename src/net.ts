@@ -79,7 +79,11 @@ export function createRoom(
   };
 
   const send = (t: string, p?: unknown) => {
-    broadcast({ mid: `${selfId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`, from: selfId, t, p });
+    const m: NetMsg = { mid: `${selfId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`, from: selfId, t, p };
+    broadcast(m);
+    // Хост — авторитет: применяет собственные действия локально (гостям придут его state-эхо).
+    // Гости ждут подтверждение от хоста, чтобы не рассинхронизироваться.
+    if (isHost) onMsg(m);
   };
 
   let peer: Peer | null = null;

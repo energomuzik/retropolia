@@ -56,6 +56,7 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
         if (h.session && h.sessionMap) {
           const next = applyAction(h.session, m.p as Action, h.sessionMap, h.options);
           h.setSession(next);
+          if (h.screen === 'lobby' && next.phase !== 'lobby') h.setScreen('game');
           room.send('map', h.sessionMap);
           room.send('state', next);
         }

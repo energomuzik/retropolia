@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp, getRomData } from '../store';
 import { Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
 import NesBox, { type NesApi } from '../NesBox';
+import SegaBox from '../SegaBox';
 import { idbDel, idbPut, uid } from '../db';
 import type { RomDef, SaveDef } from '../types';
+import { keyLabel, loadEmuPrefs, PREFS_EVENT, listGamepads } from '../input';
 import { sfx } from '../sound';
 
 const fmtSize = (b: number) => (b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} МБ` : `${Math.max(1, Math.round(b / 1024))} КБ`);
@@ -15,24 +17,39 @@ export default function EmulatorLauncher() {
   const [runKey, setRunKey] = useState(0);
   const [runState, setRunState] = useState<unknown>(undefined);
   const [running, setRunning] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [, forceUi] = useState(0);
   const apiRef = useRef<NesApi | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const rom = roms.find((r) => r.id === romId) ?? null;
+  const isNes = rom?.ext === 'nes';
   const romSaves = saves.filter((s) => s.romId === romId).sort((a, b) => a.slot - b.slot);
+
+  useEffect(() => {
+    const bump = () => forceUi((x) => x + 1);
+    window.addEventListener(PREFS_EVENT, bump);
+    window.addEventListener('gamepadconnected', bump);
+    window.addEventListener('gamepaddisconnected', bump);
+    const t = setInterval(bump, 900);
+    return () => {
+      window.removeEventListener(PREFS_EVENT, bump);
+      window.removeEventListener('gamepadconnected', bump);
+      window.removeEventListener('gamepaddisconnected', bump);
+      clearInterval(t);
+    };
+  }, []);
 
   const onUpload = async (files: FileList | null) => {
     const f = files?.[0];
     if (!f) return;
     const ext = (f.name.split('.').pop() ?? '').toLowerCase();
-    const isNes = ext === 'nes';
-    const isSega = ['md', 'gen', 'sms', 'bin'].includes(ext);
-    if (!isNes && !isSega) { toast('Поддерживаются .nes (NES) и .md/.gen/.sms (SEGA)', 'err'); return; }
+    const isNesFile = ext === 'nes';
+    const isSegaFile = ['md', 'gen', 'sms', 'gg', 'bin'].includes(ext);
+    if (!isNesFile && !isSegaFile) { toast('Поддерживаются .nes (NES) и .md/.gen/.sms/.gg/.bin (SEGA)', 'err'); return; }
     const buf = await f.arrayBuffer();
     const r: RomDef = {
       id: uid('rom'), name: f.name.replace(/\.[^.]+$/, ''), fileName: f.name,
-      ext: isNes ? 'nes' : 'sega', size: f.size, createdAt: Date.now(),
+      ext: isNesFile ? 'nes' : 'sega', size: f.size, createdAt: Date.now(),
     };
     await idbPut('roms', r.id, r);
     await idbPut('blobs', `rom-${r.id}`, buf);
@@ -40,7 +57,7 @@ export default function EmulatorLauncher() {
     setRomId(r.id);
     setRunning(false);
     sfx.coin();
-    toast(isNes ? `Ром «${r.name}» загружен` : `Ром SEGA «${r.name}» сохранён (ядро SEGA в разработке)`, 'ok');
+    toast(isNesFile ? `Ром «${r.name}» загружен (NES)` : `Ром «${r.name}» загружен (SEGA)`, 'ok');
   };
 
   const launch = async (state?: unknown) => {
@@ -50,7 +67,6 @@ export default function EmulatorLauncher() {
     setRomBuf(buf);
     setRunState(state);
     setRunning(true);
-    setErr(null);
     setRunKey((k) => k + 1);
     sfx.start();
   };
@@ -84,7 +100,8 @@ export default function EmulatorLauncher() {
     toast(`Сохранение (слот ${s.slot}) удалено`, 'err');
   };
 
-  useEffect(() => () => { setRunning(false); }, []);
+  const prefs = loadEmuPrefs();
+  const pads = listGamepads();
 
   return (
     <div className="h-full crt-grid-bg overflow-y-auto">
@@ -95,11 +112,11 @@ export default function EmulatorLauncher() {
             <span className="text-coral">{Ic.chip(22)}</span> Запуск эмулятора
           </h1>
           <PxBtn color="coral" className="ml-auto" onClick={() => fileRef.current?.click()}>{Ic.upload(15)} Загрузить ром</PxBtn>
-          <input ref={fileRef} type="file" accept=".nes,.md,.gen,.sms,.bin" className="hidden" onChange={(e) => { void onUpload(e.target.files); e.target.value = ''; }} />
+          <input ref={fileRef} type="file" accept=".nes,.md,.gen,.sms,.gg,.bin" className="hidden" onChange={(e) => { void onUpload(e.target.files); e.target.value = ''; }} />
         </div>
         <p className="text-[13px] text-dim mb-6 max-w-3xl">
-          Тестовый стенд: гоняйте ромы, проходите до нужного места и жмите <span className="text-gold font-display uppercase">«Сохранить состояние»</span> —
-          слоты потом выбираются в редакторе заданий. Неверные сохранения можно удалять.
+          Тестовый стенд: гоняйте ромы, проходите до нужного места и жмите <span className="text-gold font-display uppercase">«Сохранить состояние»</span> (NES) —
+          слоты потом выбираются в редакторе заданий. Неверные сохранения удаляются. Для SEGA сохранения встроены в ядро (меню → дискета).
         </p>
 
         <div className="grid lg:grid-cols-[300px_1fr] gap-5">
@@ -123,14 +140,14 @@ export default function EmulatorLauncher() {
               {roms.length === 0 && (
                 <div className="text-center py-8 px-3">
                   <span className="text-coral inline-block floaty">{Ic.cart(36)}</span>
-                  <p className="text-[12px] text-dim mt-3">Загрузите файл .nes — и вперёд</p>
+                  <p className="text-[12px] text-dim mt-3">Загрузите файл .nes или .md/.sms — и вперёд</p>
                 </div>
               )}
             </div>
           </Panel>
 
           <div className="space-y-5">
-            <Panel title={rom ? `${rom.name} · ${rom.ext.toUpperCase()}` : 'Экран'} icon={Ic.play(16)} accent="var(--color-teal)">
+            <Panel title={rom ? `${rom.name} · ${rom.ext === 'nes' ? 'NES' : 'SEGA'}` : 'Экран'} icon={Ic.play(16)} accent="var(--color-teal)">
               <div className="p-4">
                 {!running || !romBuf ? (
                   <div className="aspect-[256/120] max-h-[220px] w-full bg-[#05070f] border-[3px] border-edge flex flex-col items-center justify-center gap-3 relative overflow-hidden">
@@ -138,16 +155,13 @@ export default function EmulatorLauncher() {
                     {rom ? (
                       <>
                         <span className="font-pixel text-[10px] text-dim relative z-10">PRESS START</span>
-                        <div className="flex gap-3 relative z-10">
-                          <PxBtn color="teal" onClick={() => void launch()} disabled={rom.ext !== 'nes'}>{Ic.play(14)} Запустить с начала</PxBtn>
-                        </div>
-                        {rom.ext !== 'nes' && <span className="tick-label text-magma relative z-10">Ядро SEGA подключается — ром сохранён для заданий</span>}
+                        <PxBtn color="teal" onClick={() => void launch()}>{Ic.play(14)} Запустить</PxBtn>
                       </>
                     ) : (
                       <span className="font-pixel text-[9px] text-faint relative z-10">ВЫБЕРИТЕ ИЛИ ЗАГРУЗИТЕ РОМ</span>
                     )}
                   </div>
-                ) : (
+                ) : isNes ? (
                   <div className="max-w-[560px] mx-auto">
                     <NesBox
                       key={runKey}
@@ -162,18 +176,46 @@ export default function EmulatorLauncher() {
                       <GhostBtn onClick={() => setRunning(false)}>{Ic.pause(13)} Выключить</GhostBtn>
                     </div>
                   </div>
+                ) : (
+                  <div className="max-w-[640px] mx-auto">
+                    <SegaBox key={runKey} romData={romBuf} ext={segExt(rom?.fileName ?? '')} resetKey={runKey} />
+                    <div className="flex gap-2 mt-3 flex-wrap">
+                      <GhostBtn onClick={() => void launch()}>{Ic.rotate(13)} Перезапуск</GhostBtn>
+                      <GhostBtn onClick={() => setRunning(false)}>{Ic.pause(13)} Выключить</GhostBtn>
+                    </div>
+                    <p className="text-[11px] text-magma mt-2 leading-relaxed">
+                      Сохранения SEGA — встроенные в ядро: меню эмулятора → иконка дискеты (save state), слоты выбираются там же.
+                      Управление и геймпады настраиваются в меню ядра (шестерёнка).
+                    </p>
+                  </div>
                 )}
-                {err && <div className="mt-3 text-coral text-[12px]">{err}</div>}
                 <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] text-dim">
-                  <div className="hud-chip pixel-corners px-2 py-1.5">Стрелки — крестовина</div>
-                  <div className="hud-chip pixel-corners px-2 py-1.5">X — A · Z — B</div>
-                  <div className="hud-chip pixel-corners px-2 py-1.5">Enter — Start</div>
-                  <div className="hud-chip pixel-corners px-2 py-1.5">Shift — Select</div>
+                  {isNes || !rom ? (
+                    <>
+                      <div className="hud-chip pixel-corners px-2 py-1.5">{keyLabel(prefs.keys.UP)}{keyLabel(prefs.keys.DOWN)}{keyLabel(prefs.keys.LEFT)}{keyLabel(prefs.keys.RIGHT)} — крестовина</div>
+                      <div className="hud-chip pixel-corners px-2 py-1.5">{keyLabel(prefs.keys.A)} — A · {keyLabel(prefs.keys.B)} — B</div>
+                      <div className="hud-chip pixel-corners px-2 py-1.5">{keyLabel(prefs.keys.START)} — Start · {keyLabel(prefs.keys.SELECT)} — Select</div>
+                      <div className="hud-chip pixel-corners px-2 py-1.5">Раскладка — в опциях</div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="hud-chip pixel-corners px-2 py-1.5 sm:col-span-2">Управление — встроенное в ядро (клавиатура и геймпады)</div>
+                      <div className="hud-chip pixel-corners px-2 py-1.5 sm:col-span-2">Геймпад: крест/стик — движение, A/B — кнопки</div>
+                    </>
+                  )}
+                </div>
+                <div className="mt-2 flex items-center gap-2 flex-wrap">
+                  {pads.map((g) => (
+                    <span key={g.index} className="hud-chip pixel-corners px-2.5 py-1 text-[10px] text-teal flex items-center gap-1.5">
+                      {Ic.dice(10)} {g.id.slice(0, 34)}{g.id.length > 34 ? '…' : ''}
+                    </span>
+                  ))}
+                  {pads.length > 0 && isNes && <span className="tick-label text-faint">NES: геймпад 1 → игрок 1, геймпад 2 → игрок 2</span>}
                 </div>
               </div>
             </Panel>
 
-            {rom && (
+            {rom && isNes && (
               <Panel title={`Сохранения «${rom.name}» · ${romSaves.length}`} icon={Ic.save(16)}>
                 <div className="p-3 grid sm:grid-cols-2 gap-2">
                   {romSaves.map((s) => (
@@ -183,11 +225,19 @@ export default function EmulatorLauncher() {
                         <div className="font-display text-[11px] uppercase text-paper truncate">{s.name}</div>
                         <div className="tick-label text-faint">{new Date(s.createdAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</div>
                       </div>
-                      <GhostBtn small onClick={() => void launch(s.state)} disabled={rom.ext !== 'nes'}>{Ic.play(11)}</GhostBtn>
+                      <GhostBtn small onClick={() => void launch(s.state)}>{Ic.play(11)}</GhostBtn>
                       <button onClick={() => void delSave(s)} className="text-faint hover:text-coral cursor-pointer" aria-label="Удалить сохранение">{Ic.trash(14)}</button>
                     </div>
                   ))}
                   {romSaves.length === 0 && <div className="text-[12px] text-dim sm:col-span-2 py-3 text-center">Сохранений нет — запустите ром и запишите первое состояние</div>}
+                </div>
+              </Panel>
+            )}
+            {rom && !isNes && (
+              <Panel title="Сохранения SEGA" icon={Ic.save(16)} accent="var(--color-magma)">
+                <div className="p-4 text-[12px] text-dim leading-relaxed">
+                  У ядра SEGA собственная система слотов — она открывается прямо в эмуляторе (кнопка меню → дискета).
+                  В задания на карте SEGA-ром попадает без слота и стартует с начала — это нормальный сценарий для «пройди первый уровень».
                 </div>
               </Panel>
             )}
@@ -197,3 +247,8 @@ export default function EmulatorLauncher() {
     </div>
   );
 }
+
+function segExt(fileName: string): string {
+  return (fileName.split('.').pop() ?? 'md').toLowerCase();
+}
+

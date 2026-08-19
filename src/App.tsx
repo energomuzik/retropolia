@@ -25,6 +25,17 @@ export default function App() {
     setVolume(volume);
   }, [volume]);
 
+  useEffect(() => {
+    const on = (e: GamepadEvent) => useApp.getState().toast(`Джойстик подключён: ${e.gamepad.id.slice(0, 40)}`, 'ok');
+    const off = () => useApp.getState().toast('Джойстик отключён', 'info');
+    window.addEventListener('gamepadconnected', on);
+    window.addEventListener('gamepaddisconnected', off);
+    return () => {
+      window.removeEventListener('gamepadconnected', on);
+      window.removeEventListener('gamepaddisconnected', off);
+    };
+  }, []);
+
   if (!ready) {
     return (
       <div className="h-full crt-grid-bg flex flex-col items-center justify-center gap-5">

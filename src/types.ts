@@ -9,7 +9,7 @@ export interface PlacedTile {
 
 export interface TaskDef {
   romId: string;
-  saveId: string;
+  saveId?: string; // для SEGA-ромов слот необязателен — ядро стартует с начала
   title: string;
   desc: string;
   imageId?: string; // ключ в blobs
