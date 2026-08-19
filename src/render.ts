@@ -23,6 +23,7 @@ export interface TokenDraw {
   active: boolean;
   alive: boolean;
   label: string;
+  img?: string | null; // dataUrl кастомной фишки (PNG с прозрачностью)
 }
 
 export interface BoardDrawOpts {
@@ -219,29 +220,41 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     ctx.beginPath();
     ctx.ellipse(0, 16 - bob / s, 11, 4.5, 0, 0, Math.PI * 2);
     ctx.fill();
-    // корпус
-    const body = t.alive ? t.color : '#5a628f';
-    ctx.fillStyle = body;
-    ctx.fillRect(-9, -12, 18, 22);
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
-    ctx.fillRect(-9, -12, 18, 5);
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.fillRect(-9, 5, 18, 5);
-    // глаза
-    ctx.fillStyle = '#0a0c18';
-    ctx.fillRect(-6, -6, 4, 6);
-    ctx.fillRect(2, -6, 4, 6);
-    ctx.fillStyle = '#e9ecff';
-    ctx.fillRect(-6, -6, 2, 2);
-    ctx.fillRect(2, -6, 2, 2);
-    // антенна
-    ctx.fillStyle = body;
-    ctx.fillRect(-1, -18, 2, 6);
-    ctx.fillRect(-3, -21, 6, 4);
-    if (t.active) {
-      ctx.strokeStyle = '#ffcf3f';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(-13, -24, 26, 36);
+
+    const custom = t.img ? getImage(t.img) : null;
+    if (custom) {
+      // кастомная фишка-картинка (PNG, прозрачность сохраняется)
+      ctx.imageSmoothingEnabled = false;
+      const sz = 34;
+      ctx.drawImage(custom, -sz / 2, -sz / 2 - 4, sz, sz);
+      if (t.active) {
+        ctx.strokeStyle = '#ffcf3f';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(-sz / 2 - 3, -sz / 2 - 7, sz + 6, sz + 6);
+      }
+    } else {
+      // стандартный робот
+      const body = t.alive ? t.color : '#5a628f';
+      ctx.fillStyle = body;
+      ctx.fillRect(-9, -12, 18, 22);
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.fillRect(-9, -12, 18, 5);
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.fillRect(-9, 5, 18, 5);
+      ctx.fillStyle = '#0a0c18';
+      ctx.fillRect(-6, -6, 4, 6);
+      ctx.fillRect(2, -6, 4, 6);
+      ctx.fillStyle = '#e9ecff';
+      ctx.fillRect(-6, -6, 2, 2);
+      ctx.fillRect(2, -6, 2, 2);
+      ctx.fillStyle = body;
+      ctx.fillRect(-1, -18, 2, 6);
+      ctx.fillRect(-3, -21, 6, 4);
+      if (t.active) {
+        ctx.strokeStyle = '#ffcf3f';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(-13, -24, 26, 36);
+      }
     }
     ctx.restore();
   }

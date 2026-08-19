@@ -25,18 +25,22 @@ export default function NesBox({
   romData,
   initialState,
   enabled,
+  paused,
   onApi,
   registerCanvas,
 }: {
   romData: ArrayBuffer;
   initialState?: unknown;
   enabled: boolean;
+  paused?: boolean;
   onApi?: (api: NesApi) => void;
   registerCanvas?: (c: HTMLCanvasElement | null) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
+  const pausedRef = useRef(paused ?? false);
+  pausedRef.current = paused ?? false;
   const stateRef = useRef<unknown>(initialState);
   stateRef.current = initialState;
   const prefsRef = useRef<EmuPrefs>(loadEmuPrefs());
@@ -130,7 +134,7 @@ export default function NesBox({
     const down = (e: KeyboardEvent) => {
       const p = prefsRef.current;
       const action = (Object.keys(p.keys) as PadAction[]).find((a) => p.keys[a] === e.code);
-      if (action && enabledRef.current) {
+      if (action && enabledRef.current && !pausedRef.current) {
         e.preventDefault();
         press(action, true);
       }
@@ -203,11 +207,13 @@ export default function NesBox({
     const loop = (t: number) => {
       acc += Math.min(120, t - last);
       last = t;
-      if (romOk) {
+      if (romOk && !pausedRef.current) {
         let n = 0;
         while (acc >= FRAME && n < 3) { nes.frame(); acc -= FRAME; n++; }
+      } else {
+        acc = 0; // на паузе не копим кадры
       }
-      pollGamepads();
+      if (!pausedRef.current) pollGamepads();
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -227,6 +233,11 @@ export default function NesBox({
   return (
     <div className="relative w-full aspect-[256/240] bg-black border-[3px] border-edge shadow-[0_0_40px_rgba(46,230,168,0.12)]">
       <canvas ref={canvasRef} width={256} height={240} className="w-full h-full block" style={{ imageRendering: 'pixelated' }} />
+      {paused && enabled && (
+        <div className="absolute inset-0 z-20 bg-[rgba(4,6,14,0.6)] flex flex-col items-center justify-center gap-2">
+          <span className="font-pixel text-[10px] text-gold blink-hard">ПАУЗА</span>
+        </div>
+      )}
       {!enabled && (
         <div className="absolute inset-0 bg-[rgba(4,6,14,0.55)] flex flex-col items-center justify-center gap-2">
           <span className="font-pixel text-[9px] text-gold blink-hard">НАБЛЮДЕНИЕ</span>

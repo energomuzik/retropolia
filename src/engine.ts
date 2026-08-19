@@ -9,6 +9,9 @@ export type Action =
   | { t: 'roll'; id: string; holdMs: number }
   | { t: 'arrived'; id: string }
   | { t: 'chooseMode'; id: string; mode: 'time' | 'tries' }
+  | { t: 'startTask'; id: string }
+  | { t: 'togglePause'; id: string }
+  | { t: 'token'; id: string; tokenImg: string | null }
   | { t: 'reloadSave'; id: string }
   | { t: 'declareDone'; id: string }
   | { t: 'approve'; id: string }
@@ -43,7 +46,8 @@ export const cellTaskOf = (s: GameSession, map: GameMap, idx: number): TaskDef |
   s.sessionTasks[idx] ?? map.cells[idx]?.task ?? null;
 
 export function spentInfo(ch: NonNullable<GameSession['challenge']>, nowMs: number) {
-  const ms = ch.accMs + (ch.mode === 'time' && ch.startedAt ? nowMs - ch.startedAt : 0);
+  const running = ch.mode === 'time' && ch.started && !ch.paused && ch.startedAt > 0;
+  const ms = ch.accMs + (running ? nowMs - ch.startedAt : 0);
   const min = Math.floor(ms / 60000);
   const units = ch.mode === 'tries' ? ch.loads : ch.mode === 'time' ? min : 0;
   return { ms, min, loads: ch.loads, units, canSkip: units >= SKIP_COST };
@@ -149,7 +153,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   const challengeSuccess = () => {
     const ch = s.challenge!;
     const nowMs = Date.now();
-    const totalMs = ch.accMs + (ch.mode === 'time' ? nowMs - ch.startedAt : 0);
+    const running = ch.mode === 'time' && ch.started && !ch.paused && ch.startedAt > 0;
+    const totalMs = ch.accMs + (running ? nowMs - ch.startedAt : 0);
     const spentSec = ch.mode === 'time' ? Math.ceil(totalMs / 60000) * 60 : 0;
     const spentTries = ch.mode === 'tries' ? ch.loads : 0;
     finishChallenge(true, spentSec, spentTries);
@@ -185,7 +190,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       return;
     }
     s.challenge = {
-      cellIdx: p.pos, mode: null, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
+      cellIdx: p.pos, mode: null, started: false, paused: false, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
       status: 'choose', approvals: [], violations: [],
     };
     const owner = s.captured[p.pos] ? s.players.find((x) => x.id === s.captured[p.pos]) : null;
@@ -338,19 +343,59 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const p = current();
       if (!ch || ch.status !== 'choose' || p.id !== a.id) break;
       ch.mode = a.mode;
-      ch.startedAt = Date.now();
-      ch.loads = 1;
-      ch.status = 'playing';
+      ch.status = 'ready'; // выбран ресурс, но запуск — по команде игрока
       log(`${p.name}: ${a.mode === 'time' ? 'играет на ВРЕМЯ ⏱' : 'играет на ПОПЫТКИ 🎯'}`);
+      break;
+    }
+    case 'startTask': {
+      const ch = s.challenge;
+      const p = current();
+      if (!ch || ch.status !== 'ready' || ch.started || p.id !== a.id) break;
+      ch.started = true;
+      ch.paused = false;
+      ch.status = 'playing';
+      if (ch.mode === 'tries') {
+        ch.loads = 1;
+        ch.reloadId++;
+      } else {
+        ch.startedAt = Date.now();
+        ch.accMs = 0;
+      }
+      log(`▶ ${p.name} запускает задание${ch.mode === 'tries' ? ' — попытка №1' : ' — таймер пошёл'}`);
+      break;
+    }
+    case 'togglePause': {
+      const ch = s.challenge;
+      const p = current();
+      if (!ch || ch.status !== 'playing' || !ch.started || p.id !== a.id) break;
+      if (ch.paused) {
+        ch.paused = false;
+        if (ch.mode === 'time') ch.startedAt = Date.now();
+        log(`▶ ${p.name} продолжает задание`);
+      } else {
+        if (ch.mode === 'time' && ch.startedAt > 0) ch.accMs += Date.now() - ch.startedAt;
+        ch.paused = true;
+        log(`⏸ ${p.name}: пауза${ch.mode === 'time' ? ' — таймер остановлен' : ''}`);
+      }
+      break;
+    }
+    case 'token': {
+      const p = s.players.find((x) => x.id === a.id);
+      if (p && (s.phase === 'lobby' || s.phase === 'rollOff')) p.tokenImg = a.tokenImg;
       break;
     }
     case 'reloadSave': {
       const ch = s.challenge;
       const p = current();
       if (!ch || ch.status !== 'playing' || p.id !== a.id) break;
-      ch.loads++;
+      if (ch.mode === 'tries') ch.loads++;
       ch.reloadId++;
-      if (ch.mode === 'tries') log(`${p.name}: перезагрузка — попытка №${ch.loads}`);
+      if (ch.paused) {
+        ch.paused = false;
+        if (ch.mode === 'time') ch.startedAt = Date.now();
+      }
+      if (ch.mode === 'tries') log(`↻ ${p.name}: перезапуск задания — попытка №${ch.loads}`);
+      else log(`↻ ${p.name}: перезапуск задания`);
       break;
     }
     case 'declareDone': {

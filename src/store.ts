@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { GameMap, GameOptions, GameSession, RomDef, SaveDef, TileDef } from './types';
+import type { GameMap, GameOptions, GameSession, RomDef, SaveDef, TileDef, TokenDef } from './types';
 import type { NetInfo, Room } from './net';
 import { idbAll, idbGet, idbPut } from './db';
 import { builtinTiles } from './assets';
@@ -7,7 +7,7 @@ import { setVolume } from './sound';
 
 export type Screen =
   | 'menu' | 'create' | 'join' | 'load' | 'lobby' | 'game'
-  | 'mapEditor' | 'tileEditor' | 'taskEditor' | 'emulator' | 'options';
+  | 'mapEditor' | 'tileEditor' | 'taskEditor' | 'tokenEditor' | 'emulator' | 'options';
 
 interface Toast { id: number; text: string; kind: 'info' | 'ok' | 'err'; }
 
@@ -22,6 +22,7 @@ interface AppState {
   maps: GameMap[];
   roms: RomDef[];
   saves: SaveDef[];
+  tokens: TokenDef[];
   refresh: () => Promise<void>;
 
   toasts: Toast[];
@@ -62,12 +63,14 @@ export const useApp = create<AppState>()((set, get) => ({
   maps: [],
   roms: [],
   saves: [],
+  tokens: [],
   refresh: async () => {
-    const [tiles, maps, roms, saves] = await Promise.all([
+    const [tiles, maps, roms, saves, tokens] = await Promise.all([
       idbAll<TileDef>('tiles'),
       idbAll<GameMap>('maps'),
       idbAll<RomDef>('roms'),
       idbAll<SaveDef>('saves'),
+      idbAll<TokenDef>('tokens'),
     ]);
     let tileList = tiles.map((e) => e.value);
     if (tileList.length === 0) {
@@ -81,6 +84,7 @@ export const useApp = create<AppState>()((set, get) => ({
       maps: sortMaps,
       roms: roms.map((e) => e.value).sort((a, b) => a.name.localeCompare(b.name)),
       saves: saves.map((e) => e.value).sort((a, b) => a.slot - b.slot),
+      tokens: tokens.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
     });
   },
 

@@ -6,7 +6,7 @@ import { cellTaskOf, fmtClock, spentInfo } from '../engine';
 import { effectLabel } from './TaskEditor';
 import { cardArt, cartridgeArt } from '../assets';
 import NesBox, { type NesApi } from '../NesBox';
-import SegaBox from '../SegaBox';
+import SegaBox, { type SegaApi } from '../SegaBox';
 import { saveSessionSnapshot } from './Lobby';
 import { Field, GhostBtn, Ic, Modal, PxBtn } from '../ui';
 import { PLAYER_COLORS, SKIP_COST } from '../types';
@@ -20,9 +20,11 @@ export default function GameScreen() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const emuCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const nesApiRef = useRef<NesApi | null>(null);
+  const segaApiRef = useRef<SegaApi | null>(null);
 
   const [viewMode, setViewMode] = useState<'follow' | 'world'>('follow');
   const [peekMap, setPeekMap] = useState(false);
+  const [worldZoom, setWorldZoom] = useState(1);
   const [shake, setShake] = useState<{ holding: boolean; a: number; b: number }>({ holding: false, a: 1, b: 1 });
   const [romBuf, setRomBuf] = useState<ArrayBuffer | null>(null);
   const [saveState, setSaveState] = useState<unknown>(null);
@@ -72,7 +74,7 @@ export default function GameScreen() {
   const reloadId = ch?.reloadId ?? 0;
   useEffect(() => {
     if (reloadId > 0) {
-      if (isSega) setEmuKey((k) => k + 1); // SEGA: перезапуск рома с начала
+      if (isSega) segaApiRef.current?.reload((saveState as string | null) ?? null);
       else nesApiRef.current?.reload(saveState ?? undefined);
       sfx.alarm();
     }
@@ -144,48 +146,61 @@ export default function GameScreen() {
         const ctx = cv.getContext('2d')!;
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-        // токены
+        // токены — медленное, «рукотворное» перемещение по ячейкам
         const act = sess.players[sess.turn % sess.players.length];
+        let anyoneMoving = false;
         const tokens = sess.players.map((p) => {
           const center = cellCenter(m, p.pos);
           let d = dispRef.current[p.id];
           if (!d) { d = { ...center }; dispRef.current[p.id] = d; }
           const hop = hopRef.current[p.id];
-          let target = center;
+          let lift = 0; // вертикальный «подскок» фишки при движении
           if (hop && hop.queue.length) {
-            if (t - hop.last > 185) {
-              hop.last = t;
-              const nextIdx = hop.queue.shift()!;
+            anyoneMoving = true;
+            const nextIdx = hop.queue[0];
+            const tgt = cellCenter(m, nextIdx);
+            const dx = tgt.x - d.x, dy = tgt.y - d.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist < 3) {
+              hop.queue.shift();
+              d.x = tgt.x; d.y = tgt.y;
               sfx.step();
               if (hop.queue.length === 0 && sess.moving && sess.moving.player === p.id && p.id === me && arrivedRef.current !== sess.moving.ts) {
                 arrivedRef.current = sess.moving.ts;
                 dispatch({ t: 'arrived', id: me });
               }
-              target = cellCenter(m, nextIdx);
-              d.x = target.x; d.y = target.y - 26;
-              target = cellCenter(m, nextIdx);
             } else {
-              target = { x: d.x, y: d.y };
+              d.x += dx * 0.085; // медленный плавный шаг
+              d.y += dy * 0.085;
+              lift = -Math.abs(Math.sin(t / 110)) * 7; // лёгкое подпрыгивание
             }
+          } else {
+            d.x += (center.x - d.x) * 0.14;
+            d.y += (center.y - d.y) * 0.14;
           }
-          d.x += (target.x - d.x) * 0.16;
-          d.y += (target.y - d.y) * 0.16;
-          return { x: d.x, y: d.y, color: PLAYER_COLORS[p.color], active: act?.id === p.id, alive: p.alive, label: p.name };
+          return {
+            x: d.x, y: d.y + lift, color: PLAYER_COLORS[p.color],
+            active: act?.id === p.id, alive: p.alive, label: p.name,
+            img: p.tokenImg ?? null,
+          };
         });
 
-        // камера
+        // камера: в режиме мира — общий план (с ручным зумом), иначе — слежение за фишкой
         let goal;
         if (viewMode === 'world' || peekMap) {
-          goal = fitView(m, w, h);
+          const fv = fitView(m, w, h);
+          goal = { x: fv.x, y: fv.y, zoom: fv.zoom * worldZoom };
         } else {
           const followP = act ? dispRef.current[act.id] : undefined;
-          const zx = Math.min(2.1, Math.max(0.7, Math.min(w, h) / (CELL * 7.2)));
+          const baseZx = Math.min(2.1, Math.max(0.7, Math.min(w, h) / (CELL * 7.2)));
+          const focus = anyoneMoving ? 1.5 : 1.0; // приближаемся, пока фишку передвигают
+          const zx = Math.min(2.6, baseZx * focus);
           goal = { x: followP?.x ?? m.cols * CELL / 2, y: followP?.y ?? m.rows * CELL / 2, zoom: zx };
         }
         const v = viewRef.current;
-        v.x += (goal.x - v.x) * 0.09;
-        v.y += (goal.y - v.y) * 0.09;
-        v.zoom += (goal.zoom - v.zoom) * 0.09;
+        v.x += (goal.x - v.x) * 0.07;
+        v.y += (goal.y - v.y) * 0.07;
+        v.zoom += (goal.zoom - v.zoom) * 0.07;
 
         const colorById: Record<string, string> = {};
         sess.players.forEach((p) => { colorById[p.id] = PLAYER_COLORS[p.color]; });
@@ -203,7 +218,7 @@ export default function GameScreen() {
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [viewMode, peekMap, me, options.showCellNumbers]);
+  }, [viewMode, peekMap, worldZoom, me, options.showCellNumbers]);
 
   const tileMapRef = useRef(new Map<string, never>());
   useEffect(() => {
@@ -291,7 +306,7 @@ export default function GameScreen() {
         </div>
         <div className="flex items-center gap-1.5 ml-auto">
           {myTurn && streaming && <span className="font-pixel text-[7px] text-coral blink-hard">LIVE</span>}
-          <GhostBtn small onClick={() => { setPeekMap(false); setViewMode((m) => (m === 'world' ? 'follow' : 'world')); }}>
+          <GhostBtn small onClick={() => { setPeekMap(false); setWorldZoom(1); setViewMode((m) => (m === 'world' ? 'follow' : 'world')); }}>
             {Ic.map(12)} {viewMode === 'world' ? 'К игроку' : 'Карта мира'}
           </GhostBtn>
           {room.isHost && (
@@ -305,7 +320,15 @@ export default function GameScreen() {
 
       {/* ---------- поле ---------- */}
       <div className="flex-1 relative min-h-0">
-        <canvas ref={canvasRef} className="w-full h-full block" />
+        <canvas
+          ref={canvasRef}
+          className="w-full h-full block"
+          onWheel={(e) => {
+            if (viewMode === 'world' || peekMap) {
+              setWorldZoom((z) => Math.min(4, Math.max(0.3, z * Math.exp(-e.deltaY * 0.0012))));
+            }
+          }}
+        />
 
         {/* чей ход */}
         {s.phase === 'playing' && active && (
@@ -505,13 +528,13 @@ export default function GameScreen() {
                           <span className="text-sky">{Ic.clock(22)}</span>
                           <div className="font-display uppercase text-paper group-hover:text-sky mt-2">Время</div>
                           <div className="font-pixel text-[10px] text-sky mt-1">{fmtClock(mePlayer?.secLeft ?? 0)}</div>
-                          <div className="text-[10px] text-dim mt-1.5">Таймер тикает с загрузки сохранения. Попытки не тратятся.</div>
+                          <div className="text-[10px] text-dim mt-1.5">Таймер стартует по кнопке «Запуск задания». Попытки не тратятся.</div>
                         </button>
                         <button onClick={() => { sfx.coin(); dispatch({ t: 'chooseMode', id: me, mode: 'tries' }); }} className="pixel-panel pixel-corners p-4 text-left hover:border-gold hover:-translate-y-0.5 transition-all cursor-pointer group">
                           <span className="text-gold">{Ic.target(22)}</span>
                           <div className="font-display uppercase text-paper group-hover:text-gold mt-2">Попытки</div>
                           <div className="font-pixel text-[10px] text-gold mt-1">{mePlayer?.triesLeft ?? 0} ПОП.</div>
-                          <div className="text-[10px] text-dim mt-1.5">Каждая загрузка сохранения = 1 попытка. Время замирает.</div>
+                          <div className="text-[10px] text-dim mt-1.5">Запуск = 1 попытка, каждый перезапуск — ещё одна. Время замирает.</div>
                         </button>
                       </div>
                       <div className="mt-3 flex justify-end">
@@ -556,13 +579,22 @@ export default function GameScreen() {
                       {myTurn ? (
                         romBuf ? (
                           isSega ? (
-                            <SegaBox key={emuKey} romData={romBuf} ext={segExt} resetKey={emuKey} />
+                            <SegaBox
+                              key={emuKey}
+                              romData={romBuf}
+                              ext={segExt}
+                              initialState={(saveState as string | null) ?? null}
+                              paused={ch.status === 'ready' || ch.status === 'voting' || ch.paused}
+                              resetKey={emuKey}
+                              onApi={(a) => { segaApiRef.current = a; }}
+                            />
                           ) : (
                             <NesBox
                               key={emuKey}
                               romData={romBuf}
                               initialState={saveState ?? undefined}
-                              enabled={ch.status === 'playing'}
+                              enabled={ch.status === 'playing' && !ch.paused}
+                              paused={ch.status === 'ready' || ch.status === 'voting' || ch.paused}
                               onApi={(a) => { nesApiRef.current = a; }}
                               registerCanvas={(c) => { emuCanvasRef.current = c; }}
                             />
@@ -598,10 +630,32 @@ export default function GameScreen() {
                     </div>
 
                     <div className="space-y-2">
-                      {myTurn && ch.status === 'playing' && (
+                      {myTurn && ch.status === 'ready' && (
                         <>
+                          <PxBtn big color="gold" className="w-full pulse-ring" onClick={() => { sfx.start(); dispatch({ t: 'startTask', id: me }); }}>
+                            {Ic.play(16)} Запуск задания
+                          </PxBtn>
+                          <p className="text-[10px] text-dim leading-tight">
+                            Эмулятор загружен и ждёт. {ch.mode === 'time' ? 'Таймер пойдёт' : 'Попытка спишется'} только после запуска — можно спокойно подготовиться.
+                          </p>
+                          <GhostBtn className="w-full" onClick={() => dispatch({ t: 'skip', id: me, instant: true, spentMs: 0, loads: 0 })}>
+                            {Ic.bolt(13)} Заплатить {SKIP_COST} и пропустить
+                          </GhostBtn>
+                        </>
+                      )}
+                      {myTurn && (ch.status === 'playing' || ch.status === 'voting') && (
+                        <>
+                          <GhostBtn className="w-full" onClick={() => dispatch({ t: 'reloadSave', id: me })}>
+                            {Ic.rotate(13)} Перезапуск задания
+                          </GhostBtn>
+                          <GhostBtn
+                            className="w-full"
+                            disabled={ch.status === 'voting'}
+                            onClick={() => dispatch({ t: 'togglePause', id: me })}
+                          >
+                            {ch.paused ? `${Ic.play(13)}` : `${Ic.pause(13)}`} {ch.paused ? 'Продолжить' : 'Пауза'}
+                          </GhostBtn>
                           <PxBtn color="teal" className="w-full" onClick={() => dispatch({ t: 'declareDone', id: me })}>{Ic.check(14)} Прошёл задание</PxBtn>
-                          <GhostBtn className="w-full" onClick={() => dispatch({ t: 'reloadSave', id: me })}>{Ic.rotate(13)} Перезагрузить сохранение</GhostBtn>
                           <GhostBtn
                             className="w-full"
                             disabled={!info?.canSkip}

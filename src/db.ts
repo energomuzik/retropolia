@@ -1,6 +1,6 @@
 const DB_NAME = 'retropolia-db';
 const DB_VERSION = 1;
-export const STORES = ['tiles', 'maps', 'roms', 'saves', 'blobs', 'sessions'] as const;
+export const STORES = ['tiles', 'maps', 'roms', 'saves', 'blobs', 'sessions', 'tokens'] as const;
 export type StoreName = (typeof STORES)[number];
 
 let dbPromise: Promise<IDBDatabase> | null = null;

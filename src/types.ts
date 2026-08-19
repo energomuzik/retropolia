@@ -115,16 +115,27 @@ export interface PlayerState {
   alive: boolean;
   skipTurns: number;
   extraTurn: boolean;
+  tokenImg?: string | null; // dataUrl своей фишки (PNG); null = стандартный робот
+}
+
+export interface TokenDef {
+  id: string;
+  name: string;
+  dataUrl: string; // PNG с поддержкой прозрачности
+  builtin?: boolean;
+  createdAt: number;
 }
 
 export interface ChallengeState {
   cellIdx: number;
   mode: 'time' | 'tries' | null;
+  started: boolean; // нажата ли «Запуск задания»
+  paused: boolean;
   startedAt: number;
   accMs: number;
   loads: number;
   reloadId: number;
-  status: 'choose' | 'playing' | 'voting';
+  status: 'choose' | 'ready' | 'playing' | 'voting';
   approvals: string[];
   violations: string[];
 }
