@@ -74,8 +74,8 @@ export default function EmulatorLauncher() {
 
   const createSave = async () => {
     if (!rom) return;
-    const st = isNes ? apiRef.current?.snapshot() : segaApiRef.current?.snapshot();
-    if (!st) { toast('Эмулятор ещё не готов — подождите запуска и попробуйте снова', 'err'); return; }
+    const st = isNes ? apiRef.current?.snapshot() ?? null : await (segaApiRef.current?.snapshot() ?? Promise.resolve(null));
+    if (!st) { toast('Эмулятор ещё не готов — дайте игре запуститься и попробуйте снова', 'err'); return; }
     const slot = romSaves.length ? Math.max(...romSaves.map((s) => s.slot)) + 1 : 1;
     const sv: SaveDef = { id: uid('save'), romId: rom.id, slot, name: `Уровень ~${slot}`, state: st, createdAt: Date.now() };
     await idbPut('saves', sv.id, sv);

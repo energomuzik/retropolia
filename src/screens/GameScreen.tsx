@@ -26,6 +26,9 @@ export default function GameScreen() {
   const [viewMode, setViewMode] = useState<'follow' | 'world'>('follow');
   const [peekMap, setPeekMap] = useState(false);
   const [worldZoom, setWorldZoom] = useState(1);
+  const worldPanRef = useRef({ x: 0, y: 0 });
+  const dragRef = useRef<{ sx: number; sy: number; px: number; py: number } | null>(null);
+  const mysteryRef = useRef<Set<number> | undefined>(undefined);
   const [controlsOpen, setControlsOpen] = useState(false);
   const [isFs, setIsFs] = useState(false);
   const emuWrapRef = useRef<HTMLDivElement>(null);
@@ -235,7 +238,7 @@ export default function GameScreen() {
         let goal;
         if (viewMode === 'world' || peekMap) {
           const fv = fitView(m, w, h);
-          goal = { x: fv.x, y: fv.y, zoom: fv.zoom * worldZoom };
+          goal = { x: fv.x + worldPanRef.current.x, y: fv.y + worldPanRef.current.y, zoom: fv.zoom * worldZoom };
         } else {
           const followP = act ? dispRef.current[act.id] : undefined;
           const baseZx = Math.min(2.1, Math.max(0.7, Math.min(w, h) / (CELL * 7.2)));
@@ -258,6 +261,7 @@ export default function GameScreen() {
           currentCell: sess.phase === 'playing' && act ? act.pos : null,
           showNumbers: options.showCellNumbers,
           tokens, time: t, hoverCell: null,
+          mystery: mysteryRef.current,
         });
       }
       raf = requestAnimationFrame(loop);
@@ -283,7 +287,24 @@ export default function GameScreen() {
   }
 
   const info = ch ? spentInfo(ch, Date.now()) : null;
+  // остаток выбранного ресурса прямо сейчас
+  const remainingNow = ch?.mode === 'time' ? (mePlayer?.secLeft ?? 0) : (mePlayer?.triesLeft ?? 0);
+  // пропуск: обычно после 5 потраченных; при «низком старте» — только на нуле
+  const naturalCanSkip = !!ch && !!info && (ch.lowStart ? remainingNow <= 0 : info.units >= SKIP_COST);
+  const instantSkipAllowed = !!ch && (!ch.lowStart || remainingNow <= 0);
   const owner = ch ? s.captured[ch.cellIdx] : undefined;
+
+  // «закрытые» ячейки: не посещены и не захвачены — скрываем тип и картинку (опция)
+  const mystery = useMemo(() => {
+    if (!options.hideUnrevealed || !s || !map) return undefined;
+    const set = new Set<number>();
+    map.cells.forEach((_, i) => {
+      if (!s.revealed.includes(i) && !s.captured[i]) set.add(i);
+    });
+    return set;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options.hideUnrevealed, s?.revealed, s?.captured, map?.id]);
+  useEffect(() => { mysteryRef.current = mystery; }, [mystery]);
   const ownerName = owner ? s.players.find((p) => p.id === owner)?.name : undefined;
   const others = s.players.filter((p) => p.alive && p.id !== active?.id);
   const aliveCount = s.players.filter((p) => p.alive).length;
@@ -352,7 +373,7 @@ export default function GameScreen() {
         </div>
         <div className="flex items-center gap-1.5 ml-auto">
           {myTurn && streaming && <span className="font-pixel text-[7px] text-coral blink-hard">LIVE</span>}
-          <GhostBtn small onClick={() => { setPeekMap(false); setWorldZoom(1); setViewMode((m) => (m === 'world' ? 'follow' : 'world')); }}>
+          <GhostBtn small onClick={() => { setPeekMap(false); setWorldZoom(1); worldPanRef.current = { x: 0, y: 0 }; setViewMode((m) => (m === 'world' ? 'follow' : 'world')); }}>
             {Ic.map(12)} {viewMode === 'world' ? 'К игроку' : 'Карта мира'}
           </GhostBtn>
           {room.isHost && (
@@ -369,11 +390,26 @@ export default function GameScreen() {
         <canvas
           ref={canvasRef}
           className="w-full h-full block"
+          style={{ cursor: viewMode === 'world' || peekMap ? (dragRef.current ? 'grabbing' : 'grab') : 'default' }}
           onWheel={(e) => {
             if (viewMode === 'world' || peekMap) {
               setWorldZoom((z) => Math.min(4, Math.max(0.3, z * Math.exp(-e.deltaY * 0.0012))));
             }
           }}
+          onPointerDown={(e) => {
+            if (viewMode !== 'world' && !peekMap) return;
+            (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
+            dragRef.current = { sx: e.clientX, sy: e.clientY, px: worldPanRef.current.x, py: worldPanRef.current.y };
+          }}
+          onPointerMove={(e) => {
+            if (!dragRef.current) return;
+            const z = viewRef.current.zoom || 1;
+            worldPanRef.current = {
+              x: dragRef.current.px - (e.clientX - dragRef.current.sx) / z,
+              y: dragRef.current.py - (e.clientY - dragRef.current.sy) / z,
+            };
+          }}
+          onPointerUp={() => { dragRef.current = null; }}
         />
 
         {/* чей ход */}
@@ -571,22 +607,33 @@ export default function GameScreen() {
                     <div>
                       <div className="font-display uppercase text-sm text-paper mb-3">Чем платите за задание?</div>
                       <div className="grid grid-cols-2 gap-3">
-                        <button onClick={() => { sfx.coin(); dispatch({ t: 'chooseMode', id: me, mode: 'time' }); }} className="pixel-panel pixel-corners p-4 text-left hover:border-sky hover:-translate-y-0.5 transition-all cursor-pointer group">
+                        <button
+                          onClick={() => { sfx.coin(); dispatch({ t: 'chooseMode', id: me, mode: 'time' }); }}
+                          disabled={(mePlayer?.secLeft ?? 0) <= 0}
+                          className="pixel-panel pixel-corners p-4 text-left hover:border-sky hover:-translate-y-0.5 transition-all cursor-pointer group disabled:opacity-35 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:border-edge"
+                        >
                           <span className="text-sky">{Ic.clock(22)}</span>
                           <div className="font-display uppercase text-paper group-hover:text-sky mt-2">Время</div>
                           <div className="font-pixel text-[10px] text-sky mt-1">{fmtClock(mePlayer?.secLeft ?? 0)}</div>
-                          <div className="text-[10px] text-dim mt-1.5">Таймер стартует по кнопке «Запуск задания». Попытки не тратятся.</div>
+                          <div className="text-[10px] text-dim mt-1.5">{(mePlayer?.secLeft ?? 0) <= 0 ? 'Время исчерпано — ресурс недоступен' : 'Таймер стартует по кнопке «Запуск задания».'}</div>
                         </button>
-                        <button onClick={() => { sfx.coin(); dispatch({ t: 'chooseMode', id: me, mode: 'tries' }); }} className="pixel-panel pixel-corners p-4 text-left hover:border-gold hover:-translate-y-0.5 transition-all cursor-pointer group">
+                        <button
+                          onClick={() => { sfx.coin(); dispatch({ t: 'chooseMode', id: me, mode: 'tries' }); }}
+                          disabled={(mePlayer?.triesLeft ?? 0) <= 0}
+                          className="pixel-panel pixel-corners p-4 text-left hover:border-gold hover:-translate-y-0.5 transition-all cursor-pointer group disabled:opacity-35 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:border-edge"
+                        >
                           <span className="text-gold">{Ic.target(22)}</span>
                           <div className="font-display uppercase text-paper group-hover:text-gold mt-2">Попытки</div>
                           <div className="font-pixel text-[10px] text-gold mt-1">{mePlayer?.triesLeft ?? 0} ПОП.</div>
-                          <div className="text-[10px] text-dim mt-1.5">Запуск = 1 попытка, каждый перезапуск — ещё одна. Время замирает.</div>
+                          <div className="text-[10px] text-dim mt-1.5">{(mePlayer?.triesLeft ?? 0) <= 0 ? 'Попытки исчерпаны — ресурс недоступен' : 'Запуск = 1 попытка, каждый перезапуск — ещё одна.'}</div>
                         </button>
                       </div>
-                      <div className="mt-3 flex justify-end">
-                        <GhostBtn onClick={() => dispatch({ t: 'skip', id: me, instant: true, spentMs: 0, loads: 0 })}>
-                          {Ic.bolt(12)} Сразу пропустить (−{Math.min(SKIP_COST, 5)} ресурс.)
+                      <div className="mt-3 flex justify-end gap-2 flex-wrap">
+                        <GhostBtn onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'time', spentMs: 0, loads: 0 })} disabled={(mePlayer?.secLeft ?? 0) < 60}>
+                          {Ic.bolt(12)} Сразу пропустить · 5 мин
+                        </GhostBtn>
+                        <GhostBtn onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'tries', spentMs: 0, loads: 0 })} disabled={(mePlayer?.triesLeft ?? 0) <= 0}>
+                          {Ic.bolt(12)} Сразу пропустить · 5 поп.
                         </GhostBtn>
                       </div>
                     </div>
@@ -601,8 +648,8 @@ export default function GameScreen() {
               {ch.status !== 'choose' && (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className={`hud-chip pixel-corners px-3 py-1.5 font-display text-[11px] uppercase ${ch.mode === 'time' ? 'text-sky' : 'text-gold'}`}>
-                      {ch.mode === 'time' ? `${Ic.clock(13)} Режим времени` : `${Ic.target(13)} Режим попыток`}
+                    <span className={`hud-chip pixel-corners px-3 py-1.5 font-display text-[11px] uppercase flex items-center gap-1.5 ${ch.mode === 'time' ? 'text-sky' : 'text-gold'}`}>
+                      {ch.mode === 'time' ? Ic.clock(13) : Ic.target(13)} {ch.mode === 'time' ? 'Режим времени' : 'Режим попыток'}
                     </span>
                     {info && ch.mode === 'time' && (
                       <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-sky">
@@ -725,14 +772,19 @@ export default function GameScreen() {
                           <PxBtn color="teal" className="w-full" onClick={() => dispatch({ t: 'declareDone', id: me })}>{Ic.check(14)} Прошёл задание</PxBtn>
                           <GhostBtn
                             className="w-full"
-                            disabled={!info?.canSkip}
-                            title={info?.canSkip ? undefined : 'Сначала потратьте 5 ресурсов — или платите сразу'}
+                            disabled={!naturalCanSkip}
+                            title={!naturalCanSkip ? (ch.lowStart ? 'Ресурса было меньше 5 — пропуск станет доступен, когда он закончится' : 'Сначала потратьте 5 ресурсов — или платите сразу') : undefined}
                             onClick={() => info && dispatch({ t: 'skip', id: me, instant: false, spentMs: info.ms, loads: info.loads })}
                           >
                             {Ic.bolt(13)} Пропустить ({ch.mode === 'time' ? `${info?.min ?? 0} мин` : `${info?.loads ?? 0} поп.`})
                           </GhostBtn>
-                          <GhostBtn className="w-full" onClick={() => dispatch({ t: 'skip', id: me, instant: true, spentMs: 0, loads: 0 })}>
-                            {Ic.bolt(13)} Заплатить {SKIP_COST} и пропустить
+                          <GhostBtn
+                            className="w-full"
+                            disabled={!instantSkipAllowed}
+                            title={!instantSkipAllowed ? 'Ресурса было меньше 5 — пропуск станет доступен, когда он закончится' : undefined}
+                            onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: ch.mode === 'time' ? 'time' : 'tries', spentMs: 0, loads: 0 })}
+                          >
+                            {Ic.bolt(13)} Заплатить {SKIP_COST} {ch.mode === 'time' ? 'мин' : 'поп.'} и пропустить
                           </GhostBtn>
                         </>
                       )}

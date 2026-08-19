@@ -24,20 +24,27 @@ interface PaintState {
   h: number;
 }
 
+export const STD_FOLDER = 'Стандарт';
+
 export default function TileEditor() {
   const { tiles, setScreen, refresh, toast } = useApp();
   const fileRef = useRef<HTMLInputElement>(null);
   const splitRef = useRef<HTMLInputElement>(null);
-  const [draft, setDraft] = useState<{ dataUrl: string; name: string; gw: number; gh: number } | null>(null);
+  const [draft, setDraft] = useState<{ dataUrl: string; name: string; gw: number; gh: number; folder: string } | null>(null);
   const [split, setSplit] = useState<SplitState | null>(null);
   const [paint, setPaint] = useState<PaintState | null>(null);
+  const [folder, setFolder] = useState<string>(STD_FOLDER);
+
+  const folderOf = (t: TileDef) => t.folder?.trim() || STD_FOLDER;
+  const folders = Array.from(new Set([STD_FOLDER, ...tiles.map(folderOf)]));
+  const inFolder = tiles.filter((t) => folderOf(t) === folder);
 
   const onFiles = async (files: FileList | null) => {
     if (!files?.length) return;
     const f = files[0];
     if (!f.type.startsWith('image/')) { toast('Нужен файл изображения', 'err'); return; }
     const dataUrl = await fileToDataUrl(f);
-    setDraft({ dataUrl, name: f.name.replace(/\.[^.]+$/, '').slice(0, 20), gw: 1, gh: 1 });
+    setDraft({ dataUrl, name: f.name.replace(/\.[^.]+$/, '').slice(0, 20), gw: 1, gh: 1, folder });
   };
 
   const onSplitFile = async (files: FileList | null) => {
@@ -61,13 +68,13 @@ export default function TileEditor() {
     if (!draft) return;
     const t: TileDef = {
       id: uid('tile'), name: draft.name || 'ТАЙЛ', gw: draft.gw, gh: draft.gh,
-      dataUrl: draft.dataUrl, createdAt: Date.now(),
+      dataUrl: draft.dataUrl, folder: draft.folder === STD_FOLDER ? undefined : draft.folder, createdAt: Date.now(),
     };
     await idbPut('tiles', t.id, t);
     await refresh();
     setDraft(null);
     sfx.coin();
-    toast('Тайл добавлен в библиотеку', 'ok');
+    toast(`Тайл добавлен в папку «${draft.folder}»`, 'ok');
   };
 
   const cutPieces = async () => {
@@ -91,6 +98,7 @@ export default function TileEditor() {
           name: `${name || 'НАБОР'}-${n + 1}`,
           gw, gh,
           dataUrl: cv.toDataURL('image/png'),
+          folder: name || 'НАБОР',
           createdAt: now + n,
         };
         await idbPut('tiles', t.id, t);
@@ -99,8 +107,9 @@ export default function TileEditor() {
     }
     await refresh();
     setSplit(null);
+    setFolder(name || 'НАБОР');
     sfx.success();
-    toast(`Готово: ${n} тайлов добавлено в библиотеку`, 'ok');
+    toast(`Готово: ${n} тайлов в папке «${name || 'НАБОР'}»`, 'ok');
   };
 
   const openPaint = (tile: TileDef) => {

@@ -71,6 +71,7 @@ export interface TileDef {
   gh: number;
   dataUrl: string;
   builtin?: boolean;
+  folder?: string; // папка-набор; пустое = «Стандарт»
   createdAt: number;
 }
 
@@ -138,6 +139,7 @@ export interface ChallengeState {
   status: 'choose' | 'ready' | 'playing' | 'voting';
   approvals: string[];
   violations: string[];
+  lowStart: boolean; // при выборе ресурса его было меньше 5 — пропуск разрешён только на нуле
 }
 
 export interface GameSession {
@@ -156,6 +158,7 @@ export interface GameSession {
   pendingCard: { card: CardDef; player: string; done: boolean } | null;
   captured: Record<number, string>;
   sessionTasks: Record<number, TaskDef>;
+  revealed: number[]; // индексы ячеек, на которые хоть раз ступали (для режима «скрытые ячейки»)
   winner: string | null;
   log: string[];
   startedAt: number;
@@ -170,6 +173,7 @@ export interface GameOptions {
   streamFps: number; // кадры в секунду трансляции экрана эмулятора
   emuSound: boolean; // звук эмуляторов вкл/выкл
   emuVolume: number; // 0..1 — громкость звука эмуляторов
+  hideUnrevealed: boolean; // скрывать непосещённые ячейки (иконки бонусов/ловушек и картинки заданий)
 }
 
 export interface NetMsg {

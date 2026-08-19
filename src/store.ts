@@ -54,6 +54,7 @@ export const useApp = create<AppState>()((set, get) => ({
     streamFps: 10,
     emuSound: true,
     emuVolume: 1,
+    hideUnrevealed: false,
   },
   setOptions: (p) => {
     const options = { ...get().options, ...p };
@@ -149,6 +150,8 @@ export function useBlobImage(id?: string): string | null {
   useEffect(() => {
     let on = true;
     if (!id) { setUrl(null); return; }
+    // картинка может быть сохранена как сам data-URL, а не ключ в blobs
+    if (id.startsWith('data:')) { setUrl(id); return; }
     idbGet<string>('blobs', id).then((v) => { if (on) setUrl(v ?? null); }).catch(() => { if (on) setUrl(null); });
     return () => { on = false; };
   }, [id]);

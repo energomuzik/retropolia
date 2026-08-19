@@ -4,7 +4,7 @@ import { useApp } from './store';
 const EJS_DATA = 'https://cdn.emulatorjs.org/stable/data/';
 
 export interface SegaApi {
-  snapshot: () => string | null; // base64-состояние ядра
+  snapshot: () => Promise<string | null>; // base64-состояние ядра
   reload: (state?: string | null) => void;
   reset: () => void;
 }
@@ -17,12 +17,29 @@ function coreFor(ext: string): string {
 
 interface EJSGame {
   gameManager?: {
-    getState?: () => string | Uint8Array;
+    getState?: () => string | Uint8Array | Promise<string | Uint8Array>;
     loadState?: (s: string | Uint8Array) => void;
     restart?: () => void;
   };
+  getState?: () => string | Uint8Array | Promise<string | Uint8Array>;
+  loadState?: (s: string | Uint8Array) => void;
   destroy?: () => void;
   exit?: () => void;
+}
+
+// приводим состояние ядра к base64-строке
+async function toBase64(s: string | Uint8Array | undefined | null): Promise<string | null> {
+  if (s == null) return null;
+  if (typeof s === 'string') return s;
+  if (s instanceof Uint8Array) {
+    let bin = '';
+    const CH = 0x8000;
+    for (let i = 0; i < s.length; i += CH) {
+      bin += String.fromCharCode(...s.subarray(i, i + CH));
+    }
+    return btoa(bin);
+  }
+  return null;
 }
 
 const getEjs = (): EJSGame | undefined =>
@@ -106,21 +123,23 @@ export default function SegaBox({
     };
 
     const api: SegaApi = {
-      snapshot: () => {
+      snapshot: async () => {
         try {
-          const gm = getEjs()?.gameManager;
-          const s = gm?.getState?.();
-          if (s == null) return null;
-          return typeof s === 'string' ? s : null;
+          const emu = getEjs();
+          const gm = emu?.gameManager;
+          const raw = gm?.getState?.() ?? emu?.getState?.();
+          const s = raw && typeof (raw as Promise<unknown>).then === 'function' ? await (raw as Promise<string | Uint8Array>) : (raw as string | Uint8Array);
+          return await toBase64(s ?? null);
         } catch {
           return null;
         }
       },
       reload: (st) => {
         try {
-          const gm = getEjs()?.gameManager;
+          const emu = getEjs();
+          const gm = emu?.gameManager;
           const target = st ?? stateRef.current;
-          if (target) gm?.loadState?.(target);
+          if (target) (gm?.loadState ?? emu?.loadState)?.call(gm ?? emu, target);
           else gm?.restart?.();
         } catch { /* noop */ }
       },
@@ -130,30 +149,40 @@ export default function SegaBox({
     };
     onApi?.(api);
 
-    if (!document.querySelector('script[data-ejs-loader]')) {
-      const script = document.createElement('script');
-      script.src = `${EJS_DATA}loader.js`;
-      script.async = true;
-      script.dataset.ejsLoader = '1';
-      script.onerror = () => setStatus('error');
-      document.body.appendChild(script);
-    }
+    // каждый запуск — заново исполняем лоадер (иначе второй ром не поднимется,
+    // а первый продолжит играть в фоне)
+    document.querySelectorAll('script[data-ejs-loader]').forEach((n) => n.remove());
+    const script = document.createElement('script');
+    script.src = `${EJS_DATA}loader.js`;
+    script.async = true;
+    script.dataset.ejsLoader = '1';
+    script.onerror = () => setStatus('error');
+    document.body.appendChild(script);
 
     return () => {
       const w = window as unknown as Record<string, unknown>;
       try {
-        const emu = getEjs();
-        // останавливаем ядро и звук
-        (emu as { gameManager?: { exit?: () => void; pause?: () => void } } | null)?.gameManager?.pause?.();
-        (emu as { gameManager?: { exit?: () => void } } | null)?.gameManager?.exit?.();
-        // официальная функция уничтожения EmulatorJS (закрывает аудио-контексты)
-        (w.EJS_terminate as (() => void) | undefined)?.();
+        const emu = getEjs() as (EJSGame & {
+          stop?: () => void;
+          gameManager?: EJSGame['gameManager'] & { exit?: () => void; pause?: () => void; stop?: () => void };
+        }) | undefined;
+        // глушим звук и кадры всеми доступными способами
+        try { emu?.gameManager?.pause?.(); } catch { /* noop */ }
+        try { emu?.gameManager?.stop?.(); } catch { /* noop */ }
+        try { emu?.stop?.(); } catch { /* noop */ }
+        try { emu?.gameManager?.exit?.(); } catch { /* noop */ }
+        try { emu?.exit?.(); } catch { /* noop */ }
+        try { emu?.destroy?.(); } catch { /* noop */ }
+        try { (w.EJS_terminate as (() => void) | undefined)?.(); } catch { /* noop */ }
       } catch { /* noop */ }
       try {
         w.EJS_emulator = null;
         w.EJS_gameUrl = '';
+        w.EJS_core = undefined;
         w.EJS_ready = undefined;
+        w.EJS_terminate = undefined;
       } catch { /* noop */ }
+      document.querySelectorAll('script[data-ejs-loader]').forEach((n) => n.remove());
       host.innerHTML = '';
       URL.revokeObjectURL(url);
     };

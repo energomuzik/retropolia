@@ -37,6 +37,7 @@ export interface BoardDrawOpts {
   tokens: TokenDraw[];
   time: number;
   hoverCell: number | null;
+  mystery?: Set<number>; // ячейки, которые ещё не «открыты» — рисуем как «?»
 }
 
 function px(ctx: CanvasRenderingContext2D, x: number, y: number, s: number, pattern: string[], color: string) {
@@ -137,6 +138,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const { x: cx, y: cy } = cellCenter(map, i);
     const owner = o.captured[i];
     const isCur = o.currentCell === i;
+    const isMystery = !!o.mystery?.has(i);
     const pulse = isCur ? 1 + Math.sin(o.time / 160) * 0.06 : 1;
     const size = 44 * pulse;
 
@@ -150,6 +152,26 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.lineDashOffset = -o.time / 40;
       ctx.strokeRect(-30, -30, 60, 60);
       ctx.setLineDash([]);
+    }
+
+    if (isMystery) {
+      // закрытая ячейка: тёмный фон, знак «?», без подсказок о типе
+      ctx.fillStyle = '#141833';
+      ctx.fillRect(-size / 2, -size / 2, size, size);
+      ctx.strokeStyle = '#313c72';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(-size / 2, -size / 2, size, size);
+      ctx.fillStyle = '#5a628f';
+      ctx.font = '15px "Press Start 2P", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('?', 0, 6);
+      if (o.showNumbers) {
+        ctx.fillStyle = '#8f97c9';
+        ctx.font = '8px "Press Start 2P", monospace';
+        ctx.fillText(String(cell.n), 0, 18);
+      }
+      ctx.restore();
+      continue;
     }
 
     const base = cell.type === 'bonus' ? '#0d3f2e' : cell.type === 'trap' ? '#43101c' : '#232741';

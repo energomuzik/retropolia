@@ -16,7 +16,7 @@ export type Action =
   | { t: 'declareDone'; id: string }
   | { t: 'approve'; id: string }
   | { t: 'violate'; id: string }
-  | { t: 'skip'; id: string; instant: boolean; spentMs: number; loads: number }
+  | { t: 'skip'; id: string; instant: boolean; spentMs: number; loads: number; resource?: 'time' | 'tries' }
   | { t: 'postChoice'; id: string; choice: 'continue' | 'end' }
   | { t: 'setCellTask'; id: string; cellIdx: number; task: TaskDef }
   | { t: 'cardAck'; id: string };
@@ -37,7 +37,7 @@ export function newSession(code: string, mapId: string, hostId: string, hostName
     players: [mkPlayer(hostId, hostName, 0, true)],
     rollOffIdx: 0, rollOffValues: {}, turn: 0,
     dice: null, moving: null, challenge: null, pendingCard: null,
-    captured: {}, sessionTasks: {}, awaitPost: false,
+    captured: {}, sessionTasks: {}, awaitPost: false, revealed: [],
     winner: null, log: [`Комната ${code} открыта. Ждём игроков…`], startedAt: Date.now(),
   };
 }
@@ -191,7 +191,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     }
     s.challenge = {
       cellIdx: p.pos, mode: null, started: false, paused: false, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
-      status: 'choose', approvals: [], violations: [],
+      status: 'choose', approvals: [], violations: [], lowStart: false,
     };
     const owner = s.captured[p.pos] ? s.players.find((x) => x.id === s.captured[p.pos]) : null;
     log(`🎯 ${p.name}: задание на ячейке №${cell.n}${owner ? ` (хозяин ${owner.name})` : ''}`);
@@ -335,6 +335,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (p.id !== a.id) break;
       p.pos = s.moving.path[s.moving.path.length - 1];
       s.moving = null;
+      if (!s.revealed.includes(p.pos)) s.revealed.push(p.pos);
       resolveLanding();
       break;
     }
@@ -342,7 +343,13 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const ch = s.challenge;
       const p = current();
       if (!ch || ch.status !== 'choose' || p.id !== a.id) break;
+      // с нулём ресурса выбирать его нельзя
+      if (a.mode === 'time' && p.secLeft <= 0) break;
+      if (a.mode === 'tries' && p.triesLeft <= 0) break;
       ch.mode = a.mode;
+      // если ресурса меньше 5 — пропуск станет доступен только на нуле
+      const remaining = a.mode === 'time' ? Math.floor(p.secLeft / 60) : p.triesLeft;
+      ch.lowStart = remaining < SKIP_COST;
       ch.status = 'ready'; // выбран ресурс, но запуск — по команде игрока
       log(`${p.name}: ${a.mode === 'time' ? 'играет на ВРЕМЯ ⏱' : 'играет на ПОПЫТКИ 🎯'}`);
       break;
@@ -442,17 +449,37 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const ch = s.challenge;
       const p = current();
       if (!ch || p.id !== a.id) break;
+
+      // правило: если на старте ресурса было меньше 5 — пропуск разрешён только при нуле
+      const nowMs = Date.now();
+      const running = ch.mode === 'time' && ch.started && !ch.paused && ch.startedAt > 0;
+      const ms = ch.accMs + (running ? nowMs - ch.startedAt : 0);
+      if (ch.mode && ch.lowStart) {
+        const rem = ch.mode === 'time' ? p.secLeft : p.triesLeft;
+        if (rem > 0) break;
+      }
+      // обычный пропуск требует 5 потраченных ресурсов
+      if (ch.mode && !a.instant) {
+        const units = ch.mode === 'time' ? Math.floor(ms / 60000) : ch.loads;
+        if (!ch.lowStart && units < SKIP_COST) break;
+      }
+
       if (ch.mode === 'time' && !a.instant) {
-        const cost = Math.max(1, Math.ceil(a.spentMs / 60000));
+        const cost = Math.max(1, Math.ceil(ms / 60000));
         finishChallenge(false, Math.min(cost, Math.max(1, Math.floor(p.secLeft / 60))) * 60, 0);
       } else if (ch.mode === 'tries' && !a.instant) {
         const cost = Math.max(ch.loads, SKIP_COST);
         finishChallenge(false, 0, Math.min(cost, Math.max(1, p.triesLeft)));
-      } else if (ch.mode === 'time') {
+      } else if (a.instant && a.resource === 'time') {
+        // мгновенный пропуск за 5 минут (или сколько осталось)
         finishChallenge(false, Math.min(SKIP_COST, Math.floor(p.secLeft / 60)) * 60, 0);
-      } else {
-        // мгновенный пропуск / пропуск на этапе выбора ресурса — платим попытками
+      } else if (a.instant && a.resource === 'tries') {
+        // мгновенный пропуск за 5 попыток (или сколько осталось)
         finishChallenge(false, 0, Math.min(SKIP_COST, Math.max(1, p.triesLeft)));
+      } else {
+        // мгновенный пропуск в выбранном режиме
+        if (ch.mode === 'time') finishChallenge(false, Math.min(SKIP_COST, Math.floor(p.secLeft / 60)) * 60, 0);
+        else finishChallenge(false, 0, Math.min(SKIP_COST, Math.max(1, p.triesLeft)));
       }
       checkElim();
       break;
