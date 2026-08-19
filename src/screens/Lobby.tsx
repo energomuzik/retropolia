@@ -198,7 +198,7 @@ export function LoadScreen() {
 /* ---------- лобби комнаты ---------- */
 
 export function LobbyScreen() {
-  const { session, room, netInfo, setScreen, leaveRoom, selfId, options } = useApp();
+  const { session, room, netInfo, setScreen, leaveRoom, selfId, options, tokens } = useApp();
 
   useEffect(() => {
     if (!room) setScreen('menu');
@@ -275,7 +275,38 @@ export function LobbyScreen() {
           })}
         </div>
 
-        <div className="mt-8 flex items-center justify-center gap-3 flex-wrap">
+        {/* выбор фишки */}
+        <div className="mt-5 pixel-panel pixel-corners p-3.5">
+          <div className="flex items-center gap-2 mb-2.5">
+            <span className="text-sky">{Ic.pawn(16)}</span>
+            <span className="font-display uppercase text-[12px] tracking-wider text-paper">Ваша фишка на поле</span>
+            <GhostBtn small className="ml-auto" onClick={() => setScreen('tokenEditor')}>{Ic.plus(12)} Создать</GhostBtn>
+          </div>
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <button
+              onClick={() => dispatch({ t: 'token', id: selfId, tokenImg: null })}
+              className={`w-14 h-14 border-[3px] flex items-center justify-center transition-all cursor-pointer ${!me?.tokenImg ? 'border-gold shadow-[0_0_14px_rgba(255,207,63,0.35)]' : 'border-edge hover:border-edge2'}`}
+              style={{ background: `repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 12px 12px` }}
+              title="Стандартный робот"
+            >
+              <span className="text-dim">{Ic.pawn(22)}</span>
+            </button>
+            {tokens.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => dispatch({ t: 'token', id: selfId, tokenImg: t.dataUrl })}
+                className={`w-14 h-14 border-[3px] p-1 transition-all cursor-pointer ${me?.tokenImg === t.dataUrl ? 'border-gold shadow-[0_0_14px_rgba(255,207,63,0.35)]' : 'border-edge hover:border-edge2'}`}
+                style={{ background: `repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 12px 12px` }}
+                title={t.name}
+              >
+                <img src={t.dataUrl} alt={t.name} className="w-full h-full object-contain" style={{ imageRendering: 'pixelated' }} />
+              </button>
+            ))}
+            {tokens.length === 0 && <span className="text-[11px] text-faint">Своих фишек нет — в «Редакторе фишек» можно нарисовать или загрузить PNG с прозрачностью</span>}
+          </div>
+        </div>
+
+        <div className="mt-6 flex items-center justify-center gap-3 flex-wrap">
           <GhostBtn onClick={() => { leaveRoom(); setScreen('menu'); }}>{Ic.back(14)} Покинуть</GhostBtn>
           {me && !me.isHost && (
             <PxBtn color="teal" onClick={() => dispatch({ t: 'ready', id: selfId, ready: !me.ready })}>

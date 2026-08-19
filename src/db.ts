@@ -1,5 +1,6 @@
 const DB_NAME = 'retropolia-db';
-const DB_VERSION = 1;
+// v2: добавлено хранилище 'tokens' (фишки игроков)
+const DB_VERSION = 2;
 export const STORES = ['tiles', 'maps', 'roms', 'saves', 'blobs', 'sessions', 'tokens'] as const;
 export type StoreName = (typeof STORES)[number];
 
@@ -16,7 +17,14 @@ function openDb(): Promise<IDBDatabase> {
       }
     };
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => {
+      dbPromise = null; // даём шанс повторить открытие
+      reject(req.error);
+    };
+    req.onblocked = () => {
+      dbPromise = null;
+      reject(new Error('IndexedDB заблокирована другой вкладкой — закройте старые вкладки игры'));
+    };
   });
   return dbPromise;
 }

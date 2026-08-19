@@ -13,19 +13,12 @@ const MENU: { key: string; label: string; screen: Screen; desc: string; color: s
   { key: 'mapEditor', label: 'Редактор карт', screen: 'mapEditor', desc: 'тайлы · ячейки · маршрут', color: '#2ee6a8', icon: Ic.map },
   { key: 'tileEditor', label: 'Редактор тайлов', screen: 'tileEditor', desc: 'загрузка своих тайлов', color: '#35d46f', icon: Ic.grid },
   { key: 'taskEditor', label: 'Редактор заданий', screen: 'taskEditor', desc: 'ромы · сохранки · карточки', color: '#ff8b3f', icon: Ic.cart },
+  { key: 'tokenEditor', label: 'Редактор фишек', screen: 'tokenEditor', desc: 'свои фигурки · пиксель-арт', color: '#5aa9ff', icon: Ic.pawn },
   { key: 'emulator', label: 'Запуск эмулятора', screen: 'emulator', desc: 'тест ромов · запись сохранений', color: '#ff5d73', icon: Ic.chip },
   { key: 'options', label: 'Опции', screen: 'options', desc: 'имя · трансляция · звук', color: '#8f97c9', icon: Ic.gear },
 ];
 
-const TIPS = [
-  'ДЕРЖИ КНОПКУ КУБИКОВ — ПЕРЕМЕШИВАЙ СИЛЬНЕЕ',
-  '60 МИНУТ И 60 ПОПЫТОК НА СТАРТЕ. БЕРЕГИ ИХ',
-  'СОПЕРНИК НА ТВОЕЙ ЯЧЕЙКЕ? ЕГО РЕСУРСЫ — ТЕБЕ',
-  'ПРОПУСК ЗАДАНИЯ ДОСТУПЕН ПОСЛЕ 5 ПОТРАЧЕННЫХ РЕСУРСОВ',
-  'СОЗДАВАЙ НОВЫЕ ЗАДАНИЯ ПРЯМО ВО ВРЕМЯ ПАРТИИ',
-  'ЛОВУШКИ И БОНУСЫ СОЗДАЮТСЯ В РЕДАКТОРЕ ЗАДАНИЙ',
-  'INSERT COIN TO CONTINUE',
-];
+
 
 function buildDemoMap(tileIds: string[]): GameMap {
   const cols = 9, rows = 7;
@@ -129,20 +122,6 @@ export default function MenuScreen() {
     <div className="h-full crt-grid-bg relative overflow-hidden">
       <div className="absolute inset-0 starfield opacity-60 pointer-events-none" />
       <div className="relative z-10 h-full max-w-6xl mx-auto px-6 py-4 flex flex-col">
-        {/* бегущая строка — сверху, чтобы не перекрывать пункты меню */}
-        <div className="mb-4 border-y-2 border-edge bg-[rgba(7,9,18,0.6)] overflow-hidden py-1.5 shrink-0">
-          <div className="marquee-x whitespace-nowrap font-pixel text-[9px] text-dim">
-            {[0, 1].map((k) => (
-              <span key={k}>
-                {TIPS.map((t, i) => (
-                  <span key={i} className="mx-6">
-                    <span className="text-gold">◆</span> {t}
-                  </span>
-                ))}
-              </span>
-            ))}
-          </div>
-        </div>
         {/* шапка */}
         <div className="flex items-end justify-between gap-6 flex-wrap">
           <div>

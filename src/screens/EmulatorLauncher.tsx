@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp, getRomData } from '../store';
 import { Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
 import NesBox, { type NesApi } from '../NesBox';
-import SegaBox from '../SegaBox';
+import SegaBox, { type SegaApi } from '../SegaBox';
 import { idbDel, idbPut, uid } from '../db';
 import type { RomDef, SaveDef } from '../types';
 import { keyLabel, loadEmuPrefs, PREFS_EVENT, listGamepads } from '../input';
@@ -19,6 +19,7 @@ export default function EmulatorLauncher() {
   const [running, setRunning] = useState(false);
   const [, forceUi] = useState(0);
   const apiRef = useRef<NesApi | null>(null);
+  const segaApiRef = useRef<SegaApi | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const rom = roms.find((r) => r.id === romId) ?? null;
@@ -72,9 +73,9 @@ export default function EmulatorLauncher() {
   };
 
   const createSave = async () => {
-    if (!rom || !apiRef.current) return;
-    const st = apiRef.current.snapshot();
-    if (!st) { toast('Не удалось снять состояние', 'err'); return; }
+    if (!rom) return;
+    const st = isNes ? apiRef.current?.snapshot() : segaApiRef.current?.snapshot();
+    if (!st) { toast('Эмулятор ещё не готов — подождите запуска и попробуйте снова', 'err'); return; }
     const slot = romSaves.length ? Math.max(...romSaves.map((s) => s.slot)) + 1 : 1;
     const sv: SaveDef = { id: uid('save'), romId: rom.id, slot, name: `Уровень ~${slot}`, state: st, createdAt: Date.now() };
     await idbPut('saves', sv.id, sv);
@@ -115,8 +116,8 @@ export default function EmulatorLauncher() {
           <input ref={fileRef} type="file" accept=".nes,.md,.gen,.sms,.gg,.bin" className="hidden" onChange={(e) => { void onUpload(e.target.files); e.target.value = ''; }} />
         </div>
         <p className="text-[13px] text-dim mb-6 max-w-3xl">
-          Тестовый стенд: гоняйте ромы, проходите до нужного места и жмите <span className="text-gold font-display uppercase">«Сохранить состояние»</span> (NES) —
-          слоты потом выбираются в редакторе заданий. Неверные сохранения удаляются. Для SEGA сохранения встроены в ядро (меню → дискета).
+          Тестовый стенд: гоняйте ромы (NES и SEGA), проходите до нужного места и жмите <span className="text-gold font-display uppercase">«Сохранить состояние»</span> —
+          слоты потом выбираются в редакторе заданий. Неверные сохранения удаляются кнопкой корзины.
         </p>
 
         <div className="grid lg:grid-cols-[300px_1fr] gap-5">
@@ -178,14 +179,22 @@ export default function EmulatorLauncher() {
                   </div>
                 ) : (
                   <div className="max-w-[640px] mx-auto">
-                    <SegaBox key={runKey} romData={romBuf} ext={segExt(rom?.fileName ?? '')} resetKey={runKey} />
+                    <SegaBox
+                      key={runKey}
+                      romData={romBuf}
+                      ext={segExt(rom?.fileName ?? '')}
+                      initialState={(runState as string | null) ?? null}
+                      resetKey={runKey}
+                      onApi={(a) => { segaApiRef.current = a; }}
+                    />
                     <div className="flex gap-2 mt-3 flex-wrap">
-                      <GhostBtn onClick={() => void launch()}>{Ic.rotate(13)} Перезапуск</GhostBtn>
+                      <PxBtn color="gold" onClick={() => void createSave()}>{Ic.save(14)} Сохранить состояние</PxBtn>
+                      <GhostBtn onClick={() => void launch()}>{Ic.rotate(13)} Сброс (с начала)</GhostBtn>
                       <GhostBtn onClick={() => setRunning(false)}>{Ic.pause(13)} Выключить</GhostBtn>
                     </div>
-                    <p className="text-[11px] text-magma mt-2 leading-relaxed">
-                      Сохранения SEGA — встроенные в ядро: меню эмулятора → иконка дискеты (save state), слоты выбираются там же.
-                      Управление и геймпады настраиваются в меню ядра (шестерёнка).
+                    <p className="text-[11px] text-dim mt-2 leading-relaxed">
+                      Сохранения работают как у NES: дойдите до нужного места и жмите «Сохранить состояние» — слот появится в списке
+                      ниже и будет доступен в редакторе заданий. Громкость — в общих опциях игры.
                     </p>
                   </div>
                 )}
@@ -215,7 +224,7 @@ export default function EmulatorLauncher() {
               </div>
             </Panel>
 
-            {rom && isNes && (
+            {rom && (
               <Panel title={`Сохранения «${rom.name}» · ${romSaves.length}`} icon={Ic.save(16)}>
                 <div className="p-3 grid sm:grid-cols-2 gap-2">
                   {romSaves.map((s) => (
@@ -230,14 +239,6 @@ export default function EmulatorLauncher() {
                     </div>
                   ))}
                   {romSaves.length === 0 && <div className="text-[12px] text-dim sm:col-span-2 py-3 text-center">Сохранений нет — запустите ром и запишите первое состояние</div>}
-                </div>
-              </Panel>
-            )}
-            {rom && !isNes && (
-              <Panel title="Сохранения SEGA" icon={Ic.save(16)} accent="var(--color-magma)">
-                <div className="p-4 text-[12px] text-dim leading-relaxed">
-                  У ядра SEGA собственная система слотов — она открывается прямо в эмуляторе (кнопка меню → дискета).
-                  В задания на карте SEGA-ром попадает без слота и стартует с начала — это нормальный сценарий для «пройди первый уровень».
                 </div>
               </Panel>
             )}

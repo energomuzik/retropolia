@@ -6,6 +6,7 @@ import MenuScreen from './screens/MenuScreen';
 import TileEditor from './screens/TileEditor';
 import MapEditor from './screens/MapEditor';
 import TaskEditor from './screens/TaskEditor';
+import TokenEditor from './screens/TokenEditor';
 import EmulatorLauncher from './screens/EmulatorLauncher';
 import OptionsScreen from './screens/OptionsScreen';
 import GameScreen from './screens/GameScreen';
@@ -18,7 +19,9 @@ export default function App() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    void initApp().then(() => setReady(true));
+    let on = true;
+    void initApp().finally(() => { if (on) setReady(true); });
+    return () => { on = false; };
   }, []);
 
   useEffect(() => {
@@ -59,6 +62,7 @@ export default function App() {
       {screen === 'mapEditor' && <MapEditor />}
       {screen === 'tileEditor' && <TileEditor />}
       {screen === 'taskEditor' && <TaskEditor />}
+      {screen === 'tokenEditor' && <TokenEditor />}
       {screen === 'emulator' && <EmulatorLauncher />}
       {screen === 'options' && <OptionsScreen />}
       <Toasts items={toasts} />

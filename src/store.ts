@@ -119,7 +119,13 @@ export async function initApp() {
       if (parsed.state?.options) useApp.getState().setOptions(parsed.state.options);
     }
   } catch { /* noop */ }
-  await useApp.getState().refresh();
+  try {
+    await useApp.getState().refresh();
+  } catch (e) {
+    // Сбой IndexedDB не должен вешать загрузку — игра откроется с пустой библиотекой
+    console.error('Не удалось прочитать локальную библиотеку:', e);
+    useApp.getState().toast('Локальное хранилище недоступно — библиотека пуста', 'err');
+  }
 }
 
 export async function getRomData(romId: string): Promise<ArrayBuffer | null> {
