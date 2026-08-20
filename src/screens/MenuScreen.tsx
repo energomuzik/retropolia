@@ -10,10 +10,7 @@ const MENU: { key: string; label: string; screen: Screen; desc: string; color: s
   { key: 'create', label: 'Создать игру', screen: 'create', desc: 'выбрать карту · открыть комнату', color: '#ffcf3f', icon: Ic.dice },
   { key: 'join', label: 'Подключиться', screen: 'join', desc: 'войти в комнату по коду', color: '#5aa9ff', icon: Ic.globe },
   { key: 'load', label: 'Загрузить игру', screen: 'load', desc: 'сохранённые партии', color: '#8f97c9', icon: Ic.save },
-  { key: 'mapEditor', label: 'Редактор карт', screen: 'mapEditor', desc: 'тайлы · ячейки · маршрут', color: '#2ee6a8', icon: Ic.map },
-  { key: 'tileEditor', label: 'Редактор тайлов', screen: 'tileEditor', desc: 'загрузка своих тайлов', color: '#35d46f', icon: Ic.grid },
-  { key: 'taskEditor', label: 'Редактор заданий', screen: 'taskEditor', desc: 'ромы · сохранки · карточки', color: '#ff8b3f', icon: Ic.cart },
-  { key: 'tokenEditor', label: 'Редактор фишек', screen: 'tokenEditor', desc: 'свои фигурки · пиксель-арт', color: '#5aa9ff', icon: Ic.pawn },
+  { key: 'editors', label: 'Все редакторы', screen: 'editorsHub', desc: 'карты · тайлы · задания · квизы · фишки', color: '#2ee6a8', icon: Ic.pen },
   { key: 'emulator', label: 'Запуск эмулятора', screen: 'emulator', desc: 'тест ромов · запись сохранений', color: '#ff5d73', icon: Ic.chip },
   { key: 'options', label: 'Опции', screen: 'options', desc: 'имя · трансляция · звук', color: '#8f97c9', icon: Ic.gear },
 ];
@@ -50,7 +47,7 @@ function buildDemoMap(tileIds: string[]): GameMap {
   }));
   return {
     id: 'demo', name: 'DEMO', cols, rows, tiles, cells,
-    bonusCards: [], trapCards: [], ready: true, createdAt: 0, updatedAt: 0,
+    bonusCards: [], trapCards: [], quizzes: [], ready: true, createdAt: 0, updatedAt: 0,
   };
 }
 

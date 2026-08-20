@@ -54,6 +54,10 @@ export default function TaskEditor() {
   const [cValue, setCValue] = useState(3);
   const [cTarget, setCTarget] = useState(1);
   const [cImg, setCImg] = useState('');
+  // оформление ячейки (цвет / название / картинка)
+  const [vLabel, setVLabel] = useState('');
+  const [vColor, setVColor] = useState('');
+  const [vImg, setVImg] = useState('');
 
   const tiles = useApp((st) => st.tiles);
   const tileById = useMemo(() => new Map(tiles.map((t) => [t.id, t])), [tiles]);
@@ -76,7 +80,24 @@ export default function TaskEditor() {
     setFTitle(cell.task?.title ?? '');
     setFDesc(cell.task?.desc ?? '');
     setFImg(cell.task?.imageId ?? '');
+    setVLabel(cell.label ?? '');
+    setVColor(cell.color ?? '');
+    setVImg(cell.imageId ?? '');
   }, [selCell, map?.id]);
+
+  const CELL_COLORS = ['#ffcf3f', '#ff5d73', '#5aa9ff', '#2ee6a8', '#ff8b3f', '#9be84d', '#c07aff', '#e9ecff'];
+
+  const saveVisuals = async () => {
+    if (!map || selCell === null) return;
+    const nextMap = JSON.parse(JSON.stringify(map)) as GameMap;
+    nextMap.cells[selCell].label = vLabel.trim() || undefined;
+    nextMap.cells[selCell].color = vColor || undefined;
+    nextMap.cells[selCell].imageId = vImg || undefined;
+    setMap(nextMap);
+    await persist(nextMap);
+    sfx.coin();
+    toast(`Оформление ячейки №${selCell + 1} сохранено`, 'ok');
+  };
 
   useEffect(() => {
     let raf = 0;
@@ -187,7 +208,7 @@ export default function TaskEditor() {
     toast('Карточка удалена', 'err');
   };
 
-  const setCellType = async (type: 'task' | 'bonus' | 'trap') => {
+  const setCellType = async (type: 'task' | 'bonus' | 'trap' | 'quiz') => {
     if (!map || selCell === null) return;
     const nextMap = JSON.parse(JSON.stringify(map)) as GameMap;
     nextMap.cells[selCell].type = type;
@@ -218,10 +239,12 @@ export default function TaskEditor() {
   if (map) {
     const bonusCells = map.cells.filter((c) => c.type === 'bonus').length;
     const trapCells = map.cells.filter((c) => c.type === 'trap').length;
+    const quizCells = map.cells.filter((c) => c.type === 'quiz').length;
     const noTask = map.cells.filter((c) => c.type === 'task' && !c.task).length;
     if (map.cells.length < 10) issues.push(`Минимум 10 ячеек (сейчас ${map.cells.length})`);
     if (bonusCells > 0 && map.bonusCards.length === 0) issues.push('Есть ячейки-бонусы, но колода бонусов пуста — создайте карточку или уберите ячейки');
     if (trapCells > 0 && map.trapCards.length === 0) issues.push('Есть ячейки-ловушки, но колода ловушек пуста — создайте карточку или уберите ячейки');
+    if (quizCells > 0 && (map.quizzes ?? []).length === 0) issues.push('Есть ячейки-квизы, но на карте нет вопросов — создайте квизы в редакторе или уберите ячейки');
     if (noTask > 0) warns.push(`${noTask} ячеек без заданий будут «передышкой» в игре`);
   }
 
@@ -335,13 +358,13 @@ export default function TaskEditor() {
               <Panel title={`Ячейка №${cell.n}`} icon={Ic.target(16)} accent={cell.type === 'bonus' ? 'var(--color-teal)' : cell.type === 'trap' ? 'var(--color-coral)' : 'var(--color-gold)'}>
                 <div className="p-3 space-y-3">
                   <div className="flex gap-1">
-                    {(['task', 'bonus', 'trap'] as const).map((t) => (
+                    {(['task', 'bonus', 'trap', 'quiz'] as const).map((t) => (
                       <button
                         key={t}
                         onClick={() => void setCellType(t)}
-                        className={`flex-1 py-1.5 font-display text-[10px] uppercase tracking-wide border-2 transition-colors cursor-pointer ${cell.type === t ? (t === 'bonus' ? 'border-teal text-teal bg-teal/10' : t === 'trap' ? 'border-coral text-coral bg-coral/10' : 'border-gold text-gold bg-gold/10') : 'border-edge text-faint hover:text-dim'}`}
+                        className={`flex-1 py-1.5 font-display text-[9px] uppercase tracking-wide border-2 transition-colors cursor-pointer ${cell.type === t ? (t === 'bonus' ? 'border-teal text-teal bg-teal/10' : t === 'trap' ? 'border-coral text-coral bg-coral/10' : t === 'quiz' ? 'border-sky text-sky bg-sky/10' : 'border-gold text-gold bg-gold/10') : 'border-edge text-faint hover:text-dim'}`}
                       >
-                        {t === 'task' ? 'Задание' : t === 'bonus' ? 'Бонус' : 'Ловушка'}
+                        {t === 'task' ? 'Задание' : t === 'bonus' ? 'Бонус' : t === 'trap' ? 'Ловушка' : 'Квиз'}
                       </button>
                     ))}
                   </div>
@@ -349,7 +372,62 @@ export default function TaskEditor() {
                 </div>
               </Panel>
 
-              {cell.type === 'task' ? (
+              {/* оформление «как в монополии» */}
+              <Panel title="Оформление ячейки" icon={Ic.pen(16)} accent="var(--color-gold)">
+                <div className="p-3 space-y-3">
+                  <Field label="Короткое название (видно на карте)">
+                    <input className="field-in w-full px-3 py-2 text-sm" maxLength={12} placeholder="Например: БОСС" value={vLabel} onChange={(e) => setVLabel(e.target.value)} />
+                  </Field>
+                  <Field label="Цвет группы">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {CELL_COLORS.map((c) => (
+                        <button
+                          key={c}
+                          onClick={() => { setVColor(vColor === c ? '' : c); sfx.hover(); }}
+                          aria-label={c}
+                          className={`w-7 h-7 border-2 cursor-pointer transition-transform hover:scale-110 ${vColor === c ? 'border-paper scale-110' : 'border-abyss'}`}
+                          style={{ background: c }}
+                        />
+                      ))}
+                      <button
+                        onClick={() => { setVColor(''); sfx.hover(); }}
+                        className="w-7 h-7 border-2 border-edge text-faint font-pixel text-[8px] cursor-pointer hover:text-coral"
+                        title="Без цвета"
+                      >
+                        ∅
+                      </button>
+                    </div>
+                  </Field>
+                  <Field label="Картинка ячейки (видно на карте)">
+                    <div className="flex items-center gap-2">
+                      <label className="btn-ghost pixel-corners px-3 py-2 text-[11px] uppercase font-display cursor-pointer inline-flex items-center gap-2">
+                        {Ic.upload(13)} Загрузить
+                        <input type="file" accept="image/*" className="hidden" onChange={(e) => { void onImg(setVImg)(e.target.files); e.target.value = ''; }} />
+                      </label>
+                      {vImg && <img src={vImg} alt="" className="h-10 w-10 object-cover border-2 border-edge" />}
+                      {vImg && <GhostBtn small onClick={() => setVImg('')}>{Ic.trash(12)}</GhostBtn>}
+                    </div>
+                  </Field>
+                  <PxBtn className="w-full" onClick={() => void saveVisuals()}>{Ic.check(14)} Сохранить оформление</PxBtn>
+                </div>
+              </Panel>
+
+              {cell.type === 'quiz' ? (
+                <Panel title="Квиз-ячейка" icon={Ic.dice(16)} accent="var(--color-sky)">
+                  <div className="p-3 space-y-3">
+                    <p className="text-[12px] text-dim leading-relaxed">
+                      Игрок, вставший сюда, получает случайный квиз из колоды карты. Вопросы создаются в отдельном
+                      редакторе — там же настраиваются типы (выбор из 4, текст, музыка, «кот в мешке»), время на ответ и картинки.
+                    </p>
+                    <div className="hud-chip pixel-corners px-3 py-2 text-[12px] text-sky">
+                      Квизов на карте: {(map.quizzes ?? []).length}
+                    </div>
+                    <PxBtn color="sky" className="w-full" onClick={() => setScreen('quizEditor')}>
+                      {Ic.dice(14)} Открыть редактор квизов
+                    </PxBtn>
+                  </div>
+                </Panel>
+              ) : cell.type === 'task' ? (
                 <Panel title="Задание ячейки" icon={Ic.cart(16)}>
                   <div className="p-3 space-y-3">
                     <Field label={`Ром · в библиотеке ${roms.length}`}>

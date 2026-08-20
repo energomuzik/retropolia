@@ -13,7 +13,7 @@ const TOOLS: { key: Tool; label: string; hint: string }[] = [
   { key: 'rotate', label: 'Поворот', hint: 'крутить тайл на 90° (или клавиша R)' },
   { key: 'erase', label: 'Ластик', hint: 'убирать тайлы' },
   { key: 'cell', label: 'Ячейка', hint: 'клик — поставить ячейку маршрута, повторный клик — убрать' },
-  { key: 'type', label: 'Тип', hint: 'переключать тип ячейки: задание → бонус → ловушка' },
+  { key: 'type', label: 'Тип', hint: 'переключать тип ячейки: задание → бонус → ловушка → квиз' },
   { key: 'pan', label: 'Рука', hint: 'двигать камеру (колесо — масштаб)' },
 ];
 
@@ -53,7 +53,7 @@ export default function MapEditor() {
   const newMap = () => {
     const m: GameMap = {
       id: uid('map'), name: 'Новая карта', cols: 12, rows: 9,
-      tiles: [], cells: [], bonusCards: [], trapCards: [],
+      tiles: [], cells: [], bonusCards: [], trapCards: [], quizzes: [],
       ready: false, createdAt: Date.now(), updatedAt: Date.now(),
     };
     openMap(m);
@@ -111,7 +111,7 @@ export default function MapEditor() {
         if (idx < 0) return;
         mutate((mm) => {
           const c = mm.cells[idx];
-          c.type = c.type === 'task' ? 'bonus' : c.type === 'bonus' ? 'trap' : 'task';
+          c.type = c.type === 'task' ? 'bonus' : c.type === 'bonus' ? 'trap' : c.type === 'trap' ? 'quiz' : 'task';
         });
         sfx.hover();
         break;
@@ -229,6 +229,7 @@ export default function MapEditor() {
   const taskCells = map?.cells.filter((c) => c.type === 'task').length ?? 0;
   const bonusCells = map?.cells.filter((c) => c.type === 'bonus').length ?? 0;
   const trapCells = map?.cells.filter((c) => c.type === 'trap').length ?? 0;
+  const quizCells = map?.cells.filter((c) => c.type === 'quiz').length ?? 0;
 
   return (
     <div className="h-full crt-grid-bg flex flex-col">
@@ -366,7 +367,9 @@ export default function MapEditor() {
                 <div className={`font-display uppercase ${map.cells.length >= 10 ? 'text-teal' : 'text-gold'}`}>
                   Ячейки: {map.cells.length} / мин. 10
                 </div>
-                <div className="text-dim">Задания: {taskCells} · <span className="text-teal">Бонус: {bonusCells}</span> · <span className="text-coral">Ловушки: {trapCells}</span></div>
+                <div className="text-dim">
+                  Задания: {taskCells} · <span className="text-teal">Бонус: {bonusCells}</span> · <span className="text-coral">Ловушки: {trapCells}</span> · <span className="text-sky">Квизы: {quizCells}</span>
+                </div>
                 <div className="text-faint">Тайлов: {map.tiles.length} · {boardSize(map).w / CELL}×{boardSize(map).h / CELL}</div>
               </div>
               <div className="absolute bottom-3 right-3 tick-label text-faint">ЛКМ — инструмент · ПКМ/средняя — камера · колесо — зум · R — поворот</div>

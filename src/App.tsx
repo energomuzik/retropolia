@@ -6,7 +6,9 @@ import MenuScreen from './screens/MenuScreen';
 import TileEditor from './screens/TileEditor';
 import MapEditor from './screens/MapEditor';
 import TaskEditor from './screens/TaskEditor';
+import QuizEditor from './screens/QuizEditor';
 import TokenEditor from './screens/TokenEditor';
+import EditorsHub from './screens/EditorsHub';
 import EmulatorLauncher from './screens/EmulatorLauncher';
 import OptionsScreen from './screens/OptionsScreen';
 import GameScreen from './screens/GameScreen';
@@ -62,7 +64,9 @@ export default function App() {
       {screen === 'mapEditor' && <MapEditor />}
       {screen === 'tileEditor' && <TileEditor />}
       {screen === 'taskEditor' && <TaskEditor />}
+      {screen === 'quizEditor' && <QuizEditor />}
       {screen === 'tokenEditor' && <TokenEditor />}
+      {screen === 'editorsHub' && <EditorsHub />}
       {screen === 'emulator' && <EmulatorLauncher />}
       {screen === 'options' && <OptionsScreen />}
       <Toasts items={toasts} />

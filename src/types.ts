@@ -1,4 +1,4 @@
-export type CellType = 'task' | 'bonus' | 'trap';
+export type CellType = 'task' | 'bonus' | 'trap' | 'quiz';
 
 export interface PlacedTile {
   x: number;
@@ -21,6 +21,34 @@ export interface CellDef {
   y: number;
   type: CellType;
   task?: TaskDef | null;
+  // оформление «как в монополии»: цвет группы, короткое имя, картинка
+  label?: string;
+  color?: string;
+  imageId?: string; // dataURL картинки ячейки (видна на карте)
+}
+
+export type QuizType = 'choice' | 'text' | 'music' | 'mystery';
+
+export interface QuizDef {
+  id: string;
+  type: QuizType;
+  question: string;
+  imageId?: string; // dataURL картинки вопроса
+  options?: string[]; // 4 варианта для choice/music/mystery
+  correct?: number; // индекс правильного варианта
+  answers?: string[]; // допустимые написания ответа (text)
+  audioId?: string; // dataURL мелодии (music)
+  timeLimit: number; // секунды на ответ
+  createdAt: number;
+}
+
+export interface QuizRun {
+  quizId: string;
+  askerId: string; // кто встал на ячейку
+  targetId: string; // кто отвечает («кот в мешке» может передать)
+  startedAt: number;
+  resolved: boolean;
+  result?: { correct: boolean; deltaMin: number; deltaTries: number; targetName: string };
 }
 
 export type EffectType =
@@ -59,6 +87,7 @@ export interface GameMap {
   cells: CellDef[];
   bonusCards: CardDef[];
   trapCards: CardDef[];
+  quizzes: QuizDef[]; // квизы карты (случайно выпадают на ячейках-квизах)
   ready: boolean;
   createdAt: number;
   updatedAt: number;
@@ -156,6 +185,7 @@ export interface GameSession {
   awaitPost: boolean;
   challenge: ChallengeState | null;
   pendingCard: { card: CardDef; player: string; done: boolean } | null;
+  quiz: QuizRun | null;
   captured: Record<number, string>;
   sessionTasks: Record<number, TaskDef>;
   revealed: number[]; // индексы ячеек, на которые хоть раз ступали (для режима «скрытые ячейки»)

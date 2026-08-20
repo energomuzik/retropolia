@@ -19,6 +19,8 @@ export type Action =
   | { t: 'skip'; id: string; instant: boolean; spentMs: number; loads: number; resource?: 'time' | 'tries' }
   | { t: 'postChoice'; id: string; choice: 'continue' | 'end' }
   | { t: 'setCellTask'; id: string; cellIdx: number; task: TaskDef }
+  | { t: 'quizAnswer'; id: string; answer: number | string | null }
+  | { t: 'quizDone' }
   | { t: 'cardAck'; id: string };
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
@@ -36,7 +38,7 @@ export function newSession(code: string, mapId: string, hostId: string, hostName
     v: APP_VERSION, code, mapId, phase: 'lobby',
     players: [mkPlayer(hostId, hostName, 0, true)],
     rollOffIdx: 0, rollOffValues: {}, turn: 0,
-    dice: null, moving: null, challenge: null, pendingCard: null,
+    dice: null, moving: null, challenge: null, pendingCard: null, quiz: null,
     captured: {}, sessionTasks: {}, awaitPost: false, revealed: [],
     winner: null, log: [`Комната ${code} открыта. Ждём игроков…`], startedAt: Date.now(),
   };
@@ -176,6 +178,25 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       applyCard(p, card);
       s.pendingCard = { card, player: p.id, done: false };
       log(`${cell.type === 'bonus' ? '🌟 БОНУС' : '☠ ЛОВУШКА'}: «${card.name}»`);
+      return;
+    }
+    if (cell.type === 'quiz') {
+      const qs = map.quizzes ?? [];
+      if (qs.length === 0) {
+        log(`Ячейка №${cell.n} — квиз, но на карте нет вопросов. Передышка`);
+        endTurnNow();
+        return;
+      }
+      const q = qs[Math.floor(Math.random() * qs.length)];
+      let target = p;
+      if (q.type === 'mystery') {
+        const others = s.players.filter((x) => x.alive && x.id !== p.id);
+        if (others.length) target = others[Math.floor(Math.random() * others.length)];
+      }
+      s.quiz = { quizId: q.id, askerId: p.id, targetId: target.id, startedAt: Date.now(), resolved: false };
+      log(
+        `🎲 ${p.name} встал на квиз (ячейка №${cell.n})!${target.id !== p.id ? ` Кот в мешке — отвечает ${target.name}` : ''}`,
+      );
       return;
     }
     const task = cellTaskOf(s, map, p.pos);
@@ -498,6 +519,55 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       s.sessionTasks[a.cellIdx] = a.task;
       s.awaitPost = false;
       log(`🛠 ${p.name} создаёт новое задание на ячейке №${a.cellIdx + 1} (доп. ход сгорает)`);
+      endTurnNow();
+      break;
+    }
+    case 'quizAnswer': {
+      const q = s.quiz;
+      if (!q || q.resolved || s.phase !== 'playing') break;
+      const qd = (map.quizzes ?? []).find((x) => x.id === q.quizId);
+      if (!qd) { s.quiz = null; endTurnNow(); break; }
+      // отвечает целевой игрок; если он пропал/молчит — после таймаута засчитывает любой (хост)
+      const overdue = Date.now() - q.startedAt > qd.timeLimit * 1000 + 1500;
+      if (a.id !== q.targetId && !overdue) break;
+      const target = s.players.find((x) => x.id === q.targetId);
+      if (!target) { s.quiz = null; endTurnNow(); break; }
+      const norm = (x: string) => x.trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
+      let correct = false;
+      if (a.answer === null || a.answer === undefined || String(a.answer).trim() === '') {
+        correct = false; // время вышло или пустой ответ
+      } else if (qd.type === 'text') {
+        correct = (qd.answers ?? []).some((ans) => norm(ans) === norm(String(a.answer)));
+      } else {
+        correct = Number(a.answer) === qd.correct;
+      }
+      const kind = Math.random() < 0.5 ? 'time' : 'tries';
+      let deltaMin = 0;
+      let deltaTries = 0;
+      if (correct) {
+        if (kind === 'time') { target.secLeft += 300; deltaMin = 5; }
+        else { target.triesLeft += 5; deltaTries = 5; }
+      } else {
+        if (kind === 'time') { target.secLeft = Math.max(0, target.secLeft - 300); deltaMin = -5; }
+        else { target.triesLeft = Math.max(0, target.triesLeft - 5); deltaTries = -5; }
+      }
+      q.resolved = true;
+      q.result = { correct, deltaMin, deltaTries, targetName: target.name };
+      const deltaTxt = kind === 'time' ? `${correct ? '+' : '−'}5 мин` : `${correct ? '+' : '−'}5 попыток`;
+      log(
+        correct
+          ? `✔ ${target.name}: верный ответ на квиз! ${deltaTxt}`
+          : `✖ ${target.name}: ${a.answer === null || a.answer === undefined || String(a.answer).trim() === '' ? 'время вышло' : 'неверно'}. ${deltaTxt}`,
+      );
+      checkElim();
+      break;
+    }
+    case 'quizDone': {
+      if (!s.quiz || s.phase !== 'playing') break;
+      s.quiz = null;
+      const p = current();
+      p.extraTurn = false;
+      log(`${p.name} передаёт ход после квиза`);
       endTurnNow();
       break;
     }

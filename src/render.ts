@@ -52,6 +52,7 @@ function px(ctx: CanvasRenderingContext2D, x: number, y: number, s: number, patt
 const STAR = ['..1..', '.111.', '11111', '.111.', '1.1.1'];
 const SKULL = ['.111.', '11111', '10101', '11111', '.1.1.'];
 const PAD = ['.111.', '11111', '11111', '.111.'];
+const QUIZ = ['.111.', '1..11', '..11.', '..1..', '.....', '..1..'];
 
 export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardDrawOpts) {
   const { view, width, height } = o;
@@ -175,9 +176,16 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     }
 
     const base = cell.type === 'bonus' ? '#0d3f2e' : cell.type === 'trap' ? '#43101c' : '#232741';
-    const edge = cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : '#8f97c9';
+    const edge = cell.color || (cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : '#8f97c9');
     ctx.fillStyle = base;
     ctx.fillRect(-size / 2, -size / 2, size, size);
+    // цветовая группа «как в монополии»
+    if (cell.color) {
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = cell.color;
+      ctx.fillRect(-size / 2, -size / 2, size, size);
+      ctx.globalAlpha = 1;
+    }
     ctx.strokeStyle = edge;
     ctx.lineWidth = 3;
     ctx.strokeRect(-size / 2, -size / 2, size, size);
@@ -185,9 +193,24 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     ctx.lineWidth = 2;
     ctx.strokeRect(-size / 2 + 3, -size / 2 + 3, size - 6, size - 6);
 
-    const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : PAD;
-    const iconColor = cell.type === 'task' ? '#ffcf3f' : edge;
-    px(ctx, -icon[0].length * 2, -14, 4, icon, iconColor);
+    // картинка ячейки или пиксель-иконка типа
+    const cellImg = cell.imageId ? getImage(cell.imageId) : null;
+    if (cellImg) {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(cellImg, -11, -13, 22, 22);
+    } else {
+      const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : cell.type === 'quiz' ? QUIZ : PAD;
+      const iconColor = cell.type === 'task' ? '#ffcf3f' : cell.type === 'quiz' ? '#5aa9ff' : edge;
+      px(ctx, -icon[0].length * 2, -14, 4, icon, iconColor);
+    }
+
+    // короткое название ячейки
+    if (cell.label) {
+      ctx.fillStyle = '#e9ecff';
+      ctx.font = '7px "Press Start 2P", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(cell.label.slice(0, 9).toUpperCase(), 0, 8);
+    }
 
     if (o.showNumbers) {
       ctx.fillStyle = '#e9ecff';
