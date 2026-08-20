@@ -84,8 +84,13 @@ export default function GameScreen() {
     if (reloadId > 0) {
       if (isSega) {
         const st = (saveState as string | null) ?? null;
-        if (st) segaApiRef.current?.loadState(st);
-        else segaApiRef.current?.reset();
+        if (st) {
+          segaApiRef.current?.loadState(st, (r) => {
+            if (!r.ok) useApp.getState().toast(`SEGA: перезапуск сохранения не удался (${r.how})`, 'err');
+          });
+        } else {
+          segaApiRef.current?.reset();
+        }
       } else {
         nesApiRef.current?.reload(saveState ?? undefined);
       }

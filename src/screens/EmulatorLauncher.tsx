@@ -79,9 +79,15 @@ export default function EmulatorLauncher() {
   // без перезапуска (иначе ядро грузилось бы заново и мог оставаться старый звук).
   const loadSave = (s: SaveDef) => {
     if (rom && rom.ext !== 'nes' && running && launchedRomRef.current === rom.id && segaApiRef.current) {
-      segaApiRef.current.loadState(s.state as string);
-      sfx.coin();
-      toast(`Сохранение (слот ${s.slot}) загружено — без перезапуска`, 'ok');
+      segaApiRef.current.loadState(s.state as string, (r) => {
+        if (r.ok) {
+          sfx.coin();
+          toast(`Сохранение (слот ${s.slot}) загружено · ${r.how}`, 'ok');
+        } else {
+          sfx.fail();
+          toast(`SEGA: загрузка не удалась — ${r.how}${r.errs?.length ? ' · ' + r.errs.join('; ') : ''}`, 'err');
+        }
+      });
       return;
     }
     void launch(s.state);
