@@ -21,6 +21,8 @@ export default function EmulatorLauncher() {
   const apiRef = useRef<NesApi | null>(null);
   const segaApiRef = useRef<SegaApi | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // какой ром сейчас реально крутится в эмуляторе (для загрузки сохранений без перезапуска)
+  const launchedRomRef = useRef<string | null>(null);
 
   const rom = roms.find((r) => r.id === romId) ?? null;
   const isNes = rom?.ext === 'nes';
@@ -68,8 +70,32 @@ export default function EmulatorLauncher() {
     setRomBuf(buf);
     setRunState(state);
     setRunning(true);
+    launchedRomRef.current = romId;
     setRunKey((k) => k + 1);
     sfx.start();
+  };
+
+  // Загрузка сохранения: для SEGA того же запущенного рома — прямо в работающее ядро,
+  // без перезапуска (иначе ядро грузилось бы заново и мог оставаться старый звук).
+  const loadSave = (s: SaveDef) => {
+    if (rom && rom.ext !== 'nes' && running && launchedRomRef.current === rom.id && segaApiRef.current) {
+      segaApiRef.current.loadState(s.state as string);
+      sfx.coin();
+      toast(`Сохранение (слот ${s.slot}) загружено — без перезапуска`, 'ok');
+      return;
+    }
+    void launch(s.state);
+  };
+
+  // Сброс: для запущенной SEGA — рестарт ядра без перезагрузки, иначе полный перезапуск.
+  const resetEmu = () => {
+    if (rom && rom.ext !== 'nes' && running && segaApiRef.current) {
+      segaApiRef.current.reset();
+      setRunState(undefined);
+      sfx.click();
+      return;
+    }
+    void launch();
   };
 
   const createSave = async () => {
@@ -173,8 +199,8 @@ export default function EmulatorLauncher() {
                     />
                     <div className="flex gap-2 mt-3 flex-wrap">
                       <PxBtn color="gold" onClick={() => void createSave()}>{Ic.save(14)} Сохранить состояние</PxBtn>
-                      <GhostBtn onClick={() => void launch()}>{Ic.rotate(13)} Сброс (с начала)</GhostBtn>
-                      <GhostBtn onClick={() => setRunning(false)}>{Ic.pause(13)} Выключить</GhostBtn>
+                      <GhostBtn onClick={() => resetEmu()}>{Ic.rotate(13)} Сброс (с начала)</GhostBtn>
+                      <GhostBtn onClick={() => { setRunning(false); launchedRomRef.current = null; }}>{Ic.pause(13)} Выключить</GhostBtn>
                     </div>
                   </div>
                 ) : (
@@ -184,13 +210,12 @@ export default function EmulatorLauncher() {
                       romData={romBuf}
                       ext={segExt(rom?.fileName ?? '')}
                       initialState={(runState as string | null) ?? null}
-                      resetKey={runKey}
                       onApi={(a) => { segaApiRef.current = a; }}
                     />
                     <div className="flex gap-2 mt-3 flex-wrap">
                       <PxBtn color="gold" onClick={() => void createSave()}>{Ic.save(14)} Сохранить состояние</PxBtn>
-                      <GhostBtn onClick={() => void launch()}>{Ic.rotate(13)} Сброс (с начала)</GhostBtn>
-                      <GhostBtn onClick={() => setRunning(false)}>{Ic.pause(13)} Выключить</GhostBtn>
+                      <GhostBtn onClick={() => resetEmu()}>{Ic.rotate(13)} Сброс (с начала)</GhostBtn>
+                      <GhostBtn onClick={() => { setRunning(false); launchedRomRef.current = null; }}>{Ic.pause(13)} Выключить</GhostBtn>
                     </div>
                     <p className="text-[11px] text-dim mt-2 leading-relaxed">
                       Сохранения работают как у NES: дойдите до нужного места и жмите «Сохранить состояние» — слот появится в списке
@@ -234,7 +259,7 @@ export default function EmulatorLauncher() {
                         <div className="font-display text-[11px] uppercase text-paper truncate">{s.name}</div>
                         <div className="tick-label text-faint">{new Date(s.createdAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</div>
                       </div>
-                      <GhostBtn small onClick={() => void launch(s.state)}>{Ic.play(11)}</GhostBtn>
+                      <GhostBtn small onClick={() => loadSave(s)}>{Ic.play(11)}</GhostBtn>
                       <button onClick={() => void delSave(s)} className="text-faint hover:text-coral cursor-pointer" aria-label="Удалить сохранение">{Ic.trash(14)}</button>
                     </div>
                   ))}

@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from './store';
 
 const EJS_DATA = 'https://cdn.emulatorjs.org/stable/data/';
 
 export interface SegaApi {
   snapshot: () => Promise<string | null>; // base64-состояние ядра
-  reload: (state?: string | null) => void;
-  reset: () => void;
+  loadState: (state: string | null) => void; // загрузить сохранение БЕЗ перезапуска
+  reset: () => void; // сброс (с начала)
+  pause: (p: boolean) => void;
 }
 
 function coreFor(ext: string): string {
@@ -15,210 +16,160 @@ function coreFor(ext: string): string {
   return 'segaMD'; // md, gen, bin
 }
 
-interface EJSGame {
-  gameManager?: {
-    getState?: () => string | Uint8Array | Promise<string | Uint8Array>;
-    loadState?: (s: string | Uint8Array) => void;
-    restart?: () => void;
-  };
-  getState?: () => string | Uint8Array | Promise<string | Uint8Array>;
-  loadState?: (s: string | Uint8Array) => void;
-  destroy?: () => void;
-  exit?: () => void;
-}
-
-// приводим состояние ядра к base64-строке
-async function toBase64(s: string | Uint8Array | undefined | null): Promise<string | null> {
-  if (s == null) return null;
-  if (typeof s === 'string') return s;
-  if (s instanceof Uint8Array) {
-    let bin = '';
-    const CH = 0x8000;
-    for (let i = 0; i < s.length; i += CH) {
-      bin += String.fromCharCode(...s.subarray(i, i + CH));
-    }
-    return btoa(bin);
+function bufToDataUrl(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CH));
   }
-  return null;
+  return `data:application/octet-stream;base64,${btoa(bin)}`;
 }
-
-const getEjs = (): EJSGame | undefined =>
-  (window as unknown as { EJS_emulator?: EJSGame }).EJS_emulator;
 
 /**
- * Эмулятор SEGA (Mega Drive / Master System / Game Gear) на ядре Genesis Plus GX (EmulatorJS).
- * Интерфейс намеренно чистый, как у NES-окна: весь встроенный тулбар скрыт,
- * а сохранения/сброс/пауза управляются снаружи через SegaApi — как в NesBox.
- * Громкость берётся из общих опций. Состояния снимаются через gameManager.getState()
- * и хранятся в общей библиотеке сохранений (как у NES).
+ * Эмулятор SEGA (Genesis Plus GX / EmulatorJS), запущенный в изолированном iframe.
+ *
+ * Почему iframe — это решает обе застарелые проблемы разом:
+ *  1. Звук. RetroArch крутит WebAudio внутри своей песочницы; при удалении iframe
+ *     браузер гарантированно глушит ВСЕ его аудиоконтексты и воркеры. Никакого
+ *     «звук прошлого рома играет в фоне» быть не может.
+ *  2. Повторная загрузка. Сохранения того же рома грузятся сообщением loadState
+ *     в уже работающий экземпляр — ядро не перезапускается. Перезапуск (и короткая
+ *     загрузка ядра) происходит только при смене рома, что естественно.
  */
 export default function SegaBox({
   romData,
   ext,
   initialState,
   paused,
-  resetKey,
   onApi,
 }: {
   romData: ArrayBuffer;
   ext: string;
   initialState?: string | null;
   paused?: boolean;
-  resetKey?: number;
   onApi?: (api: SegaApi) => void;
 }) {
-  const hostRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<HTMLIFrameElement>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
-  const stateRef = useRef<string | null>(initialState ?? null);
-  stateRef.current = initialState ?? null;
   const pausedRef = useRef(paused ?? false);
   pausedRef.current = paused ?? false;
+  const initStateRef = useRef<string | null>(initialState ?? null);
+  initStateRef.current = initialState ?? null;
+  const pendingRef = useRef<Record<string, (s: string | null) => void>>({});
+  const readyRef = useRef(false);
+
+  const romDataUrl = useMemo(() => bufToDataUrl(romData), [romData]);
+  const core = coreFor(ext);
+  const opts = useApp((s) => s.options);
+  const volume = opts.emuSound ? Math.max(0, Math.min(1, opts.emuVolume ?? 1)) : 0;
+
+  // srcdoc пересоздаётся только при смене рома/ядра — это и есть «чистый запуск»
+  const srcdoc = useMemo(
+    () => buildHtml(core, romDataUrl, volume),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [core, romDataUrl],
+  );
 
   useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
     setStatus('loading');
-    host.innerHTML = '';
+    readyRef.current = false;
+    const frame = frameRef.current;
+    if (frame) frame.srcdoc = srcdoc;
 
-    const blob = new Blob([romData], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    const divId = `ejs-${Math.random().toString(36).slice(2, 9)}`;
-    const slot = document.createElement('div');
-    slot.id = divId;
-    slot.style.width = '100%';
-    slot.style.height = '100%';
-    host.appendChild(slot);
-
-    const opts = useApp.getState().options;
-    const vol = opts.emuSound ? (opts.emuVolume ?? 1) : 0;
-    const w = window as unknown as Record<string, unknown>;
-    w.EJS_player = `#${divId}`;
-    w.EJS_core = coreFor(ext);
-    w.EJS_gameUrl = url;
-    w.EJS_pathtodata = EJS_DATA;
-    w.EJS_language = 'ru';
-    w.EJS_backgroundText = 'Загрузка ядра SEGA…';
-    w.EJS_backgroundColor = '#0b0e1c';
-    w.EJS_color = '#ffcf3f';
-    w.EJS_volume = Math.max(0, Math.min(1, vol));
-    w.EJS_startOnLoaded = true; // стартуем сразу, без кнопки Play
-    w.EJS_askBeforeExit = false;
-    // Чистое окно: прячем весь встроенный тулбар — управление только снаружи
-    w.EJS_Buttons = {
-      playPause: false, restart: false, mute: false, settings: false,
-      fullscreen: false, saveState: false, loadState: false, screenRecord: false,
-      gamepad: false, cheat: false, volume: false, saveSavFiles: false,
-      loadSavFiles: false, quickSave: false, quickLoad: false, screenshot: false,
-      cacheManager: false, exitEmulation: false,
-    };
-    w.EJS_ready = () => {
-      setStatus('ready');
-      // подгружаем сохранение задания, если оно есть
-      const st = stateRef.current;
-      if (st) {
-        setTimeout(() => {
-          try { getEjs()?.gameManager?.loadState?.(st); } catch { /* noop */ }
-        }, 400);
+    const onMsg = (e: MessageEvent) => {
+      if (frame && e.source !== frame.contentWindow) return;
+      const d = e.data as { type?: string; state?: string | null; reqId?: string } | null;
+      if (!d || typeof d.type !== 'string') return;
+      if (d.type === 'ejs-ready') {
+        readyRef.current = true;
+        setStatus('ready');
+        // применим текущую паузу сразу после старта
+        try { frame?.contentWindow?.postMessage({ type: 'pause', paused: pausedRef.current }, '*'); } catch { /* noop */ }
+        // подгрузим стартовое сохранение задания, если оно задано
+        if (initStateRef.current) {
+          const st = initStateRef.current;
+          setTimeout(() => {
+            try { frameRef.current?.contentWindow?.postMessage({ type: 'load-state', state: st }, '*'); } catch { /* noop */ }
+          }, 350);
+        }
+      } else if (d.type === 'ejs-error') {
+        setStatus('error');
+      } else if (d.type === 'ejs-state' && d.reqId) {
+        const cb = pendingRef.current[d.reqId];
+        if (cb) {
+          delete pendingRef.current[d.reqId];
+          cb(d.state ?? null);
+        }
       }
     };
+    window.addEventListener('message', onMsg);
 
     const api: SegaApi = {
-      snapshot: async () => {
-        try {
-          const emu = getEjs();
-          const gm = emu?.gameManager;
-          const raw = gm?.getState?.() ?? emu?.getState?.();
-          const s = raw && typeof (raw as Promise<unknown>).then === 'function' ? await (raw as Promise<string | Uint8Array>) : (raw as string | Uint8Array);
-          return await toBase64(s ?? null);
-        } catch {
-          return null;
-        }
-      },
-      reload: (st) => {
-        try {
-          const emu = getEjs();
-          const gm = emu?.gameManager;
-          const target = st ?? stateRef.current;
-          if (target) (gm?.loadState ?? emu?.loadState)?.call(gm ?? emu, target);
-          else gm?.restart?.();
-        } catch { /* noop */ }
+      snapshot: () =>
+        new Promise<string | null>((resolve) => {
+          const reqId = Math.random().toString(36).slice(2);
+          pendingRef.current[reqId] = resolve;
+          try { frameRef.current?.contentWindow?.postMessage({ type: 'get-state', reqId }, '*'); } catch { /* noop */ }
+          setTimeout(() => {
+            if (pendingRef.current[reqId]) {
+              delete pendingRef.current[reqId];
+              resolve(null);
+            }
+          }, 3500);
+        }),
+      loadState: (st) => {
+        if (!st) return;
+        try { frameRef.current?.contentWindow?.postMessage({ type: 'load-state', state: st }, '*'); } catch { /* noop */ }
       },
       reset: () => {
-        try { getEjs()?.gameManager?.restart?.(); } catch { /* noop */ }
+        try { frameRef.current?.contentWindow?.postMessage({ type: 'reset' }, '*'); } catch { /* noop */ }
+      },
+      pause: (p) => {
+        try { frameRef.current?.contentWindow?.postMessage({ type: 'pause', paused: !!p }, '*'); } catch { /* noop */ }
       },
     };
     onApi?.(api);
 
-    // каждый запуск — заново исполняем лоадер (иначе второй ром не поднимется,
-    // а первый продолжит играть в фоне)
-    document.querySelectorAll('script[data-ejs-loader]').forEach((n) => n.remove());
-    const script = document.createElement('script');
-    script.src = `${EJS_DATA}loader.js`;
-    script.async = true;
-    script.dataset.ejsLoader = '1';
-    script.onerror = () => setStatus('error');
-    document.body.appendChild(script);
-
     return () => {
-      const w = window as unknown as Record<string, unknown>;
-      try {
-        const emu = getEjs() as (EJSGame & {
-          stop?: () => void;
-          gameManager?: EJSGame['gameManager'] & { exit?: () => void; pause?: () => void; stop?: () => void };
-        }) | undefined;
-        // глушим звук и кадры всеми доступными способами
-        try { emu?.gameManager?.pause?.(); } catch { /* noop */ }
-        try { emu?.gameManager?.stop?.(); } catch { /* noop */ }
-        try { emu?.stop?.(); } catch { /* noop */ }
-        try { emu?.gameManager?.exit?.(); } catch { /* noop */ }
-        try { emu?.exit?.(); } catch { /* noop */ }
-        try { emu?.destroy?.(); } catch { /* noop */ }
-        try { (w.EJS_terminate as (() => void) | undefined)?.(); } catch { /* noop */ }
-      } catch { /* noop */ }
-      try {
-        w.EJS_emulator = null;
-        w.EJS_gameUrl = '';
-        w.EJS_core = undefined;
-        w.EJS_ready = undefined;
-        w.EJS_terminate = undefined;
-      } catch { /* noop */ }
-      document.querySelectorAll('script[data-ejs-loader]').forEach((n) => n.remove());
-      host.innerHTML = '';
-      URL.revokeObjectURL(url);
+      window.removeEventListener('message', onMsg);
+      // уничтожение документа iframe = гарантированная остановка звука и ядра
+      const f = frameRef.current;
+      if (f) f.srcdoc = '';
+      pendingRef.current = {};
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [romData, ext, resetKey]);
+  }, [srcdoc]);
 
-  // настоящая пауза ядра (кадры + звук), если она доступна
+  // внешняя пауза — сообщением в работающее ядро
   useEffect(() => {
     if (status !== 'ready') return;
-    try {
-      const gm = (getEjs() as { gameManager?: { pause?: () => void; play?: () => void } } | null)?.gameManager;
-      if (paused) gm?.pause?.();
-      else gm?.play?.();
-    } catch { /* noop */ }
+    try { frameRef.current?.contentWindow?.postMessage({ type: 'pause', paused: !!paused }, '*'); } catch { /* noop */ }
   }, [paused, status]);
 
-  // внешняя пауза: у ядра нет публичного pause, поэтому просто стопорим кадры оверлеем
-  // (таймер задания при этом честно останавливается движком)
   return (
     <div className="relative w-full aspect-[4/3] bg-black border-[3px] border-edge shadow-[0_0_40px_rgba(255,139,63,0.12)] overflow-hidden">
-      <div ref={hostRef} className="absolute inset-0" />
+      <iframe
+        ref={frameRef}
+        title="SEGA Emulator"
+        className="absolute inset-0 w-full h-full border-0"
+        allow="autoplay; fullscreen; gamepad"
+      />
       {paused && status === 'ready' && (
-        <div className="absolute inset-0 z-20 bg-[rgba(4,6,14,0.6)] flex flex-col items-center justify-center gap-2">
+        <div className="absolute inset-0 z-20 bg-[rgba(4,6,14,0.6)] flex flex-col items-center justify-center gap-2 pointer-events-none">
           <span className="font-pixel text-[10px] text-gold blink-hard">ПАУЗА</span>
         </div>
       )}
       {status === 'loading' && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#05070f]">
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-[#05070f]">
           <span className="font-pixel text-[9px] text-magma blink-hard">ЗАГРУЗКА ЯДРА SEGA…</span>
           <span className="text-[11px] text-dim px-6 text-center">
-            Ядро скачивается один раз (~10–20 МБ) и кэшируется браузером
+            Ядро скачивается один раз и кэшируется браузером. При загрузке сохранений перезапуска нет.
           </span>
         </div>
       )}
       {status === 'error' && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#05070f] p-6 text-center">
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-[#05070f] p-6 text-center">
           <span className="font-pixel text-[9px] text-coral">НЕ УДАЛОСЬ ЗАГРУЗИТЬ ЯДРО</span>
           <span className="text-[11px] text-dim leading-relaxed">
             Для SEGA нужен интернет — ядро Genesis Plus GX берётся с CDN emulatorjs.org (один раз, дальше из кэша).
@@ -229,4 +180,45 @@ export default function SegaBox({
       <div className="absolute bottom-1 right-2 font-pixel text-[7px] text-[rgba(233,236,255,0.4)] z-10">GENESIS PLUS GX</div>
     </div>
   );
+}
+
+function buildHtml(core: string, romDataUrl: string, volume: number): string {
+  // Внутренний документ: чистое окно без тулбара, общается с хостом через postMessage.
+  return [
+    '<!DOCTYPE html><html><head><meta charset="utf-8"><style>',
+    'html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden}',
+    '#game{position:absolute;inset:0;width:100%;height:100%}',
+    '</style></head><body><div id="game"></div><script>',
+    'window.EJS_player="#game";',
+    `window.EJS_core=${JSON.stringify(core)};`,
+    `window.EJS_gameUrl=${JSON.stringify(romDataUrl)};`,
+    `window.EJS_pathtodata=${JSON.stringify(EJS_DATA)};`,
+    'window.EJS_language="ru";',
+    'window.EJS_backgroundText="";',
+    'window.EJS_backgroundColor="#0b0e1c";',
+    'window.EJS_color="#ffcf3f";',
+    `window.EJS_volume=${volume};`,
+    'window.EJS_startOnLoaded=true;',
+    'window.EJS_askBeforeExit=false;',
+    'window.EJS_Buttons={playPause:false,restart:false,mute:false,settings:false,fullscreen:false,saveState:false,loadState:false,screenRecord:false,gamepad:false,cheat:false,volume:false,saveSavFiles:false,loadSavFiles:false,quickSave:false,quickLoad:false,screenshot:false,cacheManager:false,exitEmulation:false};',
+    'function gm(){return window.EJS_emulator&&window.EJS_emulator.gameManager;}',
+    'function b64(u8){var bin="";for(var i=0;i<u8.length;i+=32768){bin+=String.fromCharCode.apply(null,u8.subarray(i,i+32768));}return btoa(bin);}',
+    'window.EJS_ready=function(){parent.postMessage({type:"ejs-ready"},"*");};',
+    'window.addEventListener("message",function(e){',
+    '  var d=e.data||{};var g=gm();if(!g)return;',
+    '  try{',
+    '    if(d.type==="load-state"&&d.state){g.loadState(d.state);}',
+    '    else if(d.type==="reset"){g.restart();}',
+    '    else if(d.type==="pause"){if(d.paused){g.pause&&g.pause();}else{g.play&&g.play();}}',
+    '    else if(d.type==="get-state"){',
+    '      var r=g.getState();',
+    '      var send=function(s){var out=null;if(typeof s==="string"){out=s;}else if(s&&s.length!==undefined){out=b64(s);}parent.postMessage({type:"ejs-state",state:out,reqId:d.reqId},"*");};',
+    '      if(r&&typeof r.then==="function"){r.then(send,function(){send(null);});}else{send(r);}',
+    '    }',
+    '  }catch(err){parent.postMessage({type:"ejs-error"},"*");}',
+    '});',
+    '</script>',
+    `<script src="${EJS_DATA}loader.js"></script>`,
+    '</body></html>',
+  ].join('\n');
 }

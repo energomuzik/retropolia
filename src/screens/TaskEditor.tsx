@@ -361,23 +361,22 @@ export default function TaskEditor() {
                     {roms.length === 0 && (
                       <p className="text-[11px] text-magma">Ромов пока нет — загрузите их в «Запуске эмулятора».</p>
                     )}
-                    {roms.find((r) => r.id === fRom)?.ext === 'nes' ? (
-                      <>
-                        <Field label={`Сохранение · ${romSaves.length}`}>
-                          <select className="field-in w-full px-2 py-2 text-sm" value={fSave} onChange={(e) => setFSave(e.target.value)}>
-                            <option value="">— выберите сохранение —</option>
-                            {romSaves.map((s) => <option key={s.id} value={s.id}>Слот {s.slot} · {s.name}</option>)}
-                          </select>
-                        </Field>
-                        {fRom && romSaves.length === 0 && (
-                          <p className="text-[11px] text-gold">У этого рома нет сохранений — создайте их в эмуляторе.</p>
-                        )}
-                      </>
-                    ) : fRom ? (
-                      <p className="text-[11px] text-magma">
-                        Это ром SEGA — слот не нужен, задание стартует с начала ромa (сохранения встроены в ядро эмулятора).
+                    <Field label={`Сохранение · ${romSaves.length}`}>
+                      <select className="field-in w-full px-2 py-2 text-sm" value={fSave} onChange={(e) => setFSave(e.target.value)}>
+                        <option value="">— без сохранения (старт с начала) —</option>
+                        {romSaves.map((s) => <option key={s.id} value={s.id}>Слот {s.slot} · {s.name}</option>)}
+                      </select>
+                    </Field>
+                    {fRom && romSaves.length === 0 && (
+                      <p className="text-[11px] text-gold">
+                        У этого рома нет сохранений — запустите его в эмуляторе и запишите состояния (и для NES, и для SEGA).
                       </p>
-                    ) : null}
+                    )}
+                    {fRom && roms.find((r) => r.id === fRom)?.ext !== 'nes' && (
+                      <p className="text-[11px] text-magma">
+                        SEGA: слоты работают так же, как у NES. Можно оставить «без сохранения» — тогда задание стартует с начала рома.
+                      </p>
+                    )}
                     <Field label="Название ячейки">
                       <input className="field-in w-full px-3 py-2 text-sm" placeholder="Например: Felix — уровень 3" value={fTitle} onChange={(e) => setFTitle(e.target.value)} />
                     </Field>

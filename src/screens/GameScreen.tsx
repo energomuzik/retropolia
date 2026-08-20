@@ -82,8 +82,13 @@ export default function GameScreen() {
   const reloadId = ch?.reloadId ?? 0;
   useEffect(() => {
     if (reloadId > 0) {
-      if (isSega) segaApiRef.current?.reload((saveState as string | null) ?? null);
-      else nesApiRef.current?.reload(saveState ?? undefined);
+      if (isSega) {
+        const st = (saveState as string | null) ?? null;
+        if (st) segaApiRef.current?.loadState(st);
+        else segaApiRef.current?.reset();
+      } else {
+        nesApiRef.current?.reload(saveState ?? undefined);
+      }
       sfx.alarm();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -690,7 +695,6 @@ export default function GameScreen() {
                               ext={segExt}
                               initialState={(saveState as string | null) ?? null}
                               paused={ch.status === 'ready' || ch.status === 'voting' || ch.paused}
-                              resetKey={emuKey}
                               onApi={(a) => { segaApiRef.current = a; }}
                             />
                           ) : (
@@ -937,16 +941,15 @@ function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => v
               {roms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
             </select>
           </Field>
-          {roms.find((r) => r.id === romId)?.ext === 'nes' ? (
-            <Field label="Сохранение">
-              <select className="field-in w-full px-2 py-2 text-sm" value={saveId} onChange={(e) => setSaveId(e.target.value)}>
-                <option value="">— выбрать —</option>
-                {romSaves.map((x) => <option key={x.id} value={x.id}>Слот {x.slot} · {x.name}</option>)}
-              </select>
-            </Field>
-          ) : romId ? (
-            <p className="text-[11px] text-magma">Ром SEGA — стартует с начала, слот не требуется.</p>
-          ) : null}
+          <Field label="Сохранение">
+            <select className="field-in w-full px-2 py-2 text-sm" value={saveId} onChange={(e) => setSaveId(e.target.value)}>
+              <option value="">— без сохранения (старт с начала) —</option>
+              {romSaves.map((x) => <option key={x.id} value={x.id}>Слот {x.slot} · {x.name}</option>)}
+            </select>
+          </Field>
+          {romId && roms.find((r) => r.id === romId)?.ext !== 'nes' && (
+            <p className="text-[11px] text-magma">SEGA: слоты — как у NES; «без сохранения» стартует с начала рома.</p>
+          )}
           <Field label="Название">
             <input className="field-in w-full px-3 py-2 text-sm" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Chip'n'Dale 2 — босс" />
           </Field>
