@@ -49,7 +49,7 @@ export function CreateScreen() {
                 {sel === m.id && <span className="text-gold">{Ic.check(16)}</span>}
               </div>
               <div className="tick-label text-faint mt-2">
-                {m.cells.length} ячеек · бонусы {m.bonusCards.length} · ловушки {m.trapCards.length}
+                {m.cells.length} ячеек · бонусы {m.bonusCards.length} · ловушки {m.trapCards.length} · <span className="text-sky">квизы {m.quizzes?.length ?? 0}</span>
               </div>
             </button>
           ))}

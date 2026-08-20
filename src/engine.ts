@@ -20,7 +20,9 @@ export type Action =
   | { t: 'postChoice'; id: string; choice: 'continue' | 'end' }
   | { t: 'setCellTask'; id: string; cellIdx: number; task: TaskDef }
   | { t: 'quizAnswer'; id: string; answer: number | string | null }
-  | { t: 'quizDone' }
+  | { t: 'quizTarget'; id: string; target: string }
+  | { t: 'quizTimeout' }
+  | { t: 'quizDone'; id: string }
   | { t: 'cardAck'; id: string };
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
@@ -35,7 +37,7 @@ function mkPlayer(id: string, name: string, color: number, isHost: boolean): Pla
 
 export function newSession(code: string, mapId: string, hostId: string, hostName: string): GameSession {
   return {
-    v: APP_VERSION, code, mapId, phase: 'lobby',
+    v: APP_VERSION, code, mapId, usedQuizzes: [], phase: 'lobby',
     players: [mkPlayer(hostId, hostName, 0, true)],
     rollOffIdx: 0, rollOffValues: {}, turn: 0,
     dice: null, moving: null, challenge: null, pendingCard: null, quiz: null,
@@ -64,6 +66,9 @@ type Log = (t: string) => void;
 
 export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: GameOptions): GameSession {
   const s = clone(s0);
+  // старые сохранённые сессии могут не иметь новых полей
+  if (!s.usedQuizzes) s.usedQuizzes = [];
+  if (s.quiz === undefined) s.quiz = null;
   const log: Log = (t) => { s.log = [t, ...s.log].slice(0, 50); };
   const alive = () => s.players.filter((p) => p.alive);
   const aid = 'id' in a ? (a as { id: string }).id : '';
@@ -181,22 +186,30 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       return;
     }
     if (cell.type === 'quiz') {
-      const qs = map.quizzes ?? [];
-      if (qs.length === 0) {
+      const all = map.quizzes ?? [];
+      if (all.length === 0) {
         log(`Ячейка №${cell.n} — квиз, но на карте нет вопросов. Передышка`);
         endTurnNow();
         return;
       }
-      const q = qs[Math.floor(Math.random() * qs.length)];
-      let target = p;
-      if (q.type === 'mystery') {
-        const others = s.players.filter((x) => x.alive && x.id !== p.id);
-        if (others.length) target = others[Math.floor(Math.random() * others.length)];
+      // вопросы, уже прозвучавшие в этой партии, не повторяются
+      const pool = all.filter((qz) => !(s.usedQuizzes ?? []).includes(qz.id));
+      if (pool.length === 0) {
+        log(`Все квизы карты уже прозвучали — передышка`);
+        endTurnNow();
+        return;
       }
-      s.quiz = { quizId: q.id, askerId: p.id, targetId: target.id, startedAt: Date.now(), resolved: false };
-      log(
-        `🎲 ${p.name} встал на квиз (ячейка №${cell.n})!${target.id !== p.id ? ` Кот в мешке — отвечает ${target.name}` : ''}`,
-      );
+      const q = pool[Math.floor(Math.random() * pool.length)];
+      s.usedQuizzes = [...(s.usedQuizzes ?? []), q.id];
+      if (q.type === 'mystery') {
+        // «кот в мешке»: игрок сам выбирает, кому передать вопрос
+        s.quiz = { quizId: q.id, askerId: p.id, targetId: '', startedAt: 0, resolved: false };
+        log(`🎁 ${p.name} встал на «кота в мешке» (ячейка №${cell.n}) — выбирает, кому передать вопрос`);
+      } else {
+        // гонка: вопрос видят все, отвечает кто быстрее
+        s.quiz = { quizId: q.id, askerId: p.id, targetId: p.id, startedAt: Date.now(), resolved: false };
+        log(`🎲 КВИЗ (ячейка №${cell.n})! Вопрос видят все — кто первым ответит, тот и забирает`);
+      }
       return;
     }
     const task = cellTaskOf(s, map, p.pos);
@@ -337,7 +350,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       }
       if (s.phase !== 'playing') break;
       const p = current();
-      if (!p || p.id !== a.id || s.moving || s.challenge || s.pendingCard || s.awaitPost) break;
+      if (!p || p.id !== a.id || s.moving || s.challenge || s.pendingCard || s.awaitPost || s.quiz) break;
       const shuffles = Math.min(6, 1 + Math.floor(Math.max(0, a.holdMs) / 450));
       let va = rnd6();
       for (let i = 1; i < shuffles; i++) va = rnd6();
@@ -522,48 +535,82 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       endTurnNow();
       break;
     }
+    case 'quizTarget': {
+      // «кот в мешке»: спрашивающий передаёт вопрос любому игроку
+      const q = s.quiz;
+      if (!q || q.resolved || q.startedAt || s.phase !== 'playing') break;
+      const qd = (map.quizzes ?? []).find((x) => x.id === q.quizId);
+      if (!qd || qd.type !== 'mystery') break;
+      if (a.id !== q.askerId) break;
+      const asker = s.players.find((x) => x.id === q.askerId);
+      const victim = s.players.find((x) => x.id === a.target && x.alive);
+      if (!victim) break;
+      q.targetId = victim.id;
+      q.startedAt = Date.now();
+      log(`🎁 ${asker?.name ?? 'Игрок'} передаёт «кота в мешке» → ${victim.name}`);
+      break;
+    }
     case 'quizAnswer': {
       const q = s.quiz;
-      if (!q || q.resolved || s.phase !== 'playing') break;
+      if (!q || q.resolved || s.phase !== 'playing' || !q.startedAt) break;
       const qd = (map.quizzes ?? []).find((x) => x.id === q.quizId);
       if (!qd) { s.quiz = null; endTurnNow(); break; }
-      // отвечает целевой игрок; если он пропал/молчит — после таймаута засчитывает любой (хост)
-      const overdue = Date.now() - q.startedAt > qd.timeLimit * 1000 + 1500;
-      if (a.id !== q.targetId && !overdue) break;
-      const target = s.players.find((x) => x.id === q.targetId);
-      if (!target) { s.quiz = null; endTurnNow(); break; }
+      const answerer = s.players.find((x) => x.id === a.id);
+      if (!answerer || !answerer.alive) break;
+      // «кот в мешке» отвечает только получивший; в гонке — любой, кто успел первым
+      if (qd.type === 'mystery' && q.targetId !== a.id) break;
       const norm = (x: string) => x.trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
       let correct = false;
       if (a.answer === null || a.answer === undefined || String(a.answer).trim() === '') {
-        correct = false; // время вышло или пустой ответ
-      } else if (qd.type === 'text') {
+        correct = false;
+      } else if (qd.type === 'text' || qd.type === 'music') {
         correct = (qd.answers ?? []).some((ans) => norm(ans) === norm(String(a.answer)));
       } else {
         correct = Number(a.answer) === qd.correct;
       }
+      // награда/штраф достаётся тому, кто ответил
       const kind = Math.random() < 0.5 ? 'time' : 'tries';
       let deltaMin = 0;
       let deltaTries = 0;
       if (correct) {
-        if (kind === 'time') { target.secLeft += 300; deltaMin = 5; }
-        else { target.triesLeft += 5; deltaTries = 5; }
+        if (kind === 'time') { answerer.secLeft += 300; deltaMin = 5; }
+        else { answerer.triesLeft += 5; deltaTries = 5; }
       } else {
-        if (kind === 'time') { target.secLeft = Math.max(0, target.secLeft - 300); deltaMin = -5; }
-        else { target.triesLeft = Math.max(0, target.triesLeft - 5); deltaTries = -5; }
+        if (kind === 'time') { answerer.secLeft = Math.max(0, answerer.secLeft - 300); deltaMin = -5; }
+        else { answerer.triesLeft = Math.max(0, answerer.triesLeft - 5); deltaTries = -5; }
       }
       q.resolved = true;
-      q.result = { correct, deltaMin, deltaTries, targetName: target.name };
+      q.result = { correct, deltaMin, deltaTries, targetName: answerer.name };
       const deltaTxt = kind === 'time' ? `${correct ? '+' : '−'}5 мин` : `${correct ? '+' : '−'}5 попыток`;
-      log(
-        correct
-          ? `✔ ${target.name}: верный ответ на квиз! ${deltaTxt}`
-          : `✖ ${target.name}: ${a.answer === null || a.answer === undefined || String(a.answer).trim() === '' ? 'время вышло' : 'неверно'}. ${deltaTxt}`,
-      );
+      log(correct ? `✔ ${answerer.name}: верный ответ на квиз! ${deltaTxt}` : `✖ ${answerer.name}: неверно. ${deltaTxt}`);
+      checkElim();
+      break;
+    }
+    case 'quizTimeout': {
+      // время вышло: штраф тому, на ком «висел» вопрос (в гонке — спросившему)
+      const q = s.quiz;
+      if (!q || q.resolved || !q.startedAt || s.phase !== 'playing') break;
+      const qd = (map.quizzes ?? []).find((x) => x.id === q.quizId);
+      if (!qd) { s.quiz = null; endTurnNow(); break; }
+      if (Date.now() - q.startedAt < qd.timeLimit * 1000) break;
+      const loserId = qd.type === 'mystery' ? q.targetId : q.askerId;
+      const loser = s.players.find((x) => x.id === loserId);
+      if (!loser) { s.quiz = null; endTurnNow(); break; }
+      const kind = Math.random() < 0.5 ? 'time' : 'tries';
+      let deltaMin = 0;
+      let deltaTries = 0;
+      if (kind === 'time') { loser.secLeft = Math.max(0, loser.secLeft - 300); deltaMin = -5; }
+      else { loser.triesLeft = Math.max(0, loser.triesLeft - 5); deltaTries = -5; }
+      q.resolved = true;
+      q.result = { correct: false, deltaMin, deltaTries, targetName: loser.name };
+      log(`⏰ Время вышло! ${loser.name}: ${kind === 'time' ? '−5 мин' : '−5 попыток'}`);
       checkElim();
       break;
     }
     case 'quizDone': {
-      if (!s.quiz || s.phase !== 'playing') break;
+      const q = s.quiz;
+      if (!q || !q.resolved || s.phase !== 'playing') break;
+      if (a.id !== q.askerId) break; // ход передаёт тот, кто встал на ячейку
       s.quiz = null;
       const p = current();
       p.extraTurn = false;

@@ -86,11 +86,11 @@ export default function QuizEditor() {
   const saveDraft = async () => {
     if (!map || !draft) return;
     if (!draft.question.trim()) { sfx.fail(); toast('Напишите вопрос', 'err'); return; }
-    const needsOptions = draft.type === 'choice' || draft.type === 'music' || draft.type === 'mystery';
+    const needsOptions = draft.type === 'choice' || draft.type === 'mystery';
     if (needsOptions && (draft.options ?? []).filter((o) => o.trim()).length < 2) {
       sfx.fail(); toast('Заполните хотя бы 2 варианта ответа', 'err'); return;
     }
-    if (draft.type === 'text' && (draft.answers ?? []).filter((a) => a.trim()).length === 0) {
+    if ((draft.type === 'text' || draft.type === 'music') && (draft.answers ?? []).filter((a) => a.trim()).length === 0) {
       sfx.fail(); toast('Добавьте хотя бы один верный ответ', 'err'); return;
     }
     if (draft.type === 'music' && !draft.audioId) { sfx.fail(); toast('Загрузите мелодию', 'err'); return; }
@@ -255,8 +255,8 @@ export default function QuizEditor() {
                   </Field>
                 )}
 
-                {draft.type === 'text' ? (
-                  <Field label="Верные ответы (каждый с новой строки — засчитается любое написание)">
+                {draft.type === 'text' || draft.type === 'music' ? (
+                  <Field label="Верные ответы (каждый с новой строки — засчитается любое написание, регистр не важен)">
                     <textarea
                       className="field-in w-full px-3 py-2 text-sm h-20 resize-none font-mono"
                       value={(draft.answers ?? []).join('\n')}

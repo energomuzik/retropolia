@@ -175,6 +175,7 @@ export interface GameSession {
   v: number;
   code: string;
   mapId: string;
+  usedQuizzes: string[]; // уже прозвучавшие вопросы — в этой партии не повторяются
   phase: 'lobby' | 'rollOff' | 'playing' | 'over';
   players: PlayerState[];
   rollOffIdx: number;

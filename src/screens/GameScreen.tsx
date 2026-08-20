@@ -8,6 +8,7 @@ import { cardArt, cartridgeArt } from '../assets';
 import NesBox, { type NesApi } from '../NesBox';
 import SegaBox, { type SegaApi } from '../SegaBox';
 import { saveSessionSnapshot } from './Lobby';
+import QuizOverlay from './QuizOverlay';
 import KeyBinder from '../KeyBinder';
 import { Field, GhostBtn, Ic, Modal, PxBtn } from '../ui';
 import { PLAYER_COLORS, SKIP_COST } from '../types';
@@ -315,7 +316,7 @@ export default function GameScreen() {
   const votesNeed = aliveCount;
 
   const startHold = () => {
-    if (!myTurn || s.moving || ch || s.pendingCard || s.awaitPost) return;
+    if (!myTurn || s.moving || ch || s.pendingCard || s.awaitPost || s.quiz) return;
     holdStartRef.current = Date.now();
     setShake({ holding: true, a: 1, b: 1 });
     shakeIntRef.current = window.setInterval(() => {
@@ -458,7 +459,7 @@ export default function GameScreen() {
         )}
 
         {/* ---------- кубики ---------- */}
-        {s.phase === 'playing' && !ch && !s.pendingCard && !s.awaitPost && (
+        {s.phase === 'playing' && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2">
             <div className="flex gap-3">
               <DieFace v={s.moving || (!myTurn && s.dice) ? s.dice?.a ?? 1 : shake.holding ? shake.a : s.dice?.a ?? 6} dropping={!!s.dice && !shake.holding && !s.moving} />
@@ -873,6 +874,9 @@ export default function GameScreen() {
       )}
 
       {tplOpen && <TemplateModal cellIdx={active?.pos ?? 0} onClose={() => setTplOpen(false)} />}
+
+      {/* ---------- квиз (видят все живые игроки) ---------- */}
+      <QuizOverlay />
     </div>
   );
 }
