@@ -75,28 +75,23 @@ export default function EmulatorLauncher() {
     sfx.start();
   };
 
-  // Загрузка сохранения: для SEGA того же запущенного рома — прямо в работающее ядро,
-  // без перезапуска (иначе ядро грузилось бы заново и мог оставаться старый звук).
+  // Загрузка сохранения SEGA: перезапуск ядра с применением состояния через
+  // документированный EJS_loadStateURL — гарантированно работает (в отличие от «живого» setState).
   const loadSave = (s: SaveDef) => {
-    if (rom && rom.ext !== 'nes' && running && launchedRomRef.current === rom.id && segaApiRef.current) {
-      segaApiRef.current.loadState(s.state as string, (r) => {
-        if (r.ok) {
-          sfx.coin();
-          toast(`Сохранение (слот ${s.slot}) загружено · ${r.how}`, 'ok');
-        } else {
-          sfx.fail();
-          toast(`SEGA: загрузка не удалась — ${r.how}${r.errs?.length ? ' · ' + r.errs.join('; ') : ''}`, 'err');
-        }
-      });
+    if (rom && rom.ext !== 'nes' && running && segaApiRef.current) {
+      segaApiRef.current.loadSaveReliable(s.state as string);
+      setRunState(s.state);
+      sfx.coin();
+      toast(`Загружаю сохранение (слот ${s.slot})…`, 'ok');
       return;
     }
     void launch(s.state);
   };
 
-  // Сброс: для запущенной SEGA — рестарт ядра без перезагрузки, иначе полный перезапуск.
+  // Сброс: для запущенной SEGA — перезапуск ядра с начала (без состояния).
   const resetEmu = () => {
     if (rom && rom.ext !== 'nes' && running && segaApiRef.current) {
-      segaApiRef.current.reset();
+      segaApiRef.current.loadSaveReliable(null);
       setRunState(undefined);
       sfx.click();
       return;

@@ -83,14 +83,8 @@ export default function GameScreen() {
   useEffect(() => {
     if (reloadId > 0) {
       if (isSega) {
-        const st = (saveState as string | null) ?? null;
-        if (st) {
-          segaApiRef.current?.loadState(st, (r) => {
-            if (!r.ok) useApp.getState().toast(`SEGA: перезапуск сохранения не удался (${r.how})`, 'err');
-          });
-        } else {
-          segaApiRef.current?.reset();
-        }
+        // SEGA: перезапуск ядра с сохранением (или с начала, если слота нет) — надёжно
+        segaApiRef.current?.loadSaveReliable((saveState as string | null) ?? null);
       } else {
         nesApiRef.current?.reload(saveState ?? undefined);
       }

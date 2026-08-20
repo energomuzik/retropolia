@@ -3,13 +3,12 @@ import { useApp } from './store';
 
 const CDN_DATA = 'https://cdn.emulatorjs.org/stable/data/';
 
-export interface SegaLoadResult { ok: boolean; how: string; errs?: string[]; }
-
 export interface SegaApi {
-  snapshot: () => Promise<string | null>; // base64-состояние ядра
-  loadState: (state: string, onResult?: (r: SegaLoadResult) => void) => void; // без перезапуска
-  reset: () => void;
-  pause: (p: boolean) => void;
+  snapshot: () => Promise<string | null>; // base64-состояние ядра (живое, без перезапуска)
+  /** Перезапуск ядра с применением сохранения (null = старт с начала).
+   *  Использует документированный EJS_loadStateURL — гарантированно работает. */
+  loadSaveReliable: (b64: string | null) => void;
+  pause: (p: boolean) => void; // живая пауза (без перезапуска)
 }
 
 function coreFor(ext: string): string {
@@ -45,21 +44,24 @@ export default function SegaBox({
   const [html, setHtml] = useState<string | null>(null);
   const pausedRef = useRef(paused ?? false);
   pausedRef.current = paused ?? false;
-  const initStateRef = useRef<string | null>(initialState ?? null);
-  initStateRef.current = initialState ?? null;
   const pendingRef = useRef<Record<string, (s: string | null) => void>>({});
-  const resultRef = useRef<Record<string, (r: SegaLoadResult) => void>>({});
   const readyRef = useRef(false);
   const romNameRef = useRef('game.' + (ext || 'md'));
+  // Сохранение, которое нужно применить при старте ядра (EJS_loadStateURL).
+  // null = старт с начала рома. Меняется через loadSaveReliable → перезапуск.
+  const bootStateRef = useRef<string | null>(initialState ?? null);
+  const [bootTick, setBootTick] = useState(0);
 
   const core = coreFor(ext);
 
-  // документ iframe строится сразу; ядро подтянется с CDN (кэш браузера после 1-го запуска)
+  // документ iframe строится сразу; ядро подтянется с CDN (кэш браузера после 1-го запуска).
+  // bootStateRef «впекается» в документ — при загрузке ядро само применит сохранение.
   useEffect(() => {
     const opts = useApp.getState().options;
     const volume = opts.emuSound ? Math.max(0, Math.min(1, opts.emuVolume ?? 1)) : 0;
-    setHtml(buildHtml(core, volume, CDN_DATA));
-  }, [core, romData]);
+    setHtml(buildHtml(core, volume, CDN_DATA, bootStateRef.current));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [core, romData, bootTick]);
 
   useEffect(() => {
     if (!html) return;
@@ -83,13 +85,8 @@ export default function SegaBox({
       } else if (d.type === 'ejs-ready') {
         readyRef.current = true;
         setStatus('ready');
+        // применим текущую паузу сразу после старта (сохранение уже «впечено» через EJS_loadStateURL)
         try { frameRef.current?.contentWindow?.postMessage({ type: 'pause', paused: pausedRef.current }, '*'); } catch { /* noop */ }
-        if (initStateRef.current) {
-          const st = initStateRef.current;
-          setTimeout(() => {
-            try { frameRef.current?.contentWindow?.postMessage({ type: 'load-state', state: st }, '*'); } catch { /* noop */ }
-          }, 500);
-        }
       } else if (d.type === 'ejs-error') {
         setStatus((prev) => (prev === 'ready' ? prev : 'error'));
       } else if (d.type === 'ejs-state' && d.reqId) {
@@ -97,12 +94,6 @@ export default function SegaBox({
         if (cb) {
           delete pendingRef.current[d.reqId];
           cb(d.state ?? null);
-        }
-      } else if (d.type === 'ejs-load-result' && d.reqId) {
-        const cb = resultRef.current[d.reqId];
-        if (cb) {
-          delete resultRef.current[d.reqId];
-          cb({ ok: !!d.ok, how: d.how ?? '?', errs: d.errs });
         }
       }
     };
@@ -121,28 +112,9 @@ export default function SegaBox({
             }
           }, 3500);
         }),
-      loadState: (st, onResult) => {
-        if (!st) {
-          onResult?.({ ok: false, how: 'пустое состояние' });
-          return;
-        }
-        if (onResult) {
-          const reqId = Math.random().toString(36).slice(2);
-          resultRef.current[reqId] = onResult;
-          try { frameRef.current?.contentWindow?.postMessage({ type: 'load-state', state: st, reqId }, '*'); } catch { /* noop */ }
-          setTimeout(() => {
-            const cb = resultRef.current[reqId];
-            if (cb) {
-              delete resultRef.current[reqId];
-              cb({ ok: false, how: 'таймаут ответа ядра' });
-            }
-          }, 4000);
-        } else {
-          try { frameRef.current?.contentWindow?.postMessage({ type: 'load-state', state: st }, '*'); } catch { /* noop */ }
-        }
-      },
-      reset: () => {
-        try { frameRef.current?.contentWindow?.postMessage({ type: 'reset' }, '*'); } catch { /* noop */ }
+      loadSaveReliable: (b64) => {
+        bootStateRef.current = b64 ?? null;
+        setBootTick((t) => t + 1); // перестроить html → iframe перезапустится и применит сохранение при старте
       },
       pause: (p) => {
         try { frameRef.current?.contentWindow?.postMessage({ type: 'pause', paused: !!p }, '*'); } catch { /* noop */ }
@@ -156,7 +128,6 @@ export default function SegaBox({
       const f = frameRef.current;
       if (f) f.srcdoc = '';
       pendingRef.current = {};
-      resultRef.current = {};
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [html]);
@@ -198,18 +169,17 @@ export default function SegaBox({
           </span>
         </div>
       )}
-      <div className="absolute bottom-1 left-2 font-pixel text-[7px] text-[rgba(233,236,255,0.35)] z-10">
-        CORE: CDN
-      </div>
       <div className="absolute bottom-1 right-2 font-pixel text-[7px] text-[rgba(233,236,255,0.35)] z-10">GENESIS PLUS GX</div>
     </div>
   );
 }
 
-function buildHtml(core: string, volume: number, base: string): string {
+function buildHtml(core: string, volume: number, base: string, bootStateB64: string | null): string {
   // Внутренний документ: чистое окно без тулбара, общается с хостом через postMessage.
   // Ром приходит сообщением 'boot' как ArrayBuffer; blob-URL создаётся ВНУТРИ iframe —
   // с именем и расширением файла (иначе ядро стартует «пустым» и показывает меню RetroArch).
+  // Сохранение (если есть) применяется через документированный EJS_loadStateURL:
+  // байты состояния кладутся в blob-URL ДО загрузки ядра, и ядро само подхватывает их при старте.
   return [
     '<!DOCTYPE html><html><head><meta charset="utf-8"><style>',
     'html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden}',
@@ -231,15 +201,6 @@ function buildHtml(core: string, volume: number, base: string): string {
     'function gm(){return window.EJS_emulator&&window.EJS_emulator.gameManager;}',
     'function b64(u8){var bin="";for(var i=0;i<u8.length;i+=32768){bin+=String.fromCharCode.apply(null,u8.subarray(i,i+32768));}return btoa(bin);}',
     'function b64ToU8(b){var bin=atob(b);var u8=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++){u8[i]=bin.charCodeAt(i);}return u8;}',
-    // Загрузка состояния: пробуем нативный формат (Uint8Array → setState),
-    // затем официальный «файловый» путь (loadState c blob-URL), затем raw-строку.
-    'function tryLoad(g,s){',
-    '  var errs=[];',
-    '  try{if(typeof g.setState==="function"){g.setState(b64ToU8(s));return {ok:true,how:"setState(bytes)"};}}catch(e){errs.push("setState: "+e);}',
-    '  try{if(typeof g.loadState==="function"){var u=URL.createObjectURL(new Blob([s],{type:"text/plain"}));g.loadState(u);setTimeout(function(){URL.revokeObjectURL(u);},10000);return {ok:true,how:"loadState(file-url)"};}}catch(e){errs.push("loadState(url): "+e);}',
-    '  try{if(typeof g.loadState==="function"){g.loadState(s);return {ok:true,how:"loadState(raw)"};}}catch(e){errs.push("loadState(raw): "+e);}',
-    '  return {ok:false,how:"нет подходящего метода",errs:errs};',
-    '}',
     'function showErr(t){var el=document.getElementById("err");el.textContent=t;el.style.display="block";try{parent.postMessage({type:"ejs-error"},"*");}catch(e){}}',
     'window.EJS_ready=function(){try{parent.postMessage({type:"ejs-ready"},"*");}catch(e){}};',
     'window.addEventListener("message",function(e){',
@@ -251,31 +212,32 @@ function buildHtml(core: string, volume: number, base: string): string {
     '      if(!buf){showErr("Ром не передан в эмулятор");return;}',
     '      var name=d.name||"game.bin";',
     '      var url=URL.createObjectURL(new Blob([buf],{type:"application/octet-stream"}));',
-    '      window.EJS_gameUrl=url;',
+      '      window.EJS_gameUrl=url;',
     '      window.EJS_gameName=name;',
+    // сохранение при старте: байты состояния → blob-URL → EJS_loadStateURL (до загрузки ядра)
+    '      if(' + JSON.stringify(bootStateB64) + '){',
+    '        try{',
+    '          var sb=b64ToU8(' + JSON.stringify(bootStateB64) + ');',
+    '          window.EJS_loadStateURL=URL.createObjectURL(new Blob([sb],{type:"application/octet-stream"}));',
+    '        }catch(e){}',
+    '      }',
     '      var s=document.createElement("script");',
     '      s.src=' + JSON.stringify(base) + '+"loader.js";',
-    '      s.onerror=function(){showErr("Не удалось загрузить ядро (нужен интернет при первом запуске или папка public/data)");};',
-    '      document.body.appendChild(s);',
-    '    }catch(err){showErr("Ошибка запуска: "+err);}',
+    '      s.onerror=function(){showErr("Не удалось загрузить ядро (нужен интернет при первом запуске)");};',
+    '      document.body.appendChild(s);',    '    }catch(err){showErr("Ошибка запуска: "+err);}',
     '    return;',
     '  }',
     '  var g=gm();',
-    // ядро ещё поднимается — отложим управляющие сообщения (до 2 сек)
+    // ядро ещё поднимается — отложим паузу (до 2 сек)
     '  if(!g){',
-    '    if((d.type==="load-state"||d.type==="pause"||d.type==="reset")&&(d.__r||0)<8){',
+    '    if(d.type==="pause"&&(d.__r||0)<8){',
     '      d.__r=(d.__r||0)+1;var dd={};for(var k in d){dd[k]=d[k];}',
     '      setTimeout(function(){window.dispatchEvent(new MessageEvent("message",{data:dd}));},250);',
     '    }',
     '    return;',
     '  }',
     '  try{',
-    '    if(d.type==="load-state"&&d.state){',
-    '      var res=tryLoad(g,d.state);',
-    '      parent.postMessage({type:"ejs-load-result",reqId:d.reqId||null,ok:res.ok,how:res.how,errs:res.errs||[]},"*");',
-    '    }',
-    '    else if(d.type==="reset"){g.restart&&g.restart();}',
-    '    else if(d.type==="pause"){if(d.paused){g.pause&&g.pause();}else{g.play&&g.play();}}',
+    '    if(d.type==="pause"){if(d.paused){g.pause&&g.pause();}else{g.play&&g.play();}}',
     '    else if(d.type==="get-state"){',
     '      var r=g.getState();',
     '      var send=function(s){var out=null;if(typeof s==="string"){out=s;}else if(s&&s.length!==undefined){out=b64(s);}parent.postMessage({type:"ejs-state",state:out,reqId:d.reqId},"*");};',
