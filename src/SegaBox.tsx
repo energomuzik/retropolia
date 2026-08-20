@@ -18,30 +18,14 @@ function coreFor(ext: string): string {
   return 'segaMD'; // md, gen, bin
 }
 
-/* ---------- локальное ядро: public/data важнее CDN ---------- */
-let dataBasePromise: Promise<{ base: string; local: boolean }> | null = null;
-function resolveDataBase(): Promise<{ base: string; local: boolean }> {
-  if (!dataBasePromise) {
-    dataBasePromise = (async () => {
-      try {
-        const probe = new URL('data/loader.js', window.location.href);
-        const r = await fetch(probe, { method: 'HEAD', cache: 'no-store' });
-        if (r.ok) return { base: new URL('data/', window.location.href).href, local: true };
-      } catch { /* нет локальной папки или офлайн */ }
-      return { base: CDN_DATA, local: false };
-    })();
-  }
-  return dataBasePromise;
-}
-
 /**
  * Эмулятор SEGA (Genesis Plus GX / EmulatorJS) в изолированном iframe.
  *
  * — Звук: при размонтировании iframe браузер гарантированно глушит все его
  *   аудиоконтексты и воркеры — «звук прошлого рома» невозможен.
  * — Сохранения: грузятся сообщением в работающий экземпляр (без перезапуска).
- * — Ядро: берётся из public/data, если папка есть (полный офлайн), иначе с CDN
- *   (кэшируется браузером после первого запуска).
+ * — Ядро: подгружается с CDN emulatorjs.org. Первый запуск SEGA-рома скачивает
+ *   его один раз (~10–20 МБ), дальше браузер берёт из кэша — повторных загрузок нет.
  */
 export default function SegaBox({
   romData,
@@ -58,7 +42,6 @@ export default function SegaBox({
 }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
-  const [localCore, setLocalCore] = useState<boolean | null>(null);
   const [html, setHtml] = useState<string | null>(null);
   const pausedRef = useRef(paused ?? false);
   pausedRef.current = paused ?? false;
@@ -71,17 +54,11 @@ export default function SegaBox({
 
   const core = coreFor(ext);
 
-  // документ iframe строится после определения источника ядра (public/data или CDN)
+  // документ iframe строится сразу; ядро подтянется с CDN (кэш браузера после 1-го запуска)
   useEffect(() => {
-    let on = true;
-    void resolveDataBase().then(({ base, local }) => {
-      if (!on) return;
-      setLocalCore(local);
-      const opts = useApp.getState().options;
-      const volume = opts.emuSound ? Math.max(0, Math.min(1, opts.emuVolume ?? 1)) : 0;
-      setHtml(buildHtml(core, volume, base));
-    });
-    return () => { on = false; };
+    const opts = useApp.getState().options;
+    const volume = opts.emuSound ? Math.max(0, Math.min(1, opts.emuVolume ?? 1)) : 0;
+    setHtml(buildHtml(core, volume, CDN_DATA));
   }, [core, romData]);
 
   useEffect(() => {
@@ -207,11 +184,8 @@ export default function SegaBox({
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-[#05070f]">
           <span className="font-pixel text-[9px] text-magma blink-hard">ЗАГРУЗКА ЯДРА SEGA…</span>
           <span className="text-[11px] text-dim px-6 text-center max-w-sm">
-            {localCore === null
-              ? 'Определяем источник ядра…'
-              : localCore
-                ? 'Ядро из public/data — полностью офлайн'
-                : 'Первый запуск скачивает ядро (~10 МБ) и кэширует его. Полный офлайн-режим — см. README (папка public/data).'}
+            Первый запуск SEGA-рома скачивает ядро с CDN (~10–20 МБ, один раз) —
+            дальше браузер берёт его из кэша и повторной загрузки нет.
           </span>
         </div>
       )}
@@ -219,12 +193,13 @@ export default function SegaBox({
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-[#05070f] p-6 text-center">
           <span className="font-pixel text-[9px] text-coral">НЕ УДАЛОСЬ ЗАГРУЗИТЬ ЯДРО</span>
           <span className="text-[11px] text-dim leading-relaxed max-w-sm">
-            Проверьте интернет (первый запуск) или положите папку data в public/ — см. README. Затем перезапустите ром.
+            Для первого запуска SEGA нужен интернет — ядро Genesis Plus GX берётся с CDN emulatorjs.org
+            (один раз, дальше из кэша браузера). Проверьте соединение и перезапустите ром.
           </span>
         </div>
       )}
       <div className="absolute bottom-1 left-2 font-pixel text-[7px] text-[rgba(233,236,255,0.35)] z-10">
-        {localCore ? 'CORE: LOCAL' : 'CORE: CDN'}
+        CORE: CDN
       </div>
       <div className="absolute bottom-1 right-2 font-pixel text-[7px] text-[rgba(233,236,255,0.35)] z-10">GENESIS PLUS GX</div>
     </div>
