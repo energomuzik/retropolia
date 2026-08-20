@@ -16,15 +16,7 @@ function coreFor(ext: string): string {
   return 'segaMD'; // md, gen, bin
 }
 
-function bufToDataUrl(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
-  let bin = '';
-  const CH = 0x8000;
-  for (let i = 0; i < bytes.length; i += CH) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + CH));
-  }
-  return `data:application/octet-stream;base64,${btoa(bin)}`;
-}
+
 
 /**
  * Эмулятор SEGA (Genesis Plus GX / EmulatorJS), запущенный в изолированном iframe.
@@ -59,16 +51,16 @@ export default function SegaBox({
   const pendingRef = useRef<Record<string, (s: string | null) => void>>({});
   const readyRef = useRef(false);
 
-  const romDataUrl = useMemo(() => bufToDataUrl(romData), [romData]);
   const core = coreFor(ext);
   const opts = useApp((s) => s.options);
   const volume = opts.emuSound ? Math.max(0, Math.min(1, opts.emuVolume ?? 1)) : 0;
+  const romNameRef = useRef('game.' + (ext || 'md'));
 
   // srcdoc пересоздаётся только при смене рома/ядра — это и есть «чистый запуск»
   const srcdoc = useMemo(
-    () => buildHtml(core, romDataUrl, volume),
+    () => buildHtml(core, volume),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [core, romDataUrl],
+    [core],
   );
 
   useEffect(() => {
@@ -77,11 +69,23 @@ export default function SegaBox({
     const frame = frameRef.current;
     if (frame) frame.srcdoc = srcdoc;
 
+    const sendBoot = () => {
+      try {
+        frameRef.current?.contentWindow?.postMessage(
+          { type: 'boot', rom: romData, name: romNameRef.current },
+          '*',
+        );
+      } catch { /* noop */ }
+    };
+
     const onMsg = (e: MessageEvent) => {
       if (frame && e.source !== frame.contentWindow) return;
       const d = e.data as { type?: string; state?: string | null; reqId?: string } | null;
       if (!d || typeof d.type !== 'string') return;
-      if (d.type === 'ejs-ready') {
+      if (d.type === 'ejs-hello') {
+        // документ iframe готов — отправляем ром (двоично), он сам создаст blob-URL
+        sendBoot();
+      } else if (d.type === 'ejs-ready') {
         readyRef.current = true;
         setStatus('ready');
         // применим текущую паузу сразу после старта
@@ -182,16 +186,18 @@ export default function SegaBox({
   );
 }
 
-function buildHtml(core: string, romDataUrl: string, volume: number): string {
+function buildHtml(core: string, volume: number): string {
   // Внутренний документ: чистое окно без тулбара, общается с хостом через postMessage.
+  // Ром приходит сообщением 'boot' как ArrayBuffer; blob-URL создаётся ВНУТРИ iframe —
+  // с именем и расширением файла (иначе ядро стартует «пустым» и показывает меню RetroArch).
   return [
     '<!DOCTYPE html><html><head><meta charset="utf-8"><style>',
     'html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden}',
     '#game{position:absolute;inset:0;width:100%;height:100%}',
-    '</style></head><body><div id="game"></div><script>',
+    '#err{display:none;position:absolute;inset:0;color:#ff5d73;font-family:monospace;font-size:12px;padding:16px;background:#05070f}',
+    '</style></head><body><div id="game"></div><div id="err"></div><script>',
     'window.EJS_player="#game";',
     `window.EJS_core=${JSON.stringify(core)};`,
-    `window.EJS_gameUrl=${JSON.stringify(romDataUrl)};`,
     `window.EJS_pathtodata=${JSON.stringify(EJS_DATA)};`,
     'window.EJS_language="ru";',
     'window.EJS_backgroundText="";',
@@ -201,11 +207,30 @@ function buildHtml(core: string, romDataUrl: string, volume: number): string {
     'window.EJS_startOnLoaded=true;',
     'window.EJS_askBeforeExit=false;',
     'window.EJS_Buttons={playPause:false,restart:false,mute:false,settings:false,fullscreen:false,saveState:false,loadState:false,screenRecord:false,gamepad:false,cheat:false,volume:false,saveSavFiles:false,loadSavFiles:false,quickSave:false,quickLoad:false,screenshot:false,cacheManager:false,exitEmulation:false};',
+    'var booted=false;',
     'function gm(){return window.EJS_emulator&&window.EJS_emulator.gameManager;}',
     'function b64(u8){var bin="";for(var i=0;i<u8.length;i+=32768){bin+=String.fromCharCode.apply(null,u8.subarray(i,i+32768));}return btoa(bin);}',
+    'function showErr(t){var el=document.getElementById("err");el.textContent=t;el.style.display="block";parent.postMessage({type:"ejs-error"},"*");}',
     'window.EJS_ready=function(){parent.postMessage({type:"ejs-ready"},"*");};',
     'window.addEventListener("message",function(e){',
-    '  var d=e.data||{};var g=gm();if(!g)return;',
+    '  var d=e.data||{};',
+    '  if(d.type==="boot"&&!booted){',
+    '    booted=true;',
+    '    try{',
+    '      var buf=d.rom instanceof ArrayBuffer?d.rom:(d.rom&&d.rom.buffer?d.rom.buffer:null);',
+    '      if(!buf){showErr("Ром не передан в эмулятор");return;}',
+    '      var name=d.name||"game.bin";',
+    '      var url=URL.createObjectURL(new Blob([buf],{type:"application/octet-stream"}));',
+    '      window.EJS_gameUrl=url;',
+    '      window.EJS_gameName=name;',
+    '      var s=document.createElement("script");',
+    '      s.src=' + JSON.stringify(EJS_DATA) + '+"loader.js";',
+    '      s.onerror=function(){showErr("Не удалось загрузить ядро с CDN (нужен интернет при первом запуске)");};',
+    '      document.body.appendChild(s);',
+    '    }catch(err){showErr("Ошибка запуска: "+err);}',
+    '    return;',
+    '  }',
+    '  var g=gm();if(!g)return;',
     '  try{',
     '    if(d.type==="load-state"&&d.state){g.loadState(d.state);}',
     '    else if(d.type==="reset"){g.restart();}',
@@ -217,8 +242,8 @@ function buildHtml(core: string, romDataUrl: string, volume: number): string {
     '    }',
     '  }catch(err){parent.postMessage({type:"ejs-error"},"*");}',
     '});',
+    'parent.postMessage({type:"ejs-hello"},"*");',
     '</script>',
-    `<script src="${EJS_DATA}loader.js"></script>`,
     '</body></html>',
   ].join('\n');
 }
