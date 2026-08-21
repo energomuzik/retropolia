@@ -567,8 +567,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (!qd) { s.quiz = null; endTurnNow(); break; }
       const answerer = s.players.find((x) => x.id === a.id);
       if (!answerer || !answerer.alive) break;
-      // «кот в мешке» отвечает только получивший; в гонке — любой, кто успел первым
+      // «кот в мешке» отвечает только получивший; в гонке — любой живой игрок
       if (qd.type === 'mystery' && q.targetId !== a.id) break;
+      const answered = q.answered ?? (q.answered = []);
+      // в гонке каждый игрок отвечает ОДИН раз; «кот» может пробовать снова до верного или таймаута
+      if (qd.type !== 'mystery' && answered.some((x) => x.id === answerer.id)) break;
       const norm = (x: string) => x.trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
       let correct = false;
       if (a.answer === null || a.answer === undefined || String(a.answer).trim() === '') {
@@ -578,22 +581,34 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       } else {
         correct = Number(a.answer) === qd.correct;
       }
-      // награда/штраф достаётся тому, кто ответил
-      const kind = Math.random() < 0.5 ? 'time' : 'tries';
-      let deltaMin = 0;
-      let deltaTries = 0;
-      if (correct) {
-        if (kind === 'time') { answerer.secLeft += 300; deltaMin = 5; }
-        else { answerer.triesLeft += 5; deltaTries = 5; }
-      } else {
-        if (kind === 'time') { answerer.secLeft = Math.max(0, answerer.secLeft - 300); deltaMin = -5; }
-        else { answerer.triesLeft = Math.max(0, answerer.triesLeft - 5); deltaTries = -5; }
+      if (!correct) {
+        // ОШИБКА: ресурс снимается сразу, а квиз ПРОДОЛЖАЕТСЯ с тем же таймером,
+        // пока кто-то не ответит верно / не ошибутся все / не выйдет время
+        const kind = Math.random() < 0.5 ? 'time' : 'tries';
+        if (kind === 'time') answerer.secLeft = Math.max(0, answerer.secLeft - 300);
+        else answerer.triesLeft = Math.max(0, answerer.triesLeft - 5);
+        if (!answered.some((x) => x.id === answerer.id)) answered.push({ id: answerer.id, name: answerer.name });
+        log(`✖ ${answerer.name}: неверно (−5 ${kind === 'time' ? 'мин' : 'попыток'})`);
+        if (qd.type !== 'mystery') {
+          const wrongIds = answered.map((x) => x.id);
+          const allWrong = s.players.filter((x) => x.alive).every((x) => wrongIds.includes(x.id));
+          if (allWrong) {
+            q.resolved = true;
+            q.result = { correct: false, deltaMin: 0, deltaTries: 0, targetName: '', reason: 'allWrong' };
+            log('Квиз: ошиблись все живые игроки — бонус никто не получает');
+          }
+        }
+        break;
       }
+      // ВЕРНЫЙ ОТВЕТ: бонус ответившему, квиз завершается
+      const kind2 = Math.random() < 0.5 ? 'time' : 'tries';
+      const deltaMin = kind2 === 'time' ? 5 : 0;
+      const deltaTries = kind2 === 'time' ? 0 : 5;
+      if (kind2 === 'time') answerer.secLeft += 300;
+      else answerer.triesLeft += 5;
       q.resolved = true;
-      q.result = { correct, deltaMin, deltaTries, targetName: answerer.name };
-      const deltaTxt = kind === 'time' ? `${correct ? '+' : '−'}5 мин` : `${correct ? '+' : '−'}5 попыток`;
-      log(correct ? `✔ ${answerer.name}: верный ответ на квиз! ${deltaTxt}` : `✖ ${answerer.name}: неверно. ${deltaTxt}`);
-      checkElim();
+      q.result = { correct: true, deltaMin, deltaTries, targetName: answerer.name, reason: 'correct' };
+      log(`✔ ${answerer.name}: верный ответ! +5 ${kind2 === 'time' ? 'мин' : 'попыток'}`);
       break;
     }
     case 'quizTimeout': {
@@ -612,7 +627,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (kind === 'time') { loser.secLeft = Math.max(0, loser.secLeft - 300); deltaMin = -5; }
       else { loser.triesLeft = Math.max(0, loser.triesLeft - 5); deltaTries = -5; }
       q.resolved = true;
-      q.result = { correct: false, deltaMin, deltaTries, targetName: loser.name };
+      q.result = { correct: false, deltaMin, deltaTries, targetName: loser.name, reason: 'timeout' };
       log(`⏰ Время вышло! ${loser.name}: ${kind === 'time' ? '−5 мин' : '−5 попыток'}`);
       checkElim();
       break;

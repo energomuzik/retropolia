@@ -101,7 +101,7 @@ export const useApp = create<AppState>()((set, get) => ({
   },
 
   room: null,
-  netInfo: { online: false, local: true, links: 0 },
+  netInfo: { online: false, local: true, links: 0, signal: 'connecting' },
   selfId: mkSelfId(),
   session: null,
   sessionMap: null,
@@ -111,7 +111,7 @@ export const useApp = create<AppState>()((set, get) => ({
   leaveRoom: () => {
     const r = get().room;
     if (r) r.close();
-    set({ room: null, session: null, sessionMap: null, netInfo: { online: false, local: true, links: 0 } });
+    set({ room: null, session: null, sessionMap: null, netInfo: { online: false, local: true, links: 0, signal: 'connecting' } });
   },
 }));
 

@@ -69,8 +69,10 @@ export default function QuizOverlay() {
   const remainPct = Math.max(0, Math.min(100, (remain / limit) * 100));
   const iAmAsker = me === q.askerId;
   const iAmTarget = me === q.targetId;
-  // в гонке отвечают все живые; в «коте» — только получивший
-  const canAnswer = !q.resolved && q.startedAt > 0 && !sent && (isMystery ? iAmTarget : true);
+  const wrongList = q.answered ?? [];
+  const meWrong = wrongList.some((x) => x.id === me);
+  // гонка: каждый отвечает один раз (после ошибки — выбыл); «кот»: получивший может пробовать снова
+  const canAnswer = !q.resolved && q.startedAt > 0 && (isMystery ? iAmTarget && (!sent || meWrong) : !sent && !meWrong);
   const seesQuestion = !isMystery || iAmTarget || q.resolved;
 
   const submit = (answer: number | string) => {
@@ -173,8 +175,27 @@ export default function QuizOverlay() {
                     <>
                       {!isMystery && (
                         <p className="text-center text-[11px] text-sky">
-                          Гонка: вопрос видят все. Первый верный ответ забирает бонус, ошибка — штраф ответившему!
+                          Гонка: вопрос видят все. Первый верный ответ забирает бонус, ошибка — штраф ответившему.
+                          Квиз идёт, пока кто-то не ответит верно, не ошибутся все или не выйдет время!
                         </p>
+                      )}
+                      {meWrong && !q.resolved && (
+                        <div className="hud-chip pixel-corners border-coral px-3 py-2 text-center">
+                          <span className="font-display text-[11px] uppercase text-coral">
+                            Ваш ответ неверный — −5 ресурсов.{' '}
+                            {isMystery ? 'Таймер идёт — пробуйте снова!' : 'Ждём остальных игроков…'}
+                          </span>
+                        </div>
+                      )}
+                      {!isMystery && wrongList.length > 0 && (
+                        <div className="flex items-center justify-center gap-2 flex-wrap">
+                          <span className="tick-label text-faint">Ошиблись:</span>
+                          {wrongList.map((w) => (
+                            <span key={w.id} className="hud-chip pixel-corners px-2 py-0.5 font-pixel text-[8px] text-coral">
+                              ✖ {w.name}
+                            </span>
+                          ))}
+                        </div>
                       )}
                       {quiz.type === 'choice' ? (
                         <div className="grid sm:grid-cols-2 gap-2.5">
@@ -206,7 +227,9 @@ export default function QuizOverlay() {
                           </PxBtn>
                         </div>
                       )}
-                      {sent && <p className="text-center font-pixel text-[8px] text-gold blink-hard">ОТВЕТ ОТПРАВЛЕН…</p>}
+                      {sent && !meWrong && (
+                        <p className="text-center font-pixel text-[8px] text-gold blink-hard">ОТВЕТ ОТПРАВЛЕН…</p>
+                      )}
                     </>
                   )}
                 </div>
@@ -225,15 +248,43 @@ export default function QuizOverlay() {
           {/* ---------- результат ---------- */}
           {q.resolved && q.result && (
             <div className="text-center pt-2 pop-in">
-              <div className={`font-pixel text-xl ${q.result.correct ? 'text-teal' : 'text-coral'} title-glow`}>
-                {q.result.correct ? 'ВЕРНО!' : remain <= 0 ? 'ВРЕМЯ ВЫШЛО' : 'МИМО!'}
+              <div
+                className={`font-pixel text-xl title-glow ${
+                  q.result.correct ? 'text-teal' : q.result.reason === 'timeout' ? 'text-gold' : 'text-coral'
+                }`}
+              >
+                {q.result.correct ? 'ВЕРНО!' : q.result.reason === 'timeout' ? 'ВРЕМЯ ВЫШЛО' : 'ОШИБЛИСЬ ВСЕ'}
               </div>
-              <p className="text-[13px] text-paper mt-3">
-                {q.result.targetName}:{' '}
-                <span className={q.result.correct ? 'text-teal' : 'text-coral'}>
-                  {q.result.deltaMin !== 0 ? `${q.result.deltaMin > 0 ? '+' : '−'}5 минут` : `${q.result.deltaTries > 0 ? '+' : '−'}5 попыток`}
-                </span>
-              </p>
+
+              {q.result.correct ? (
+                <p className="text-[13px] text-paper mt-3">
+                  {q.result.targetName}:{' '}
+                  <span className="text-teal">
+                    {q.result.deltaMin !== 0 ? `+${q.result.deltaMin} минут` : `+${q.result.deltaTries} попыток`}
+                  </span>
+                </p>
+              ) : q.result.reason === 'timeout' ? (
+                <p className="text-[13px] text-paper mt-3">
+                  Вопрос повис на игроке {q.result.targetName}:{' '}
+                  <span className="text-coral">
+                    {q.result.deltaMin !== 0 ? `−${Math.abs(q.result.deltaMin)} минут` : `−${Math.abs(q.result.deltaTries)} попыток`}
+                  </span>
+                </p>
+              ) : (
+                <p className="text-[13px] text-dim mt-3">Каждый ответивший потерял по 5 ресурсов — бонус никто не забрал</p>
+              )}
+
+              {wrongList.length > 0 && (
+                <div className="flex items-center justify-center gap-2 flex-wrap mt-3">
+                  <span className="tick-label text-faint">Штрафы за ошибки:</span>
+                  {wrongList.map((w) => (
+                    <span key={w.id} className="hud-chip pixel-corners px-2 py-0.5 font-pixel text-[8px] text-coral">
+                      ✖ {w.name} −5
+                    </span>
+                  ))}
+                </div>
+              )}
+
               {correctText && (
                 <p className="text-[12px] text-dim mt-2">
                   Правильный ответ: <span className="text-teal">{correctText}</span>

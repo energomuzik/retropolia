@@ -50,7 +50,14 @@ export interface QuizRun {
   targetId: string; // кто отвечает («кот в мешке» может передать)
   startedAt: number;
   resolved: boolean;
-  result?: { correct: boolean; deltaMin: number; deltaTries: number; targetName: string };
+  answered?: { id: string; name: string }[]; // ошибившиеся игроки (в гонке отвечают один раз)
+  result?: {
+    correct: boolean;
+    deltaMin: number;
+    deltaTries: number;
+    targetName: string;
+    reason: 'correct' | 'allWrong' | 'timeout';
+  };
 }
 
 export type EffectType =

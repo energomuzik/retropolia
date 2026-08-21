@@ -195,19 +195,120 @@ export function LoadScreen() {
   );
 }
 
+/* ---------- панель ожидания гостя с диагностикой ---------- */
+
+function GuestWaitPanel({
+  isGuest, code, signal, errorType, waited, onBack,
+}: {
+  isGuest: boolean;
+  code: string;
+  signal: 'connecting' | 'online' | 'error';
+  errorType?: string;
+  waited: number;
+  onBack: () => void;
+}) {
+  // Конкретная причина, а не вечное «подключение…»
+  const failed = signal === 'error';
+  const roomNotFound = errorType === 'peer-unavailable';
+  const tooLong = !failed && waited > 25;
+
+  return (
+    <div className="pixel-panel pixel-corners pop-in p-6 text-center">
+      {!failed && !tooLong && (
+        <>
+          <span className="text-sky inline-block floaty">{Ic.globe(44)}</span>
+          <div className="font-pixel text-[10px] text-paper mt-4 blink-hard">
+            {signal === 'connecting' ? 'ПОДКЛЮЧАЕМСЯ К РЕЛЕ-СЕРВЕРУ…' : `СТУЧИМСЯ В КОМНАТУ ${code}…`}
+          </div>
+          <p className="text-[12px] text-dim mt-3 leading-relaxed">
+            {signal === 'connecting'
+              ? 'Устанавливаем связь с интернет-ретранслятором PeerJS. Обычно пара секунд.'
+              : 'Ретранслятор на связи, ищем хоста с таким кодом. Хост должен держать игру открытой.'}
+          </p>
+          <p className="tick-label text-faint mt-2">ждём {waited} с</p>
+        </>
+      )}
+
+      {failed && (
+        <>
+          <span className="text-coral inline-block">{Ic.cross(44)}</span>
+          <div className="font-display uppercase tracking-wider text-coral text-lg mt-4">
+            {roomNotFound ? 'Комната не найдена' : 'Нет связи с реле-сервером'}
+          </div>
+          <div className="text-left text-[12.5px] text-dim mt-4 space-y-2 leading-relaxed">
+            {roomNotFound ? (
+              <>
+                <p>Реле-сервер не знает комнату <span className="text-paper font-pixel text-[10px]">{code}</span>. Проверьте:</p>
+                <p>• Хост уже <span className="text-paper">создал игру</span> и держит её открытой (не закрыл вкладку).</p>
+                <p>• Код введён без ошибок — 4 символа, один в один.</p>
+                <p>• У обоих игроков <span className="text-paper">одна версия игры</span> (версия зашита в код комнаты).</p>
+              </>
+            ) : (
+              <>
+                <p>Не удалось достучаться до интернет-ретранслятора PeerJS. Возможные причины:</p>
+                <p>• На этом компьютере <span className="text-paper">нет интернета</span> или он закрыт (VPN, корпоративный файрвол, антивирус).</p>
+                <p>• Попробуйте раздать мобильный хот-спот и отключить VPN.</p>
+                <p>• Для онлайн-игры интернет нужен <span className="text-paper">обоим</span> компьютерам, даже в одной квартире.</p>
+              </>
+            )}
+          </div>
+        </>
+      )}
+
+      {!failed && tooLong && (
+        <>
+          <span className="text-gold inline-block">{Ic.clock(44)}</span>
+          <div className="font-display uppercase tracking-wider text-gold text-lg mt-4">Стучимся уже {waited} с</div>
+          <div className="text-left text-[12.5px] text-dim mt-4 space-y-2 leading-relaxed">
+            <p>Реле-сервер на связи, но хост не отвечает. Чаще всего это значит:</p>
+            <p>• Хост ещё <span className="text-paper">не нажал «Создать игру»</span> или закрыл вкладку.</p>
+            <p>• Вы стучитесь на <span className="text-paper">свой</span> localhost, а игра хоста запущена на другом компьютере — тогда обоим нужно открыть один и тот же сайт (см. README, «Как играть онлайн»).</p>
+            <p>• Коды на двух компьютерах должны совпадать.</p>
+          </div>
+        </>
+      )}
+
+      {(!isGuest || failed || tooLong) && (
+        <div className="mt-6">
+          <GhostBtn onClick={onBack}>{Ic.back(14)} Вернуться в меню</GhostBtn>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---------- лобби комнаты ---------- */
 
 export function LobbyScreen() {
   const { session, room, netInfo, setScreen, leaveRoom, selfId, options, tokens } = useApp();
+  const [waited, setWaited] = useState(0);
 
   useEffect(() => {
     if (!room) setScreen('menu');
   }, [room, setScreen]);
 
+  // счётчик ожидания для гостя, пока нет session
+  useEffect(() => {
+    if (!room || room.isHost || session) return;
+    const t = setInterval(() => setWaited((w) => w + 1), 1000);
+    return () => clearInterval(t);
+  }, [room, session]);
+
   if (!room || !session) {
+    const isGuest = room ? !room.isHost : false;
     return (
-      <div className="h-full crt-grid-bg flex items-center justify-center">
-        <div className="font-pixel text-[10px] text-dim blink-hard">ПОДКЛЮЧЕНИЕ…</div>
+      <div className="h-full crt-grid-bg overflow-y-auto relative">
+        <div className="absolute inset-0 starfield opacity-50 pointer-events-none" />
+        <div className="relative z-10 max-w-xl mx-auto px-6 py-12">
+          <GuestWaitPanel
+            isGuest={isGuest}
+            code={room?.code ?? '????'}
+            signal={netInfo.signal}
+            errorType={netInfo.errorType}
+            waited={waited}
+            onBack={() => { leaveRoom(); setScreen('menu'); }}
+          />
+        </div>
       </div>
     );
   }
@@ -227,7 +328,22 @@ export function LobbyScreen() {
       <div className="absolute inset-0 starfield opacity-50 pointer-events-none" />
       <div className="relative z-10 max-w-3xl mx-auto px-6 py-10">
         <div className="text-center">
-          <div className="tick-label text-teal mb-2">{netInfo.online ? 'P2P-канал активен' : netInfo.local ? 'Tab-канал активен (вкладки браузера)' : 'Переподключение…'} · пиров: {netInfo.links}</div>
+          <div className="flex items-center justify-center gap-2 flex-wrap mb-2">
+            <span
+              className={`hud-chip pixel-corners px-2.5 py-1 font-pixel text-[8px] ${
+                netInfo.signal === 'online' ? 'text-teal' : netInfo.signal === 'error' ? 'text-coral' : 'text-gold'
+              }`}
+            >
+              {netInfo.signal === 'online' ? 'РЕЛЕ: НА СВЯЗИ' : netInfo.signal === 'error' ? 'РЕЛЕ: НЕТ СВЯЗИ' : 'РЕЛЕ: ПОДКЛ…'}
+            </span>
+            <span className={`hud-chip pixel-corners px-2.5 py-1 font-pixel text-[8px] ${netInfo.online ? 'text-teal' : netInfo.local ? 'text-sky' : 'text-gold'}`}>
+              {netInfo.online ? 'P2P-КАНАЛ' : netInfo.local ? 'TAB-КАНАЛ' : 'СОЕДИНЕНИЕ…'}
+            </span>
+            <span className="hud-chip pixel-corners px-2.5 py-1 font-pixel text-[8px] text-dim">ПИРОВ: {netInfo.links}</span>
+          </div>
+          {netInfo.signal === 'error' && (
+            <p className="text-[11px] text-coral mb-2">Нет связи с реле-сервером — игроки с других компьютеров не подключатся. Проверьте интернет/VPN.</p>
+          )}
           <div className="font-pixel text-gold title-glow text-lg">КОМНАТА</div>
           <button onClick={copyCode} className="mt-3 inline-flex items-center gap-4 hud-chip pixel-corners px-8 py-4 cursor-pointer hover:border-gold transition-colors group">
             <span className="font-pixel text-4xl tracking-[0.3em] text-paper group-hover:text-gold transition-colors">{session.code}</span>

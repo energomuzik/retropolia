@@ -6,6 +6,8 @@ export interface NetInfo {
   online: boolean; // есть ли peer-соединение через интернет (PeerJS)
   local: boolean; // доступен tab-канал (BroadcastChannel)
   links: number; // число подключённых пиров (у хоста)
+  signal: 'connecting' | 'online' | 'error'; // статус соединения с ретранслятором PeerJS
+  errorType?: string; // 'peer-unavailable' = комната не найдена, 'unavailable-id' = код занят, прочее = сеть
 }
 
 export interface Room {
@@ -38,8 +40,17 @@ export function createRoom(
   const conns = new Map<string, DataConnection>();
   let hostConn: DataConnection | null = null;
   let onlineLink = false;
+  let signal: NetInfo['signal'] = 'connecting';
+  let errorType: string | undefined;
 
-  const info = () => onNet({ online: onlineLink, local: !!bc, links: isHost ? conns.size : hostConn && hostConn.open ? 1 : 0 });
+  const info = () =>
+    onNet({
+      online: onlineLink,
+      local: !!bc,
+      links: isHost ? conns.size : hostConn && hostConn.open ? 1 : 0,
+      signal,
+      errorType,
+    });
 
   const deliver = (m: NetMsg) => {
     if (closed || !m || typeof m.mid !== 'string') return;
@@ -90,6 +101,7 @@ export function createRoom(
   try {
     if (isHost) {
       peer = new Peer(chanName, { debug: 0 });
+      peer.on('open', () => { signal = 'online'; errorType = undefined; info(); });
       peer.on('connection', (conn) => {
         conns.set(conn.peer, conn);
         conn.on('open', () => { onlineLink = true; info(); });
@@ -97,11 +109,19 @@ export function createRoom(
         conn.on('close', () => { conns.delete(conn.peer); onlineLink = conns.size > 0; info(); });
         conn.on('error', () => { conns.delete(conn.peer); info(); });
       });
-      peer.on('error', () => { /* остаёмся на tab-канале */ info(); });
+      peer.on('error', (e) => {
+        const t = (e as { type?: string }).type;
+        if (t === 'unavailable-id') { signal = 'error'; errorType = 'unavailable-id'; }
+        else if (t !== 'peer-unavailable') { signal = signal === 'online' ? 'online' : 'error'; errorType = t ?? 'network'; }
+        info();
+      });
       peer.on('disconnected', () => { try { peer?.reconnect(); } catch { /* noop */ } });
     } else {
       peer = new Peer({ debug: 0 });
       peer.on('open', () => {
+        signal = 'online';
+        errorType = undefined;
+        info();
         const conn = peer!.connect(chanName, { reliable: true });
         hostConn = conn;
         conn.on('open', () => {
@@ -116,7 +136,12 @@ export function createRoom(
         conn.on('close', () => { onlineLink = false; info(); });
         conn.on('error', () => { onlineLink = false; info(); });
       });
-      peer.on('error', () => { info(); });
+      peer.on('error', (e) => {
+        const t = (e as { type?: string }).type;
+        signal = 'error';
+        errorType = t === 'peer-unavailable' ? 'peer-unavailable' : (t ?? 'network');
+        info();
+      });
     }
   } catch {
     peer = null;
