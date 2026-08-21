@@ -8,8 +8,27 @@ export const boardSize = (map: GameMap) => ({ w: map.cols * CELL, h: map.rows * 
 export const cellCenter = (map: GameMap, idx: number) => {
   const c = map.cells[idx];
   if (!c) return { x: 0, y: 0 };
-  return { x: (c.x + 0.5) * CELL, y: (c.y + 0.5) * CELL };
+  return { x: (c.x + (c.w || 1) / 2) * CELL, y: (c.y + (c.h || 1) / 2) * CELL };
 };
+
+/** клетка (gx,gy) занята ячейкой (для расстановки W×H ячеек в редакторе) */
+export function cellCovers(map: GameMap, gx: number, gy: number): number {
+  return map.cells.findIndex(
+    (c) => gx >= c.x && gx < c.x + (c.w || 1) && gy >= c.y && gy < c.y + (c.h || 1),
+  );
+}
+
+/** свободна ли прямоугольная область под ячейку w×h (нет других ячеек и в пределах поля) */
+export function areaFree(map: GameMap, x: number, y: number, w: number, h: number, ignoreIdx = -1): boolean {
+  if (x < 0 || y < 0 || x + w > map.cols || y + h > map.rows) return false;
+  for (let gy = y; gy < y + h; gy++) {
+    for (let gx = x; gx < x + w; gx++) {
+      const idx = cellCovers(map, gx, gy);
+      if (idx >= 0 && idx !== ignoreIdx) return false;
+    }
+  }
+  return true;
+}
 
 export function fitView(map: GameMap, w: number, h: number) {
   const b = boardSize(map);
@@ -140,8 +159,12 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const owner = o.captured[i];
     const isCur = o.currentCell === i;
     const isMystery = !!o.mystery?.has(i);
-    const pulse = isCur ? 1 + Math.sin(o.time / 160) * 0.06 : 1;
-    const size = 44 * pulse;
+    const cw = cell.w || 1;
+    const chh = cell.h || 1;
+    const big = cw > 1 || chh > 1;
+    const pulse = isCur ? 1 + Math.sin(o.time / 160) * 0.05 : 1;
+    const W = (big ? cw * CELL - 6 : 44) * pulse;
+    const H = (big ? chh * CELL - 6 : 44) * pulse;
 
     ctx.save();
     ctx.translate(cx, cy);
@@ -151,25 +174,25 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.lineWidth = 3;
       ctx.setLineDash([6, 5]);
       ctx.lineDashOffset = -o.time / 40;
-      ctx.strokeRect(-30, -30, 60, 60);
+      ctx.strokeRect(-W / 2 - 5, -H / 2 - 5, W + 10, H + 10);
       ctx.setLineDash([]);
     }
 
     if (isMystery) {
       // закрытая ячейка: тёмный фон, знак «?», без подсказок о типе
       ctx.fillStyle = '#141833';
-      ctx.fillRect(-size / 2, -size / 2, size, size);
+      ctx.fillRect(-W / 2, -H / 2, W, H);
       ctx.strokeStyle = '#313c72';
       ctx.lineWidth = 3;
-      ctx.strokeRect(-size / 2, -size / 2, size, size);
+      ctx.strokeRect(-W / 2, -H / 2, W, H);
       ctx.fillStyle = '#5a628f';
-      ctx.font = '15px "Press Start 2P", monospace';
+      ctx.font = `${big ? 20 : 15}px "Press Start 2P", monospace`;
       ctx.textAlign = 'center';
-      ctx.fillText('?', 0, 6);
+      ctx.fillText('?', 0, big ? 8 : 6);
       if (o.showNumbers) {
         ctx.fillStyle = '#8f97c9';
         ctx.font = '8px "Press Start 2P", monospace';
-        ctx.fillText(String(cell.n), 0, 18);
+        ctx.fillText(String(cell.n), 0, H / 2 - 6);
       }
       ctx.restore();
       continue;
@@ -178,76 +201,139 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const base = cell.type === 'bonus' ? '#0d3f2e' : cell.type === 'trap' ? '#43101c' : '#232741';
     const edge = cell.color || (cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : '#8f97c9');
     ctx.fillStyle = base;
-    ctx.fillRect(-size / 2, -size / 2, size, size);
-    // цветовая группа «как в монополии»
-    if (cell.color) {
-      ctx.globalAlpha = 0.3;
-      ctx.fillStyle = cell.color;
-      ctx.fillRect(-size / 2, -size / 2, size, size);
-      ctx.globalAlpha = 1;
-    }
-    ctx.strokeStyle = edge;
-    ctx.lineWidth = 3;
-    ctx.strokeRect(-size / 2, -size / 2, size, size);
-    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(-size / 2 + 3, -size / 2 + 3, size - 6, size - 6);
+    ctx.fillRect(-W / 2, -H / 2, W, H);
 
-    // картинка ячейки или пиксель-иконка типа
-    const cellImg = cell.imageId ? getImage(cell.imageId) : null;
-    if (cellImg) {
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(cellImg, -11, -13, 22, 22);
+    if (big) {
+      /* ---------- крупная ячейка «улица монополии» ---------- */
+      // цветовая полоса сверху (группа улиц)
+      if (cell.color) {
+        ctx.fillStyle = cell.color;
+        ctx.fillRect(-W / 2, -H / 2, W, 15);
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.fillRect(-W / 2, -H / 2 + 15, W, 3);
+      }
+      ctx.strokeStyle = edge;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(-W / 2, -H / 2, W, H);
+
+      if (cell.type === 'task') {
+        // картинка задания + название, если влезает
+        const imgSrc = cell.task?.imageId || cell.imageId;
+        const img = imgSrc ? getImage(imgSrc) : null;
+        const areaTop = -H / 2 + (cell.color ? 20 : 5);
+        const areaH = H - (cell.color ? 20 : 5) - 16;
+        if (img) {
+          ctx.imageSmoothingEnabled = false;
+          const iw = img.width || 1, ih = img.height || 1;
+          const sc = Math.max((W - 10) / iw, areaH / ih);
+          const dw = iw * sc, dh = ih * sc;
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-W / 2 + 4, areaTop, W - 8, areaH);
+          ctx.clip();
+          ctx.drawImage(img, -dw / 2, areaTop + (areaH - dh) / 2, dw, dh);
+          ctx.restore();
+        }
+        const title = (cell.label || cell.task?.title || '').toUpperCase();
+        if (title && W >= CELL * 1.6) {
+          ctx.fillStyle = 'rgba(7,9,18,0.75)';
+          ctx.fillRect(-W / 2 + 3, H / 2 - 15, W - 6, 12);
+          ctx.fillStyle = '#e9ecff';
+          ctx.font = '7px "Press Start 2P", monospace';
+          ctx.textAlign = 'center';
+          const maxChars = Math.floor((W - 12) / 7);
+          ctx.fillText(title.slice(0, maxChars), 0, H / 2 - 6);
+        }
+        // задание не назначено — предупреждение
+        if (!cell.task) {
+          ctx.fillStyle = 'rgba(255,139,63,0.95)';
+          ctx.font = '10px "Press Start 2P", monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('!', W / 2 - 9, -H / 2 + (cell.color ? 30 : 16));
+        }
+      } else {
+        // бонус/ловушка/квиз — крупная иконка и подпись
+        const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : QUIZ;
+        const iconColor = cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : '#5aa9ff';
+        px(ctx, -icon[0].length * 3, -H / 2 + (cell.color ? 24 : 12), 6, icon, iconColor);
+        ctx.fillStyle = '#e9ecff';
+        ctx.font = '8px "Press Start 2P", monospace';
+        ctx.textAlign = 'center';
+        const name = cell.label || (cell.type === 'bonus' ? 'БОНУС' : cell.type === 'trap' ? 'ЛОВУШКА' : 'КВИЗ');
+        ctx.fillText(name.slice(0, Math.floor((W - 10) / 8)).toUpperCase(), 0, H / 2 - 8);
+      }
+      if (o.showNumbers) {
+        ctx.fillStyle = '#e9ecff';
+        ctx.font = '8px "Press Start 2P", monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText(String(cell.n), -W / 2 + 6, H / 2 - 6);
+      }
     } else {
-      const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : cell.type === 'quiz' ? QUIZ : PAD;
-      const iconColor = cell.type === 'task' ? '#ffcf3f' : cell.type === 'quiz' ? '#5aa9ff' : edge;
-      px(ctx, -icon[0].length * 2, -14, 4, icon, iconColor);
-    }
-
-    // короткое название ячейки
-    if (cell.label) {
-      ctx.fillStyle = '#e9ecff';
-      ctx.font = '7px "Press Start 2P", monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(cell.label.slice(0, 9).toUpperCase(), 0, 8);
-    }
-
-    // ячейка-задание без назначенного задания: предупреждающая штриховка по углам
-    if (cell.type === 'task' && !cell.task && !isMystery) {
-      ctx.strokeStyle = 'rgba(255,139,63,0.85)';
+      /* ---------- обычная ячейка 1×1 (схематичная) ---------- */
+      if (cell.color) {
+        ctx.globalAlpha = 0.3;
+        ctx.fillStyle = cell.color;
+        ctx.fillRect(-W / 2, -H / 2, W, H);
+        ctx.globalAlpha = 1;
+      }
+      ctx.strokeStyle = edge;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(-W / 2, -H / 2, W, H);
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)';
       ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(-size / 2 + 6, size / 2 - 6);
-      ctx.lineTo(size / 2 - 6, size / 2 - 6);
-      ctx.stroke();
-      ctx.fillStyle = 'rgba(255,139,63,0.95)';
-      ctx.font = '9px "Press Start 2P", monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('!', size / 2 - 8, -size / 2 + 14);
-    }
+      ctx.strokeRect(-W / 2 + 3, -H / 2 + 3, W - 6, H - 6);
 
-    if (o.showNumbers) {
-      ctx.fillStyle = '#e9ecff';
-      ctx.font = '9px "Press Start 2P", monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(String(cell.n), 0, 17);
+      const cellImg = cell.imageId ? getImage(cell.imageId) : null;
+      if (cellImg) {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(cellImg, -11, -13, 22, 22);
+      } else {
+        const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : cell.type === 'quiz' ? QUIZ : PAD;
+        const iconColor = cell.type === 'task' ? '#ffcf3f' : cell.type === 'quiz' ? '#5aa9ff' : edge;
+        px(ctx, -icon[0].length * 2, -14, 4, icon, iconColor);
+      }
+      if (cell.label) {
+        ctx.fillStyle = '#e9ecff';
+        ctx.font = '7px "Press Start 2P", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(cell.label.slice(0, 9).toUpperCase(), 0, 8);
+      }
+      // задание не назначено — предупреждение
+      if (cell.type === 'task' && !cell.task) {
+        ctx.strokeStyle = 'rgba(255,139,63,0.85)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(-W / 2 + 6, H / 2 - 6);
+        ctx.lineTo(W / 2 - 6, H / 2 - 6);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255,139,63,0.95)';
+        ctx.font = '9px "Press Start 2P", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('!', W / 2 - 8, -H / 2 + 14);
+      }
+      if (o.showNumbers) {
+        ctx.fillStyle = '#e9ecff';
+        ctx.font = '9px "Press Start 2P", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(String(cell.n), 0, 17);
+      }
     }
 
     if (owner && o.colorById[owner]) {
       ctx.fillStyle = o.colorById[owner];
       ctx.beginPath();
-      ctx.moveTo(-size / 2, -size / 2);
-      ctx.lineTo(-size / 2 + 18, -size / 2);
-      ctx.lineTo(-size / 2, -size / 2 + 18);
+      ctx.moveTo(-W / 2, -H / 2);
+      ctx.lineTo(-W / 2 + 18, -H / 2);
+      ctx.lineTo(-W / 2, -H / 2 + 18);
       ctx.fill();
       ctx.strokeStyle = o.colorById[owner];
       ctx.lineWidth = 3;
-      ctx.strokeRect(-size / 2 - 3, -size / 2 - 3, size + 6, size + 6);
+      ctx.strokeRect(-W / 2 - 3, -H / 2 - 3, W + 6, H + 6);
     }
     if (o.hoverCell === i) {
       ctx.strokeStyle = '#ffcf3f';
       ctx.lineWidth = 2;
-      ctx.strokeRect(-size / 2 - 6, -size / 2 - 6, size + 12, size + 12);
+      ctx.strokeRect(-W / 2 - 6, -H / 2 - 6, W + 12, H + 12);
     }
     ctx.restore();
   }

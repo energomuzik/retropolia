@@ -19,6 +19,8 @@ export interface CellDef {
   n: number; // порядковый номер (1-based), он же index+1 в массиве cells
   x: number;
   y: number;
+  w?: number; // ширина в клетках (по умолчанию 1) — «улицы монополии»
+  h?: number; // высота в клетках (по умолчанию 1)
   type: CellType;
   task?: TaskDef | null;
   // оформление «как в монополии»: цвет группы, короткое имя, картинка

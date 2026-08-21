@@ -504,6 +504,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         if (!ch.lowStart && units < SKIP_COST) break;
       }
 
+      // если уже потрачено 5+ ресурсов — платить «ровно 5» нельзя (только фактическую цену)
+      const unitsSpent = ch.mode === 'time' ? Math.floor(ms / 60000) : ch.loads;
+      if (a.instant && !ch.lowStart && unitsSpent >= SKIP_COST) break;
+
       if (ch.mode === 'time' && !a.instant) {
         const cost = Math.max(1, Math.ceil(ms / 60000));
         finishChallenge(false, Math.min(cost, Math.max(1, Math.floor(p.secLeft / 60))) * 60, 0);

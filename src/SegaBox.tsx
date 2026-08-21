@@ -58,10 +58,12 @@ export default function SegaBox({
 
   // документ iframe строится сразу; ядро подтянется с CDN (кэш браузера после 1-го запуска).
   // bootStateRef «впекается» в документ — при загрузке ядро само применит сохранение.
+  // nonce гарантирует уникальность строки при каждом rebuild (иначе React не перезапустит iframe).
   useEffect(() => {
     const opts = useApp.getState().options;
     const volume = opts.emuSound ? Math.max(0, Math.min(1, opts.emuVolume ?? 1)) : 0;
-    setHtml(buildHtml(core, volume, CDN_DATA, bootStateRef.current));
+    const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    setHtml(buildHtml(core, volume, CDN_DATA, bootStateRef.current, nonce));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [core, romData, bootTick]);
 
@@ -188,7 +190,7 @@ export default function SegaBox({
   );
 }
 
-function buildHtml(core: string, volume: number, base: string, bootStateB64: string | null): string {
+function buildHtml(core: string, volume: number, base: string, bootStateB64: string | null, nonce: string): string {
   // Внутренний документ: чистое окно без тулбара, общается с хостом через postMessage.
   // Ром приходит сообщением 'boot' как ArrayBuffer; blob-URL создаётся ВНУТРИ iframe —
   // с именем и расширением файла (иначе ядро стартует «пустым» и показывает меню RetroArch).
@@ -207,6 +209,7 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     'if(t==="webgl"||t==="webgl2"||t==="experimental-webgl"){a=Object.assign({},a,{preserveDrawingBuffer:true});}',
     'return _gc.call(this,t,a);};})();',
     'window.EJS_player="#game";',
+    `var __bootNonce=${JSON.stringify(nonce)};`,
     `window.EJS_core=${JSON.stringify(core)};`,
     `window.EJS_pathtodata=${JSON.stringify(base)};`,
     'window.EJS_language="ru";',
@@ -216,7 +219,9 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     `window.EJS_volume=${volume};`,
     'window.EJS_startOnLoaded=true;',
     'window.EJS_askBeforeExit=false;',
-    'window.EJS_Buttons={playPause:false,restart:false,mute:false,settings:false,fullscreen:false,saveState:false,loadState:false,screenRecord:false,gamepad:false,cheat:false,volume:false,saveSavFiles:false,loadSavFiles:false,quickSave:false,quickLoad:false,screenshot:false,cacheManager:false,exitEmulation:false};',
+    // settings:true — встроенный интерфейс EmulatorJS для смены раскладки клавиатуры/геймпада (без перезапуска игры).
+    // Базовая раскладка EmulatorJS: стрелки — крестовина, X/Z — кнопки, Enter — Start, Shift — Select.
+    'window.EJS_Buttons={playPause:false,restart:false,mute:false,settings:true,fullscreen:false,saveState:false,loadState:false,screenRecord:false,gamepad:false,cheat:false,volume:false,saveSavFiles:false,loadSavFiles:false,quickSave:false,quickLoad:false,screenshot:false,cacheManager:false,exitEmulation:false};',
     'var booted=false;',
     'function gm(){return window.EJS_emulator&&window.EJS_emulator.gameManager;}',
     'function b64(u8){var bin="";for(var i=0;i<u8.length;i+=32768){bin+=String.fromCharCode.apply(null,u8.subarray(i,i+32768));}return btoa(bin);}',

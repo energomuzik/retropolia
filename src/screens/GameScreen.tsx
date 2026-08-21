@@ -30,6 +30,10 @@ export default function GameScreen() {
   const worldPanRef = useRef({ x: 0, y: 0 });
   const dragRef = useRef<{ sx: number; sy: number; px: number; py: number } | null>(null);
   const mysteryRef = useRef<Set<number> | undefined>(undefined);
+  // осмотр карты своим ходом ДО броска: смещение и зум камеры в режиме слежения
+  const lookPanRef = useRef({ x: 0, y: 0 });
+  const lookZoomRef = useRef(1);
+  const lookDragRef = useRef<{ sx: number; sy: number; px: number; py: number } | null>(null);
   const [controlsOpen, setControlsOpen] = useState(false);
   const [isFs, setIsFs] = useState(false);
   const emuWrapRef = useRef<HTMLDivElement>(null);
@@ -181,6 +185,14 @@ export default function GameScreen() {
     }
   }, [s?.moving?.ts]);
 
+  /* ---------- осмотр карты своим ходом сбрасывается при броске/челлендже ---------- */
+  useEffect(() => {
+    if (s?.moving || s?.challenge || s?.pendingCard || s?.quiz || s?.awaitPost) {
+      lookPanRef.current = { x: 0, y: 0 };
+      lookZoomRef.current = 1;
+    }
+  }, [s?.moving?.ts, s?.challenge, s?.pendingCard, s?.quiz, s?.awaitPost]);
+
   /* ---------- авто-доезд (страховка хоста) ---------- */
   useEffect(() => {
     if (!room?.isHost) return;
@@ -260,7 +272,11 @@ export default function GameScreen() {
           const baseZx = Math.min(2.1, Math.max(0.7, Math.min(w, h) / (CELL * 7.2)));
           const focus = anyoneMoving ? 1.5 : 1.0; // приближаемся, пока фишку передвигают
           const zx = Math.min(2.6, baseZx * focus);
-          goal = { x: followP?.x ?? m.cols * CELL / 2, y: followP?.y ?? m.rows * CELL / 2, zoom: zx };
+          goal = {
+            x: (followP?.x ?? m.cols * CELL / 2) + lookPanRef.current.x,
+            y: (followP?.y ?? m.rows * CELL / 2) + lookPanRef.current.y,
+            zoom: zx * lookZoomRef.current,
+          };
         }
         const v = viewRef.current;
         v.x += (goal.x - v.x) * 0.07;
@@ -307,8 +323,12 @@ export default function GameScreen() {
   const remainingNow = ch?.mode === 'time' ? (mePlayer?.secLeft ?? 0) : (mePlayer?.triesLeft ?? 0);
   // пропуск: обычно после 5 потраченных; при «низком старте» — только на нуле
   const naturalCanSkip = !!ch && !!info && (ch.lowStart ? remainingNow <= 0 : info.units >= SKIP_COST);
-  const instantSkipAllowed = !!ch && (!ch.lowStart || remainingNow <= 0);
+  // «Пропустить · 5» (заплатить ровно 5 авансом) доступен, только пока потрачено МЕНЬШЕ 5.
+  // Когда потрачено 5+ — игрок обязан пользоваться кнопкой «Пропустить» (спишет фактическую цену).
+  const instantSkipAllowed = !!ch && !!info && (ch.lowStart ? remainingNow <= 0 : info.units < SKIP_COST);
   const owner = ch ? s.captured[ch.cellIdx] : undefined;
+  // свой ход, фишка стоит, кубики не брошены — можно осматривать карту перетаскиванием
+  const canLookAround = !!s && !!mePlayer && myTurn && s.phase === 'playing' && !s.moving && !ch && !s.pendingCard && !s.quiz && !s.awaitPost && viewMode === 'follow' && !peekMap;
 
   // «закрытые» ячейки: не посещены и не захвачены — скрываем тип и картинку (опция)
   const mystery = useMemo(() => {
@@ -406,26 +426,37 @@ export default function GameScreen() {
         <canvas
           ref={canvasRef}
           className="w-full h-full block"
-          style={{ cursor: viewMode === 'world' || peekMap ? (dragRef.current ? 'grabbing' : 'grab') : 'default' }}
+          style={{ cursor: viewMode === 'world' || peekMap ? (dragRef.current ? 'grabbing' : 'grab') : canLookAround ? (lookDragRef.current ? 'grabbing' : 'grab') : 'default' }}
           onWheel={(e) => {
             if (viewMode === 'world' || peekMap) {
               setWorldZoom((z) => Math.min(4, Math.max(0.3, z * Math.exp(-e.deltaY * 0.0012))));
+            } else if (canLookAround) {
+              lookZoomRef.current = Math.min(2.5, Math.max(0.5, lookZoomRef.current * Math.exp(-e.deltaY * 0.0012)));
             }
           }}
           onPointerDown={(e) => {
-            if (viewMode !== 'world' && !peekMap) return;
             (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
-            dragRef.current = { sx: e.clientX, sy: e.clientY, px: worldPanRef.current.x, py: worldPanRef.current.y };
+            if (viewMode === 'world' || peekMap) {
+              dragRef.current = { sx: e.clientX, sy: e.clientY, px: worldPanRef.current.x, py: worldPanRef.current.y };
+            } else if (canLookAround) {
+              lookDragRef.current = { sx: e.clientX, sy: e.clientY, px: lookPanRef.current.x, py: lookPanRef.current.y };
+            }
           }}
           onPointerMove={(e) => {
-            if (!dragRef.current) return;
             const z = viewRef.current.zoom || 1;
-            worldPanRef.current = {
-              x: dragRef.current.px - (e.clientX - dragRef.current.sx) / z,
-              y: dragRef.current.py - (e.clientY - dragRef.current.sy) / z,
-            };
+            if (dragRef.current) {
+              worldPanRef.current = {
+                x: dragRef.current.px - (e.clientX - dragRef.current.sx) / z,
+                y: dragRef.current.py - (e.clientY - dragRef.current.sy) / z,
+              };
+            } else if (lookDragRef.current) {
+              lookPanRef.current = {
+                x: lookDragRef.current.px - (e.clientX - lookDragRef.current.sx) / z,
+                y: lookDragRef.current.py - (e.clientY - lookDragRef.current.sy) / z,
+              };
+            }
           }}
-          onPointerUp={() => { dragRef.current = null; }}
+          onPointerUp={() => { dragRef.current = null; lookDragRef.current = null; }}
         />
 
         {/* чей ход */}
@@ -445,6 +476,11 @@ export default function GameScreen() {
         )}
         {aliveCount === 1 && s.phase === 'playing' && (
           <div className="absolute top-3 right-3 hud-chip pixel-corners px-3 py-1.5"><span className="tick-label text-gold">Соло-тест партии</span></div>
+        )}
+        {canLookAround && (
+          <div className="absolute top-14 right-3 hud-chip pixel-corners px-3 py-1.5 pointer-events-none">
+            <span className="tick-label text-sky">Тяните карту мышью · колесо — зум · до броска</span>
+          </div>
         )}
 
         {/* заметное уведомление о пустых ячейках (передышках) */}
@@ -809,7 +845,7 @@ export default function GameScreen() {
                           <GhostBtn
                             className="w-full"
                             disabled={!instantSkipAllowed}
-                            title={!instantSkipAllowed ? 'Ресурса было меньше 5 — пропуск станет доступен, когда он закончится' : undefined}
+                            title={!instantSkipAllowed ? (ch.lowStart ? 'Ресурса было меньше 5 — пропуск станет доступен, когда он закончится' : 'Вы уже потратили 5+ ресурсов — используйте кнопку «Пропустить», она спишет фактическую цену') : undefined}
                             onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: ch.mode === 'time' ? 'time' : 'tries', spentMs: 0, loads: 0 })}
                           >
                             {Ic.bolt(13)} Заплатить {SKIP_COST} {ch.mode === 'time' ? 'мин' : 'поп.'} и пропустить

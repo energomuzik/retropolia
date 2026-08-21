@@ -1,10 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../store';
 import { GhostBtn, Ic, Modal, Panel, PxBtn, Stepper } from '../ui';
-import { CELL, boardSize, drawBoard, fitView } from '../render';
+import { CELL, boardSize, drawBoard, fitView, cellCovers, areaFree } from '../render';
 import { idbDel, idbPut, uid } from '../db';
 import type { GameMap } from '../types';
 import { sfx } from '../sound';
+
+const CELL_SIZES: { w: number; h: number; label: string }[] = [
+  { w: 1, h: 1, label: '1×1' },
+  { w: 2, h: 1, label: '2×1' },
+  { w: 1, h: 2, label: '1×2' },
+  { w: 2, h: 2, label: '2×2' },
+];
+
+const CELL_COLORS = ['', '#ffcf3f', '#ff5d73', '#5aa9ff', '#2ee6a8', '#ff8b3f', '#9be84d', '#c07aff', '#e9ecff'];
 
 type Tool = 'paint' | 'erase' | 'rotate' | 'cell' | 'type' | 'pan';
 
@@ -26,6 +35,7 @@ export default function MapEditor() {
   const [hover, setHover] = useState<{ cx: number; cy: number } | null>(null);
   const [nameModal, setNameModal] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
+  const [selCell, setSelCell] = useState<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
   const paintRef = useRef<string>('');
@@ -33,6 +43,8 @@ export default function MapEditor() {
   viewRef.current = view;
   const mapRef = useRef(map);
   mapRef.current = map;
+  const selCellRef = useRef(selCell);
+  selCellRef.current = selCell;
 
   const tileById = useMemo(() => new Map(tiles.map((t) => [t.id, t])), [tiles]);
 
@@ -44,6 +56,7 @@ export default function MapEditor() {
     const copy = JSON.parse(JSON.stringify(m)) as GameMap;
     setMap(copy);
     setTool('paint');
+    setSelCell(null);
     const cv = canvasRef.current;
     const w = cv?.clientWidth ?? 800, h = cv?.clientHeight ?? 500;
     setView(fitView(copy, w, h));
@@ -69,7 +82,43 @@ export default function MapEditor() {
     });
   };
 
-  const cellAt = (m: GameMap, cx: number, cy: number) => m.cells.findIndex((c) => c.x === cx && c.y === cy);
+  const cellAt = (m: GameMap, cx: number, cy: number) => cellCovers(m, cx, cy);
+
+  const selCellDef = map && selCell !== null && selCell < map.cells.length ? map.cells[selCell] : null;
+
+  const patchSelCell = (fn: (c: GameMap['cells'][number], m: GameMap) => void) => {
+    if (selCell === null) return;
+    mutate((mm) => {
+      const c = mm.cells[selCell];
+      if (c) fn(c, mm);
+    });
+  };
+
+  const setCellSize = (w: number, h: number) => {
+    if (selCell === null || !map) return;
+    const c = map.cells[selCell];
+    if (!c) return;
+    if (!areaFree(map, c.x, c.y, w, h, selCell)) {
+      toast(`Размер ${w}×${h} не помещается — рядом другие ячейки или край карты`, 'err');
+      sfx.fail();
+      return;
+    }
+    patchSelCell((cc) => { cc.w = w; cc.h = h; });
+    sfx.hover();
+  };
+
+  const setCellColor = (color: string) => patchSelCell((cc) => { cc.color = color || undefined; });
+  const setCellLabel = (label: string) => patchSelCell((cc) => { cc.label = label.trim() || undefined; });
+
+  const deleteCell = () => {
+    if (selCell === null) return;
+    mutate((mm) => {
+      mm.cells.splice(selCell, 1);
+      mm.cells = mm.cells.map((c, i) => ({ ...c, n: i + 1 }));
+    });
+    setSelCell(null);
+    sfx.fail();
+  };
 
   const applyTool = (cx: number, cy: number) => {
     const m = mapRef.current;
@@ -98,17 +147,26 @@ export default function MapEditor() {
         break;
       case 'cell': {
         const idx = cellAt(m, cx, cy);
+        if (idx >= 0) {
+          // клик по существующей ячейке — выбрать и открыть панель редактирования
+          setSelCell(idx);
+          sfx.hover();
+          break;
+        }
+        if (!areaFree(m, cx, cy, 1, 1)) { toast('Здесь уже есть ячейка', 'err'); return; }
+        const newIdx = m.cells.length;
         mutate((mm) => {
-          if (idx >= 0) mm.cells.splice(idx, 1);
-          else mm.cells.push({ n: mm.cells.length + 1, x: cx, y: cy, type: 'task', task: null });
+          mm.cells.push({ n: mm.cells.length + 1, x: cx, y: cy, type: 'task', task: null });
           mm.cells = mm.cells.map((c, i) => ({ ...c, n: i + 1 }));
         });
+        setSelCell(newIdx);
         sfx.step();
         break;
       }
       case 'type': {
         const idx = cellAt(m, cx, cy);
         if (idx < 0) return;
+        setSelCell(idx);
         mutate((mm) => {
           const c = mm.cells[idx];
           c.type = c.type === 'task' ? 'bonus' : c.type === 'bonus' ? 'trap' : c.type === 'trap' ? 'quiz' : 'task';
@@ -163,17 +221,38 @@ export default function MapEditor() {
           showNumbers: true, tokens: [], time: t,
           hoverCell: hover && cellAt(m, hover.cx, hover.cy) >= 0 ? cellAt(m, hover.cx, hover.cy) : null,
         });
-        // подсветка клетки под курсором
+        // подсветка клетки/ячейки под курсором + выбранная ячейка
         if (hover && hover.cx >= 0 && hover.cy >= 0 && hover.cx < m.cols && hover.cy < m.rows) {
           const v = viewRef.current;
           ctx.save();
           ctx.translate(w / 2, h / 2);
           ctx.scale(v.zoom, v.zoom);
           ctx.translate(-v.x, -v.y);
-          ctx.strokeStyle = tool === 'cell' ? '#ffcf3f' : tool === 'type' ? '#ff5d73' : '#2ee6a8';
-          ctx.lineWidth = 2.5;
-          ctx.setLineDash([5, 4]);
-          ctx.strokeRect(hover.cx * CELL + 2, hover.cy * CELL + 2, CELL - 4, CELL - 4);
+          const hIdx = cellAt(m, hover.cx, hover.cy);
+          if (hIdx >= 0) {
+            const hc = m.cells[hIdx];
+            ctx.strokeStyle = '#ffcf3f';
+            ctx.lineWidth = 2.5;
+            ctx.setLineDash([5, 4]);
+            ctx.strokeRect(hc.x * CELL + 2, hc.y * CELL + 2, (hc.w || 1) * CELL - 4, (hc.h || 1) * CELL - 4);
+          } else {
+            ctx.strokeStyle = tool === 'cell' ? '#ffcf3f' : tool === 'type' ? '#ff5d73' : '#2ee6a8';
+            ctx.lineWidth = 2.5;
+            ctx.setLineDash([5, 4]);
+            ctx.strokeRect(hover.cx * CELL + 2, hover.cy * CELL + 2, CELL - 4, CELL - 4);
+          }
+          ctx.restore();
+        }
+        if (selCellRef.current !== null && selCellRef.current < m.cells.length) {
+          const sc = m.cells[selCellRef.current];
+          const v = viewRef.current;
+          ctx.save();
+          ctx.translate(w / 2, h / 2);
+          ctx.scale(v.zoom, v.zoom);
+          ctx.translate(-v.x, -v.y);
+          ctx.strokeStyle = '#5aa9ff';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(sc.x * CELL - 1, sc.y * CELL - 1, (sc.w || 1) * CELL + 2, (sc.h || 1) * CELL + 2);
           ctx.restore();
         }
       }
@@ -373,6 +452,80 @@ export default function MapEditor() {
                 <div className="text-faint">Тайлов: {map.tiles.length} · {boardSize(map).w / CELL}×{boardSize(map).h / CELL}</div>
               </div>
               <div className="absolute bottom-3 right-3 tick-label text-faint">ЛКМ — инструмент · ПКМ/средняя — камера · колесо — зум · R — поворот</div>
+
+              {/* панель редактирования ячейки */}
+              {selCellDef && (
+                <div className="absolute top-14 right-3 w-[250px] pixel-panel pixel-corners p-3.5 space-y-3 pop-in shadow-[0_14px_40px_rgba(0,0,0,0.6)]">
+                  <div className="flex items-center justify-between">
+                    <span className="font-display uppercase text-[12px] text-gold">Ячейка №{selCellDef.n}</span>
+                    <button onClick={() => { setSelCell(null); sfx.hover(); }} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
+                  </div>
+
+                  <div>
+                    <div className="tick-label mb-1.5">Тип</div>
+                    <div className="grid grid-cols-4 gap-1">
+                      {(['task', 'bonus', 'trap', 'quiz'] as const).map((t) => (
+                        <button
+                          key={t}
+                          onClick={() => patchSelCell((c) => { c.type = t; })}
+                          className={`py-1.5 font-display text-[9px] uppercase border-2 transition-colors cursor-pointer ${selCellDef.type === t ? (t === 'bonus' ? 'border-teal text-teal bg-teal/10' : t === 'trap' ? 'border-coral text-coral bg-coral/10' : t === 'quiz' ? 'border-sky text-sky bg-sky/10' : 'border-gold text-gold bg-gold/10') : 'border-edge text-faint hover:text-dim'}`}
+                        >
+                          {t === 'task' ? 'Зад.' : t === 'bonus' ? 'Бон.' : t === 'trap' ? 'Лов.' : 'Квиз'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="tick-label mb-1.5">Размер (клетки)</div>
+                    <div className="grid grid-cols-4 gap-1">
+                      {CELL_SIZES.map((sz) => {
+                        const cur = (selCellDef.w || 1) === sz.w && (selCellDef.h || 1) === sz.h;
+                        return (
+                          <button
+                            key={sz.label}
+                            onClick={() => setCellSize(sz.w, sz.h)}
+                            className={`py-1.5 font-pixel text-[8px] border-2 transition-colors cursor-pointer ${cur ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}
+                          >
+                            {sz.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[10px] text-faint mt-1">Крупная ячейка — «улица монополии» с картинкой задания.</p>
+                  </div>
+
+                  <div>
+                    <div className="tick-label mb-1.5">Цвет группы (полоса сверху)</div>
+                    <div className="flex gap-1 flex-wrap">
+                      {CELL_COLORS.map((c) => (
+                        <button
+                          key={c || 'none'}
+                          onClick={() => setCellColor(c)}
+                          title={c ? c : 'Без цвета'}
+                          className={`w-6 h-6 border-2 cursor-pointer transition-transform hover:scale-110 ${(selCellDef.color || '') === c ? 'border-paper scale-110' : 'border-abyss'}`}
+                          style={{ background: c || 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 10px 10px' }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="tick-label mb-1.5">Короткое название</div>
+                    <input
+                      className="field-in w-full px-2.5 py-1.5 text-[12px]"
+                      maxLength={14}
+                      placeholder="Напр.: FELIX"
+                      value={selCellDef.label ?? ''}
+                      onChange={(e) => setCellLabel(e.target.value)}
+                    />
+                  </div>
+
+                  <button onClick={deleteCell} className="w-full py-1.5 border-2 border-coral/60 text-coral font-display text-[10px] uppercase hover:bg-coral/10 transition-colors cursor-pointer">
+                    Удалить ячейку
+                  </button>
+                </div>
+              )}
             </>
           )}
         </div>
