@@ -64,6 +64,8 @@ export default function SegaBox({
   // null = старт с начала рома. Меняется через loadSaveReliable → перезапуск.
   const bootStateRef = useRef<string | null>(initialState ?? null);
   const [bootTick, setBootTick] = useState(0);
+  // ядро уже поднималось в этом экземпляре? (для лёгкого оверлея перезапуска вместо полной загрузки)
+  const firstBootRef = useRef(false);
 
   const core = coreFor(ext);
 
@@ -99,6 +101,7 @@ export default function SegaBox({
         sendBoot();
       } else if (d.type === 'ejs-ready') {
         readyRef.current = true;
+        firstBootRef.current = true; // ядро поднялось — следующие перезапуски будут «лёгкими»
         setStatus('ready');
         // применим текущую паузу сразу после старта (сохранение уже «впечено» через EJS_loadStateURL)
         try { frameRef.current?.contentWindow?.postMessage({ type: 'pause', paused: pausedRef.current }, '*'); } catch { /* noop */ }
@@ -198,13 +201,18 @@ export default function SegaBox({
           {pausedHint && <span className="text-[11px] text-dim">{pausedHint}</span>}
         </div>
       )}
-      {status === 'loading' && (
+      {status === 'loading' && !firstBootRef.current && (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-[#05070f]">
           <span className="font-pixel text-[9px] text-magma blink-hard">ЗАГРУЗКА ЯДРА SEGA…</span>
           <span className="text-[11px] text-dim px-6 text-center max-w-sm">
             Первый запуск SEGA-рома скачивает ядро с CDN (~10–20 МБ, один раз) —
             дальше браузер берёт его из кэша и повторной загрузки нет.
           </span>
+        </div>
+      )}
+      {status === 'loading' && firstBootRef.current && (
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-30 hud-chip pixel-corners px-4 py-1.5">
+          <span className="font-pixel text-[8px] text-gold blink-hard">ПЕРЕЗАПУСК С СОХРАНЕНИЕМ…</span>
         </div>
       )}
       {status === 'error' && (
@@ -289,12 +297,23 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '  var target=b64ToU8(b64state);',
     '  doPause(true);',                                   // в паузе состояние детерминировано
     '  var before=null;',
-    '  var methods=[',
-    '    ["loadState-u8",function(){g.loadState(target);}],',
-    '    ["loadState-b64",function(){g.loadState(b64state);}],',
-    '    ["setState-u8",function(){if(g.setState)g.setState(target);else throw 0;}],',
-    '    ["setState-b64",function(){if(g.setState)g.setState(b64state);else throw 0;}]',
-    '  ];',
+    // адаптивный поиск живого API: gameManager, RetroArch-модуль, EJS_emulator
+    '  var methods=[];var seen={};',
+    '  var names=["loadState","setState","unserialize","loadStateData","applyState","loadStateFromBuffer","restoreState"];',
+    '  var objs=[["gm",g],["mod",(g&&g.Module)||null],["ejs",window.EJS_emulator||null]];',
+    '  for(var oi=0;oi<objs.length;oi++){',
+    '    var tag=objs[oi][0],t=objs[oi][1];if(!t)continue;',
+    '    for(var ni=0;ni<names.length;ni++){',
+    '      var n=names[ni];',
+    '      if(typeof t[n]==="function"&&!seen[tag+n]){',
+    '        seen[tag+n]=1;',
+    '        (function(tt,nn){',
+    '          methods.push([nn+"@"+tag+"-u8",function(){tt[nn](target);}]);',
+    '          methods.push([nn+"@"+tag+"-b64",function(){tt[nn](b64state);}]);',
+    '        })(t,n);',
+    '      }',
+    '    }',
+    '  }',
     '  var i=0;',
     '  function finish(ok,how){',
     '    doPause(wantPaused);',                           // вернуть состояние паузы, которое хочет хост
@@ -308,7 +327,15 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '      if(eq===false){finish(true,methods[i-1][0]);return;}',   // состояние изменилось = загрузилось
     '      if(eq===null&&before===null){finish(true,methods[i-1][0]+"-unverified");return;}',
     '    }',
-    '    if(i>=methods.length){finish(false,"none");return;}',
+    '    if(i>=methods.length){',
+    // диагностика: какие state-методы вообще существуют в этой версии ядра
+    '      var found=[];',
+    '      [g,window.EJS_emulator||null,(g&&g.Module)||null].forEach(function(t){',
+    '        if(!t)return;for(var k in t){try{if(/state|load|serial|restore/i.test(k)&&typeof t[k]==="function"&&found.length<14){found.push(k);}}catch(e){}}',
+    '      });',
+    '      finish(false,"none["+(found.join(",")||"no-state-api")+"]");',
+    '      return;',
+    '    }',
     '    try{methods[i][1]();}catch(e){}',
     '    i++;',
     '    setTimeout(step,380);',
