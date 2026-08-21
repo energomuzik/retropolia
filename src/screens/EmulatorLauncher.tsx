@@ -75,14 +75,21 @@ export default function EmulatorLauncher() {
     sfx.start();
   };
 
-  // Загрузка сохранения SEGA: перезапуск ядра с применением состояния через
-  // документированный EJS_loadStateURL — гарантированно работает (в отличие от «живого» setState).
+  // Загрузка сохранения SEGA: сначала ЖИВЬЁМ в работающее ядро (без перезагрузки —
+  // состояние проверяется по байтам в паузе). Если ядро не приняло — надёжный перезапуск.
   const loadSave = (s: SaveDef) => {
     if (rom && rom.ext !== 'nes' && running && segaApiRef.current) {
-      segaApiRef.current.loadSaveReliable(s.state as string);
-      setRunState(s.state);
       sfx.coin();
-      toast(`Загружаю сохранение (слот ${s.slot})…`, 'ok');
+      void segaApiRef.current.loadStateLive(s.state as string).then((r) => {
+        if (r.ok) {
+          setRunState(s.state);
+          toast(`Сохранение (слот ${s.slot}) загружено — без перезапуска [${r.how}]`, 'ok');
+        } else {
+          toast(`Живая загрузка не удалась (${r.how}) — перезапускаю с сохранением…`, 'info');
+          segaApiRef.current?.loadSaveReliable(s.state as string);
+          setRunState(s.state);
+        }
+      });
       return;
     }
     void launch(s.state);

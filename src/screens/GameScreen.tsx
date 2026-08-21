@@ -88,8 +88,16 @@ export default function GameScreen() {
   useEffect(() => {
     if (reloadId > 0) {
       if (isSega) {
-        // SEGA: перезапуск ядра с сохранением (или с начала, если слота нет) — надёжно
-        segaApiRef.current?.loadSaveReliable((saveState as string | null) ?? null);
+        const st = (saveState as string | null) ?? null;
+        if (st) {
+          // SEGA: сначала ЖИВАЯ загрузка сохранения (без перезагрузки ядра).
+          // Если ядро её не приняло — откат на гарантированный перезапуск.
+          segaApiRef.current?.loadStateLive(st).then((r) => {
+            if (!r.ok) segaApiRef.current?.loadSaveReliable(st);
+          });
+        } else {
+          segaApiRef.current?.loadSaveReliable(null); // без слота — старт с начала
+        }
       } else {
         nesApiRef.current?.reload(saveState ?? undefined);
       }
@@ -757,6 +765,7 @@ export default function GameScreen() {
                               ext={segExt}
                               initialState={(saveState as string | null) ?? null}
                               paused={ch.status === 'ready' || ch.status === 'voting' || ch.paused}
+                              pausedHint={ch.status === 'ready' ? 'Нажмите «Запуск задания»' : undefined}
                               onApi={(a) => { segaApiRef.current = a; }}
                             />
                           ) : (
