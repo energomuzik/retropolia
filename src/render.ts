@@ -212,6 +212,20 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.fillText(cell.label.slice(0, 9).toUpperCase(), 0, 8);
     }
 
+    // ячейка-задание без назначенного задания: предупреждающая штриховка по углам
+    if (cell.type === 'task' && !cell.task && !isMystery) {
+      ctx.strokeStyle = 'rgba(255,139,63,0.85)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-size / 2 + 6, size / 2 - 6);
+      ctx.lineTo(size / 2 - 6, size / 2 - 6);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255,139,63,0.95)';
+      ctx.font = '9px "Press Start 2P", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('!', size / 2 - 8, -size / 2 + 14);
+    }
+
     if (o.showNumbers) {
       ctx.fillStyle = '#e9ecff';
       ctx.font = '9px "Press Start 2P", monospace';

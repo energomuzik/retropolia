@@ -187,6 +187,7 @@ export interface GameSession {
   challenge: ChallengeState | null;
   pendingCard: { card: CardDef; player: string; done: boolean } | null;
   quiz: QuizRun | null;
+  notice: { text: string; ts: number } | null; // временное уведомление на игровом экране
   captured: Record<number, string>;
   sessionTasks: Record<number, TaskDef>;
   revealed: number[]; // индексы ячеек, на которые хоть раз ступали (для режима «скрытые ячейки»)

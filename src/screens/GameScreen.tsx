@@ -436,6 +436,21 @@ export default function GameScreen() {
           <div className="absolute top-3 right-3 hud-chip pixel-corners px-3 py-1.5"><span className="tick-label text-gold">Соло-тест партии</span></div>
         )}
 
+        {/* заметное уведомление о пустых ячейках (передышках) */}
+        {s.notice && Date.now() - s.notice.ts < 5000 && (
+          <div className="absolute top-24 left-1/2 -translate-x-1/2 z-40 pop-in pointer-events-none">
+            <div className="pixel-corners px-5 py-3 border-[3px] border-magma bg-[rgba(30,16,8,0.92)] shadow-[0_10px_30px_rgba(0,0,0,0.5)] max-w-md">
+              <div className="flex items-start gap-3">
+                <span className="text-magma shrink-0 mt-0.5">{Ic.bolt(18)}</span>
+                <div>
+                  <div className="font-display uppercase text-[12px] tracking-wide text-magma">Передышка</div>
+                  <div className="text-[12px] text-paper leading-snug mt-1">{s.notice.text}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* лог */}
         <div className="absolute left-3 bottom-3 w-[290px] max-w-[45vw] space-y-1 pointer-events-none">
           {s.log.slice(0, 6).map((l, i) => (

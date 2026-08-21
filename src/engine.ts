@@ -40,7 +40,7 @@ export function newSession(code: string, mapId: string, hostId: string, hostName
     v: APP_VERSION, code, mapId, usedQuizzes: [], phase: 'lobby',
     players: [mkPlayer(hostId, hostName, 0, true)],
     rollOffIdx: 0, rollOffValues: {}, turn: 0,
-    dice: null, moving: null, challenge: null, pendingCard: null, quiz: null,
+    dice: null, moving: null, challenge: null, pendingCard: null, quiz: null, notice: null,
     captured: {}, sessionTasks: {}, awaitPost: false, revealed: [],
     winner: null, log: [`Комната ${code} открыта. Ждём игроков…`], startedAt: Date.now(),
   };
@@ -176,6 +176,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const deck = cell.type === 'bonus' ? map.bonusCards : map.trapCards;
       if (deck.length === 0) {
         log(`Ячейка №${cell.n} пуста — передышка`);
+        s.notice = { text: `Ячейка №${cell.n} (${cell.type === 'bonus' ? 'бонус' : 'ловушка'}) без карточек — передышка. Добавьте карточки в редакторе заданий.`, ts: Date.now() };
         endTurnNow();
         return;
       }
@@ -189,6 +190,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const all = map.quizzes ?? [];
       if (all.length === 0) {
         log(`Ячейка №${cell.n} — квиз, но на карте нет вопросов. Передышка`);
+        s.notice = { text: `На карте нет вопросов для квиза — передышка. Создайте квизы в редакторе.`, ts: Date.now() };
         endTurnNow();
         return;
       }
@@ -196,6 +198,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const pool = all.filter((qz) => !(s.usedQuizzes ?? []).includes(qz.id));
       if (pool.length === 0) {
         log(`Все квизы карты уже прозвучали — передышка`);
+        s.notice = { text: `Все квизы этой карты уже прозвучали — передышка.`, ts: Date.now() };
         endTurnNow();
         return;
       }
@@ -215,6 +218,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     const task = cellTaskOf(s, map, p.pos);
     if (!task) {
       log(`Ячейка №${cell.n} без задания — передышка`);
+      s.notice = { text: `Ячейка №${cell.n} без задания — передышка. Назначьте ей ром и сохранение в редакторе заданий.`, ts: Date.now() };
       endTurnNow();
       return;
     }
@@ -223,6 +227,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       endTurnNow();
       return;
     }
+    s.notice = null;
     s.challenge = {
       cellIdx: p.pos, mode: null, started: false, paused: false, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
       status: 'choose', approvals: [], violations: [], lowStart: false,
@@ -351,6 +356,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (s.phase !== 'playing') break;
       const p = current();
       if (!p || p.id !== a.id || s.moving || s.challenge || s.pendingCard || s.awaitPost || s.quiz) break;
+      s.notice = null;
       const shuffles = Math.min(6, 1 + Math.floor(Math.max(0, a.holdMs) / 450));
       let va = rnd6();
       for (let i = 1; i < shuffles; i++) va = rnd6();
