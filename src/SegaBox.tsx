@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from './store';
 
 const CDN_DATA = 'https://cdn.emulatorjs.org/stable/data/';
@@ -48,12 +48,15 @@ export default function SegaBox({
 }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
-  const [html, setHtml] = useState<string | null>(null);
   const pausedRef = useRef(paused ?? false);
   pausedRef.current = paused ?? false;
   const pendingRef = useRef<Record<string, (s: string | null) => void>>({});
   const readyRef = useRef(false);
+  // получили ли хоть одно «hello» от iframe (для точного сторожевого таймера)
+  const gotHelloRef = useRef(false);
   const romNameRef = useRef('game.' + (ext || 'md'));
+  const romDataRef = useRef(romData);
+  romDataRef.current = romData;
   // Сохранение, которое нужно применить при старте ядра (EJS_loadStateURL).
   // null = старт с начала рома. Меняется через loadSaveReliable → перезапуск.
   const bootStateRef = useRef<string | null>(initialState ?? null);
@@ -63,35 +66,32 @@ export default function SegaBox({
 
   const core = coreFor(ext);
 
-  // документ iframe строится сразу; ядро подтянется с CDN (кэш браузера после 1-го запуска).
-  // bootStateRef «впекается» в документ — при загрузке ядро само применит сохранение.
-  // nonce гарантирует уникальность строки при каждом rebuild (иначе React не перезапустит iframe).
-  useEffect(() => {
+  // Документ iframe строится СИНХРОННО — iframe получает srcDoc уже при первом
+  // рендере (нет состояния «html ещё null»). nonce гарантирует уникальность строки
+  // при каждом rebuild, bootStateRef «впекается» как EJS_loadStateURL.
+  const html = useMemo(() => {
     const opts = useApp.getState().options;
     const volume = opts.emuSound ? Math.max(0, Math.min(1, opts.emuVolume ?? 1)) : 0;
     const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    setHtml(buildHtml(core, volume, CDN_DATA, bootStateRef.current, nonce));
+    return buildHtml(core, volume, CDN_DATA, bootStateRef.current, nonce);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [core, romData, bootTick]);
 
+  // Слушатель сообщений — один на всё время жизни компонента (работает через ref'ы,
+  // поэтому не зависит от пересоздания iframe при смене bootTick).
   useEffect(() => {
-    if (!html) return;
-    setStatus('loading');
-    readyRef.current = false;
-    const frame = frameRef.current;
-    if (frame) frame.srcdoc = html;
-
     const sendBoot = () => {
       try {
-        frameRef.current?.contentWindow?.postMessage({ type: 'boot', rom: romData, name: romNameRef.current }, '*');
+        frameRef.current?.contentWindow?.postMessage({ type: 'boot', rom: romDataRef.current, name: romNameRef.current }, '*');
       } catch { /* noop */ }
     };
-
     const onMsg = (e: MessageEvent) => {
+      const frame = frameRef.current;
       if (frame && e.source && e.source !== frame.contentWindow) return;
-      const d = e.data as { type?: string; state?: string | null; reqId?: string; ok?: boolean; how?: string } | null;
+      const d = e.data as { type?: string; state?: string | null; reqId?: string } | null;
       if (!d || typeof d.type !== 'string') return;
       if (d.type === 'ejs-hello') {
+        gotHelloRef.current = true; // iframe жив и отвечает — скрипт цел
         sendBoot();
       } else if (d.type === 'ejs-ready') {
         readyRef.current = true;
@@ -110,7 +110,14 @@ export default function SegaBox({
       }
     };
     window.addEventListener('message', onMsg);
+    return () => {
+      window.removeEventListener('message', onMsg);
+      pendingRef.current = {};
+    };
+  }, []);
 
+  // API стабилен (внутри — только ref'ы и setBootTick), отдаём его родителю один раз.
+  useEffect(() => {
     const api: SegaApi = {
       snapshot: () =>
         new Promise<string | null>((resolve) => {
@@ -126,7 +133,7 @@ export default function SegaBox({
         }),
       loadSaveReliable: (b64) => {
         bootStateRef.current = b64 ?? null;
-        setBootTick((t) => t + 1); // перестроить html → iframe перезапустится и применит сохранение при старте
+        setBootTick((t) => t + 1); // перестроить html + перемонтировать iframe → сохранение применится при старте
       },
       pause: (p) => {
         try { frameRef.current?.contentWindow?.postMessage({ type: 'pause', paused: !!p }, '*'); } catch { /* noop */ }
@@ -145,16 +152,22 @@ export default function SegaBox({
         }),
     };
     onApi?.(api);
-
-    return () => {
-      window.removeEventListener('message', onMsg);
-      // уничтожение документа iframe = гарантированная остановка звука и ядра
-      const f = frameRef.current;
-      if (f) f.srcdoc = '';
-      pendingRef.current = {};
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [html]);
+  }, []);
+
+  // Каждый (пере)запуск: статус loading + сторожевой таймер.
+  // Если iframe за 20 секунд не прислал даже «hello» — встроенный скрипт бит (или
+  // ядро не грузится вовсе) → показываем ошибку. Если «hello» было, но ядро ещё не
+  // готово — просто медленный CDN, оставляем «загрузка».
+  useEffect(() => {
+    setStatus('loading');
+    readyRef.current = false;
+    gotHelloRef.current = false;
+    const t = setTimeout(() => {
+      if (!readyRef.current && !gotHelloRef.current) setStatus((prev) => (prev === 'ready' ? prev : 'error'));
+    }, 20000);
+    return () => clearTimeout(t);
+  }, [bootTick]);
 
   // внешняя пауза — сообщением в работающее ядро
   useEffect(() => {
@@ -165,8 +178,10 @@ export default function SegaBox({
   return (
     <div className="relative w-full aspect-[4/3] bg-black border-[3px] border-edge shadow-[0_0_40px_rgba(255,139,63,0.12)] overflow-hidden">
       <iframe
+        key={bootTick}
         ref={frameRef}
         title="SEGA Emulator"
+        srcDoc={html}
         className="absolute inset-0 w-full h-full border-0"
         allow="autoplay; fullscreen; gamepad"
       />
@@ -310,7 +325,17 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '    }',
     '  }catch(err){parent.postMessage({type:"ejs-error"},"*");}',
     '});',
-    'parent.postMessage({type:"ejs-hello"},"*");',
+    // «hello-насос»: повторяем приветствие, пока хост не пришлёт boot —
+    // страхует от гонки, если слушатель сообщений добавился чуть позже
+    '(function(){var n=0;',
+    'function h(){try{parent.postMessage({type:"ejs-hello"},"*");}catch(e){}}',
+    'h();',
+    'var iv=setInterval(function(){',
+    '  n++;',
+    '  if(booted||n>20){clearInterval(iv);return;}',
+    '  h();',
+    '},250);',
+    '})();',
     '</script>',
     '</body></html>',
   ].join('\n');
