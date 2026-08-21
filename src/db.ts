@@ -69,3 +69,67 @@ export async function idbAll<T>(store: StoreName): Promise<{ key: string; value:
 export function uid(prefix = 'id'): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
+
+/* ---------- экспорт / импорт всей библиотеки (тайлы, карты, ромы, сохранения, фишки) ---------- */
+
+function abToB64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let s = '';
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) s += String.fromCharCode(...bytes.subarray(i, i + CH));
+  return btoa(s);
+}
+
+function b64ToAb(b64: string): ArrayBuffer {
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  const ab = new ArrayBuffer(bin.length);
+  new Uint8Array(ab).set(u8);
+  return ab;
+}
+
+const ser = (v: unknown): unknown => {
+  if (v instanceof ArrayBuffer) return { __b64: abToB64(v) };
+  if (v instanceof Uint8Array) {
+    const ab = new ArrayBuffer(v.byteLength);
+    new Uint8Array(ab).set(v);
+    return { __b64: abToB64(ab) };
+  }
+  return v;
+};
+
+const de = (v: unknown): unknown => {
+  if (v && typeof v === 'object' && '__b64' in (v as Record<string, unknown>)) {
+    return b64ToAb(String((v as { __b64: string }).__b64));
+  }
+  return v;
+};
+
+/** Сериализует ВСЕ хранилища в один JSON-файл (строку). Ромы (ArrayBuffer) кодируются base64. */
+export async function exportLibrary(): Promise<string> {
+  const stores: Record<string, [string, unknown][]> = {};
+  for (const s of STORES) {
+    const all = await idbAll(s);
+    stores[s] = all.map((e) => [e.key, ser(e.value)]);
+  }
+  return JSON.stringify({ app: 'retropolia-library', version: 1, exportedAt: Date.now(), stores });
+}
+
+/** Импортирует библиотеку из JSON. Возвращает число записанных объектов. Бросает исключение на чужом файле. */
+export async function importLibrary(json: string): Promise<number> {
+  const data = JSON.parse(json) as { app?: string; stores?: Record<string, [string, unknown][]> };
+  if (!data || data.app !== 'retropolia-library' || !data.stores) {
+    throw new Error('Это не файл библиотеки RETROPOLIA');
+  }
+  let n = 0;
+  for (const s of STORES) {
+    const entries = data.stores[s];
+    if (!Array.isArray(entries)) continue;
+    for (const [k, v] of entries) {
+      await idbPut(s, k, de(v));
+      n++;
+    }
+  }
+  return n;
+}

@@ -56,6 +56,7 @@ export const useApp = create<AppState>()((set, get) => ({
     emuSound: true,
     emuVolume: 1,
     hideUnrevealed: false,
+    relay: '',
   },
   setOptions: (p) => {
     const options = { ...get().options, ...p };
@@ -101,7 +102,7 @@ export const useApp = create<AppState>()((set, get) => ({
   },
 
   room: null,
-  netInfo: { online: false, local: true, links: 0, signal: 'connecting' },
+  netInfo: { online: false, local: true, links: 0, signal: 'connecting', attempts: 0 },
   selfId: mkSelfId(),
   session: null,
   sessionMap: null,
@@ -111,7 +112,7 @@ export const useApp = create<AppState>()((set, get) => ({
   leaveRoom: () => {
     const r = get().room;
     if (r) r.close();
-    set({ room: null, session: null, sessionMap: null, netInfo: { online: false, local: true, links: 0, signal: 'connecting' } });
+    set({ room: null, session: null, sessionMap: null, netInfo: { online: false, local: true, links: 0, signal: 'connecting', attempts: 0 } });
   },
 }));
 

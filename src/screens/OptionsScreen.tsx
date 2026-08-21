@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useApp } from '../store';
 import { Field, GhostBtn, Ic, Modal, Panel, PxBtn, Toggle } from '../ui';
-import { idbDel, idbAll } from '../db';
+import { idbDel, idbAll, exportLibrary, importLibrary } from '../db';
 import { STORES } from '../db';
 import { sfx } from '../sound';
 import KeyBinder from '../KeyBinder';
@@ -9,6 +9,38 @@ import KeyBinder from '../KeyBinder';
 export default function OptionsScreen() {
   const { options, setOptions, setScreen, toast, refresh } = useApp();
   const [wipe, setWipe] = useState(false);
+
+  // Экспорт всей библиотеки (карты, тайлы, ромы, сохранения, фишки) в один файл
+  const doExport = async () => {
+    try {
+      const json = await exportLibrary();
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `retropolia-library-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      sfx.coin();
+      toast('Библиотека выгружена в файл', 'ok');
+    } catch {
+      toast('Не удалось экспортировать библиотеку', 'err');
+    }
+  };
+
+  // Импорт библиотеки из файла (слияние с текущей)
+  const doImport = async (file: File) => {
+    try {
+      const text = await file.text();
+      const n = await importLibrary(text);
+      await refresh();
+      sfx.success();
+      toast(`Импортировано объектов: ${n}`, 'ok');
+    } catch (e) {
+      sfx.fail();
+      toast(e instanceof Error ? e.message : 'Неверный файл библиотеки', 'err');
+    }
+  };
 
   const doWipe = async () => {
     for (const s of STORES) {
@@ -150,15 +182,52 @@ export default function OptionsScreen() {
                 <span className="text-teal font-display uppercase">Локально:</span> параллельно работает tab-канал
                 (BroadcastChannel) — откройте две вкладки браузера, чтобы мгновенно протестировать мультиплеер на одной машине.
               </p>
+              <div className="border-t-2 border-edge pt-3 mt-2">
+                <Field label="Свой реле-сервер (если облако 0.peerjs.com недоступно)">
+                  <input
+                    className="field-in w-full px-3 py-2 font-display text-sm tracking-wide"
+                    placeholder="пусто = облако PeerJS · иначе IP:порт, например 192.168.1.10:9000"
+                    value={options.relay}
+                    onChange={(e) => setOptions({ relay: e.target.value.trim() })}
+                  />
+                </Field>
+                <p className="text-[11px] text-faint mt-2 leading-relaxed">
+                  Облако PeerJS иногда недоступно (блокировки, VPN, антивирус). Тогда запустите свой сервер знакомств на любом
+                  компьютере локальной сети: <span className="text-sky font-display">npx peer --port 9000</span> — и впишите его{' '}
+                  <span className="text-paper">IP:9000</span> на всех компьютерах. Интернет для этого не нужен.
+                </p>
+              </div>
             </div>
           </Panel>
 
-          <Panel title="Данные" icon={Ic.trash(16)} accent="var(--color-coral)" className="slide-up md:col-span-2">
-            <div className="p-4 flex items-center justify-between gap-4 flex-wrap">
-              <p className="text-[13px] text-dim max-w-md">
-                Тайлы, карты, ромы и сохранения хранятся в IndexedDB этого браузера. Очистка удалит всю библиотеку безвозвратно.
+          <Panel title="Данные" icon={Ic.save(16)} accent="var(--color-teal)" className="slide-up md:col-span-2">
+            <div className="p-4 space-y-4">
+              <p className="text-[13px] text-dim max-w-2xl leading-relaxed">
+                Тайлы, карты, ромы, сохранения и фишки хранятся <span className="text-paper">в IndexedDB этого браузера</span> — не на
+                сервере. Данные привязаны к адресу сайта: при переезде на новый домен или на другой компьютер перенесите библиотеку файлом.
               </p>
-              <PxBtn color="coral" onClick={() => setWipe(true)}>{Ic.trash(14)} Очистить библиотеку</PxBtn>
+              <div className="flex items-center gap-3 flex-wrap">
+                <PxBtn color="teal" onClick={() => void doExport()}>{Ic.download(14)} Экспорт библиотеки</PxBtn>
+                <label className="btn-px btn-sky pixel-corners px-4 py-2 text-xs inline-flex items-center gap-2 cursor-pointer">
+                  {Ic.upload(14)} Импорт библиотеки
+                  <input
+                    type="file"
+                    accept="application/json,.json"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void doImport(f);
+                      e.target.value = '';
+                    }}
+                  />
+                </label>
+                <span className="w-px h-6 bg-edge" />
+                <PxBtn color="coral" onClick={() => setWipe(true)}>{Ic.trash(14)} Очистить библиотеку</PxBtn>
+              </div>
+              <p className="text-[11px] text-faint">
+                Экспорт скачивает один JSON-файл со всей библиотекой (ромы включены). Импорт сливает файл с текущей библиотекой —
+                удобно переносить карты с localhost на опубликованный сайт и между компьютерами.
+              </p>
             </div>
           </Panel>
         </div>

@@ -198,14 +198,16 @@ export function LoadScreen() {
 /* ---------- панель ожидания гостя с диагностикой ---------- */
 
 function GuestWaitPanel({
-  isGuest, code, signal, errorType, waited, onBack,
+  isGuest, code, signal, errorType, waited, attempts, onBack, onRetry,
 }: {
   isGuest: boolean;
   code: string;
   signal: 'connecting' | 'online' | 'error';
   errorType?: string;
   waited: number;
+  attempts: number;
   onBack: () => void;
+  onRetry: () => void;
 }) {
   // Конкретная причина, а не вечное «подключение…»
   const failed = signal === 'error';
@@ -249,8 +251,16 @@ function GuestWaitPanel({
                 <p>• На этом компьютере <span className="text-paper">нет интернета</span> или он закрыт (VPN, корпоративный файрвол, антивирус).</p>
                 <p>• Попробуйте раздать мобильный хот-спот и отключить VPN.</p>
                 <p>• Для онлайн-игры интернет нужен <span className="text-paper">обоим</span> компьютерам, даже в одной квартире.</p>
+                <p>• Если облако недоступно — запустите свой реле (<span className="text-sky font-display">npx peer --port 9000</span>) и укажите его IP в Опциях → «Свой реле-сервер».</p>
               </>
             )}
+          </div>
+          {attempts > 1 && (
+            <p className="tick-label text-faint mt-3">попытка подключения: {attempts}</p>
+          )}
+          <div className="mt-5 flex items-center justify-center gap-2">
+            <GhostBtn onClick={onRetry}>{Ic.rotate(14)} Повторить</GhostBtn>
+            <GhostBtn onClick={onBack}>{Ic.back(14)} В меню</GhostBtn>
           </div>
         </>
       )}
@@ -268,7 +278,7 @@ function GuestWaitPanel({
         </>
       )}
 
-      {(!isGuest || failed || tooLong) && (
+      {!failed && (!isGuest || tooLong) && (
         <div className="mt-6">
           <GhostBtn onClick={onBack}>{Ic.back(14)} Вернуться в меню</GhostBtn>
         </div>
@@ -306,7 +316,9 @@ export function LobbyScreen() {
             signal={netInfo.signal}
             errorType={netInfo.errorType}
             waited={waited}
+            attempts={netInfo.attempts}
             onBack={() => { leaveRoom(); setScreen('menu'); }}
+            onRetry={() => room?.retry()}
           />
         </div>
       </div>
@@ -342,7 +354,16 @@ export function LobbyScreen() {
             <span className="hud-chip pixel-corners px-2.5 py-1 font-pixel text-[8px] text-dim">ПИРОВ: {netInfo.links}</span>
           </div>
           {netInfo.signal === 'error' && (
-            <p className="text-[11px] text-coral mb-2">Нет связи с реле-сервером — игроки с других компьютеров не подключатся. Проверьте интернет/VPN.</p>
+            <div className="mb-2 space-y-2">
+              <p className="text-[11px] text-coral leading-relaxed">
+                Нет связи с реле-сервером — игроки с других компьютеров не подключатся.
+                Отключите VPN, проверьте антивирус (сканирование HTTPS) или укажите свой реле в Опциях.
+              </p>
+              <div className="flex items-center justify-center gap-2">
+                <GhostBtn small onClick={() => room?.retry()}>{Ic.rotate(12)} Повторить подключение</GhostBtn>
+                <GhostBtn small onClick={() => setScreen('options')}>{Ic.gear(12)} Опции связи</GhostBtn>
+              </div>
+            </div>
           )}
           <div className="font-pixel text-gold title-glow text-lg">КОМНАТА</div>
           <button onClick={copyCode} className="mt-3 inline-flex items-center gap-4 hud-chip pixel-corners px-8 py-4 cursor-pointer hover:border-gold transition-colors group">

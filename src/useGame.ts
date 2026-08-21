@@ -77,6 +77,7 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
     app.selfId,
     onMsg,
     (info) => useApp.getState().setNetInfo(info),
+    useApp.getState().options.relay,
   );
 
   app.boot(room, isHost, initial.session, initial.map);
