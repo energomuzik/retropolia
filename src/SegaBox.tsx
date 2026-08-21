@@ -5,11 +5,8 @@ const CDN_DATA = 'https://cdn.emulatorjs.org/stable/data/';
 
 export interface SegaApi {
   snapshot: () => Promise<string | null>; // base64-состояние ядра (живое, без перезапуска)
-  /** ЖИВАЯ загрузка сохранения в работающее ядро — без перезагрузки.
-   *  Возвращает, получилось ли (если нет — вызывающий может сделать loadSaveReliable). */
-  loadStateLive: (b64: string) => Promise<{ ok: boolean; how: string }>;
   /** Перезапуск ядра с применением сохранения (null = старт с начала).
-   *  Использует документированный EJS_loadStateURL — гарантированно работает, но грузит ядро заново. */
+   *  Использует документированный EJS_loadStateURL — гарантированно работает. */
   loadSaveReliable: (b64: string | null) => void;
   pause: (p: boolean) => void; // живая пауза (без перезапуска)
   /** Снимок текущего кадра (dataURL jpeg) для трансляции соперникам. */
@@ -25,14 +22,12 @@ function coreFor(ext: string): string {
 /**
  * Эмулятор SEGA (Genesis Plus GX / EmulatorJS) в изолированном iframe.
  *
- * — Ядро грузится ОДИН раз на ром. Загрузка сохранений и пауза — «живьём»,
- *   без перезапуска (loadStateLive + pause). Полный перезапуск (loadSaveReliable)
- *   происходит только если живая загрузка не удалась, либо при смене рома/сбросе.
- * — Пауза применяется каскадом (EJS_emulator.pause → gameManager.pause → blur-событие)
- *   с повторами первые секунды после старта — гонка с инициализацией ядра исключена.
- * — Живая загрузка состояния проверяется детерминированно: ядро ставится на паузу,
- *   снимок состояния «до» сравнивается со снимком «после» — в паузе байты не меняются,
- *   поэтому совпадение = загрузка не прошла, отличие = прошла.
+ * — Сохранения грузятся перезапуском ядра с EJS_loadStateURL (единственный
+ *   надёжный путь в stable-версии EmulatorJS). Ядро при этом берётся из кэша
+ *   браузера — повторного скачивания нет, только быстрый рестарт (~1–2 c).
+ * — Пауза — «живая», без перезапуска: применяется каскадом
+ *   (EJS_emulator.pause → gameManager.pause → blur-событие) с повторами первые
+ *   секунды после старта — гонка с инициализацией ядра исключена.
  * — Звук: при размонтировании iframe браузер гарантированно глушит все его
  *   аудиоконтексты и воркеры — «звук прошлого рома» невозможен.
  */
@@ -57,7 +52,6 @@ export default function SegaBox({
   const pausedRef = useRef(paused ?? false);
   pausedRef.current = paused ?? false;
   const pendingRef = useRef<Record<string, (s: string | null) => void>>({});
-  const pendingLoadRef = useRef<Record<string, (r: { ok: boolean; how: string }) => void>>({});
   const readyRef = useRef(false);
   const romNameRef = useRef('game.' + (ext || 'md'));
   // Сохранение, которое нужно применить при старте ядра (EJS_loadStateURL).
@@ -107,12 +101,6 @@ export default function SegaBox({
         try { frameRef.current?.contentWindow?.postMessage({ type: 'pause', paused: pausedRef.current }, '*'); } catch { /* noop */ }
       } else if (d.type === 'ejs-error') {
         setStatus((prev) => (prev === 'ready' ? prev : 'error'));
-      } else if (d.type === 'ejs-load-result' && d.reqId) {
-        const cb = pendingLoadRef.current[d.reqId];
-        if (cb) {
-          delete pendingLoadRef.current[d.reqId];
-          cb({ ok: !!d.ok, how: d.how ?? '?' });
-        }
       } else if ((d.type === 'ejs-state' || d.type === 'ejs-frame') && d.reqId) {
         const cb = pendingRef.current[d.reqId];
         if (cb) {
@@ -135,18 +123,6 @@ export default function SegaBox({
               resolve(null);
             }
           }, 3500);
-        }),
-      loadStateLive: (b64) =>
-        new Promise<{ ok: boolean; how: string }>((resolve) => {
-          const reqId = 'l' + Math.random().toString(36).slice(2);
-          pendingLoadRef.current[reqId] = resolve;
-          try { frameRef.current?.contentWindow?.postMessage({ type: 'load-state-live', state: b64, reqId }, '*'); } catch { /* noop */ }
-          setTimeout(() => {
-            if (pendingLoadRef.current[reqId]) {
-              delete pendingLoadRef.current[reqId];
-              resolve({ ok: false, how: 'timeout' });
-            }
-          }, 8000);
         }),
       loadSaveReliable: (b64) => {
         bootStateRef.current = b64 ?? null;
@@ -176,7 +152,6 @@ export default function SegaBox({
       const f = frameRef.current;
       if (f) f.srcdoc = '';
       pendingRef.current = {};
-      pendingLoadRef.current = {};
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [html]);
@@ -282,67 +257,6 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
 
     'window.EJS_ready=function(){readyAt=Date.now();try{parent.postMessage({type:"ejs-ready"},"*");}catch(e){}};',
 
-    // -------- живая загрузка состояния: пауза → попытка → проверка → возврат --------
-    'function snap(){try{var r=gm().getState();if(!r)return null;if(typeof r==="string"){var u=new Uint8Array(r.length);for(var i=0;i<r.length;i++){u[i]=r.charCodeAt(i);}return u;}return new Uint8Array(r);}catch(e){return null;}}',
-    'function statesEqual(a,b){',
-    '  if(!a||!b)return null;',              // не с чем сравнивать
-    '  if(a.length!==b.length)return false;',
-    '  var n=Math.min(a.length,16384);',
-    '  for(var i=0;i<n;i++){if(a[i]!==b[i])return false;}',
-    '  return true;',
-    '}',
-    'function loadLive(b64state,reqId){',
-    '  var g=gm();',
-    '  if(!g){try{parent.postMessage({type:"ejs-load-result",ok:false,how:"no-core",reqId:reqId},"*");}catch(e){}return;}',
-    '  var target=b64ToU8(b64state);',
-    '  doPause(true);',                                   // в паузе состояние детерминировано
-    '  var before=null;',
-    // адаптивный поиск живого API: gameManager, RetroArch-модуль, EJS_emulator
-    '  var methods=[];var seen={};',
-    '  var names=["loadState","setState","unserialize","loadStateData","applyState","loadStateFromBuffer","restoreState"];',
-    '  var objs=[["gm",g],["mod",(g&&g.Module)||null],["ejs",window.EJS_emulator||null]];',
-    '  for(var oi=0;oi<objs.length;oi++){',
-    '    var tag=objs[oi][0],t=objs[oi][1];if(!t)continue;',
-    '    for(var ni=0;ni<names.length;ni++){',
-    '      var n=names[ni];',
-    '      if(typeof t[n]==="function"&&!seen[tag+n]){',
-    '        seen[tag+n]=1;',
-    '        (function(tt,nn){',
-    '          methods.push([nn+"@"+tag+"-u8",function(){tt[nn](target);}]);',
-    '          methods.push([nn+"@"+tag+"-b64",function(){tt[nn](b64state);}]);',
-    '        })(t,n);',
-    '      }',
-    '    }',
-    '  }',
-    '  var i=0;',
-    '  function finish(ok,how){',
-    '    doPause(wantPaused);',                           // вернуть состояние паузы, которое хочет хост
-    '    try{parent.postMessage({type:"ejs-load-result",ok:ok,how:how,reqId:reqId},"*");}catch(e){}',
-    '  }',
-    '  function step(){',
-    '    if(i===0){before=snap();}',                      // снимок «до» — когда пауза уже устоялась
-    '    if(i>0){',
-    '      var after=snap();',
-    '      var eq=statesEqual(before,after);',
-    '      if(eq===false){finish(true,methods[i-1][0]);return;}',   // состояние изменилось = загрузилось
-    '      if(eq===null&&before===null){finish(true,methods[i-1][0]+"-unverified");return;}',
-    '    }',
-    '    if(i>=methods.length){',
-    // диагностика: какие state-методы вообще существуют в этой версии ядра
-    '      var found=[];',
-    '      [g,window.EJS_emulator||null,(g&&g.Module)||null].forEach(function(t){',
-    '        if(!t)return;for(var k in t){try{if(/state|load|serial|restore/i.test(k)&&typeof t[k]==="function"&&found.length<14){found.push(k);}}catch(e){}}',
-    '      });',
-    '      finish(false,"none["+(found.join(",")||"no-state-api")+"]");',
-    '      return;',
-    '    }',
-    '    try{methods[i][1]();}catch(e){}',
-    '    i++;',
-    '    setTimeout(step,380);',
-    '  }',
-    '  setTimeout(step,120);',                            // дать паузе примениться
-    '}',
-
     'window.addEventListener("message",function(e){',
     '  var d=e.data||{};',
     '  if(d.type==="boot"&&!booted){',
@@ -368,8 +282,6 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '    }catch(err){showErr("Ошибка запуска: "+err);}',
     '    return;',
     '  }',
-    // живая загрузка состояния — работает и до готовности gameManager (ответит no-core)
-    '  if(d.type==="load-state-live"){loadLive(d.state,d.reqId);return;}',
     '  if(d.type==="pause"){',
     '    wantPaused=!!d.paused;',
     '    if(gm()){doPause(wantPaused);}',
