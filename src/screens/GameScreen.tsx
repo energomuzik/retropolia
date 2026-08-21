@@ -94,23 +94,34 @@ export default function GameScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadId, isSega]);
 
-  /* ---------- трансляция (NES; SEGA-экран ядро рисует само) ---------- */
-  const streaming = options.broadcast && myTurn && ch?.status === 'playing' && !isSega;
+  /* ---------- трансляция (NES — canvas напрямую, SEGA — снимок кадра из iframe) ---------- */
+  const streaming = options.broadcast && myTurn && ch?.status === 'playing';
   const streamMs = Math.round(1000 / Math.min(30, Math.max(2, options.streamFps || 10)));
   useEffect(() => {
     if (!streaming || !room) return;
-    const t = setInterval(() => {
-      const c = emuCanvasRef.current;
-      if (!c) return;
+    let busy = false;
+    const t = setInterval(async () => {
+      if (busy) return;
+      busy = true;
+      let data: string | null = null;
       try {
-        // на высоких FPS сильнее жмём кадр, чтобы не забивать канал
-        const q = streamMs <= 50 ? 0.34 : 0.42;
-        const data = c.toDataURL('image/jpeg', q);
-        room.send('stream', { from: me, name: mePlayer?.name ?? '?', data, ts: Date.now() } satisfies StreamPacket);
-      } catch { /* noop */ }
+        if (isSega) {
+          data = (await segaApiRef.current?.captureFrame()) ?? null;
+        } else {
+          const c = emuCanvasRef.current;
+          if (c) {
+            const q = streamMs <= 50 ? 0.34 : 0.42;
+            data = c.toDataURL('image/jpeg', q);
+          }
+        }
+      } catch { data = null; }
+      busy = false;
+      if (data) {
+        try { room.send('stream', { from: me, name: mePlayer?.name ?? '?', data, ts: Date.now() } satisfies StreamPacket); } catch { /* noop */ }
+      }
     }, streamMs);
     return () => clearInterval(t);
-  }, [streaming, streamMs, room, me, mePlayer?.name]);
+  }, [streaming, streamMs, room, me, mePlayer?.name, isSega]);
 
   useEffect(() => {
     return streamBus.on((p) => {
@@ -743,11 +754,9 @@ export default function GameScreen() {
                         <div className="aspect-[256/240] bg-black border-[3px] border-edge flex flex-col items-center justify-center gap-2">
                           <span className="text-dim">{Ic.eye(28)}</span>
                           <span className="font-pixel text-[8px] text-faint text-center px-4">
-                            {isSega
-                              ? 'SEGA: ЭКРАН ИГРОКА РИСУЕТ ЯДРО — ТРАНСЛЯЦИЯ НЕДОСТУПНА'
-                              : options.broadcast
-                                ? 'ЖДЁМ КАДРЫ ТРАНСЛЯЦИИ…'
-                                : 'ТРАНСЛЯЦИЯ ВЫКЛЮЧЕНА В ОПЦИЯХ'}
+                            {options.broadcast
+                              ? 'ЖДЁМ КАДРЫ ТРАНСЛЯЦИИ…'
+                              : 'ТРАНСЛЯЦИЯ ВЫКЛЮЧЕНА В ОПЦИЯХ'}
                           </span>
                         </div>
                       )}
@@ -795,7 +804,7 @@ export default function GameScreen() {
                             title={!naturalCanSkip ? (ch.lowStart ? 'Ресурса было меньше 5 — пропуск станет доступен, когда он закончится' : 'Сначала потратьте 5 ресурсов — или платите сразу') : undefined}
                             onClick={() => info && dispatch({ t: 'skip', id: me, instant: false, spentMs: info.ms, loads: info.loads })}
                           >
-                            {Ic.bolt(13)} Пропустить ({ch.mode === 'time' ? `${info?.min ?? 0} мин` : `${info?.loads ?? 0} поп.`})
+                            {Ic.bolt(13)} Пропустить · потратить {ch.mode === 'time' ? `${Math.max(info?.min ?? 0, SKIP_COST)} мин` : `${Math.max(info?.loads ?? 0, SKIP_COST)} поп.`}
                           </GhostBtn>
                           <GhostBtn
                             className="w-full"
@@ -965,9 +974,6 @@ function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => v
               {romSaves.map((x) => <option key={x.id} value={x.id}>Слот {x.slot} · {x.name}</option>)}
             </select>
           </Field>
-          {romId && roms.find((r) => r.id === romId)?.ext !== 'nes' && (
-            <p className="text-[11px] text-magma">SEGA: слоты — как у NES; «без сохранения» стартует с начала рома.</p>
-          )}
           <Field label="Название">
             <input className="field-in w-full px-3 py-2 text-sm" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Chip'n'Dale 2 — босс" />
           </Field>

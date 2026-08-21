@@ -9,6 +9,8 @@ export interface SegaApi {
    *  Использует документированный EJS_loadStateURL — гарантированно работает. */
   loadSaveReliable: (b64: string | null) => void;
   pause: (p: boolean) => void; // живая пауза (без перезапуска)
+  /** Снимок текущего кадра (dataURL jpeg) для трансляции соперникам. */
+  captureFrame: () => Promise<string | null>;
 }
 
 function coreFor(ext: string): string {
@@ -89,7 +91,7 @@ export default function SegaBox({
         try { frameRef.current?.contentWindow?.postMessage({ type: 'pause', paused: pausedRef.current }, '*'); } catch { /* noop */ }
       } else if (d.type === 'ejs-error') {
         setStatus((prev) => (prev === 'ready' ? prev : 'error'));
-      } else if (d.type === 'ejs-state' && d.reqId) {
+      } else if ((d.type === 'ejs-state' || d.type === 'ejs-frame') && d.reqId) {
         const cb = pendingRef.current[d.reqId];
         if (cb) {
           delete pendingRef.current[d.reqId];
@@ -119,6 +121,18 @@ export default function SegaBox({
       pause: (p) => {
         try { frameRef.current?.contentWindow?.postMessage({ type: 'pause', paused: !!p }, '*'); } catch { /* noop */ }
       },
+      captureFrame: () =>
+        new Promise<string | null>((resolve) => {
+          const reqId = 'f' + Math.random().toString(36).slice(2);
+          pendingRef.current[reqId] = resolve;
+          try { frameRef.current?.contentWindow?.postMessage({ type: 'get-frame', reqId }, '*'); } catch { /* noop */ }
+          setTimeout(() => {
+            if (pendingRef.current[reqId]) {
+              delete pendingRef.current[reqId];
+              resolve(null);
+            }
+          }, 900);
+        }),
     };
     onApi?.(api);
 
@@ -186,6 +200,12 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '#game{position:absolute;inset:0;width:100%;height:100%}',
     '#err{display:none;position:absolute;inset:0;color:#ff5d73;font-family:monospace;font-size:12px;padding:16px;background:#05070f;white-space:pre-wrap}',
     '</style></head><body><div id="game"></div><div id="err"></div><script>',
+    // Чтобы кадр WebGL можно было снимать по таймеру (для трансляции),
+    // принудительно включаем preserveDrawingBuffer ДО того, как ядро создаст контекст.
+    '(function(){var _gc=HTMLCanvasElement.prototype.getContext;',
+    'HTMLCanvasElement.prototype.getContext=function(t,a){',
+    'if(t==="webgl"||t==="webgl2"||t==="experimental-webgl"){a=Object.assign({},a,{preserveDrawingBuffer:true});}',
+    'return _gc.call(this,t,a);};})();',
     'window.EJS_player="#game";',
     `window.EJS_core=${JSON.stringify(core)};`,
     `window.EJS_pathtodata=${JSON.stringify(base)};`,
@@ -242,6 +262,21 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '      var r=g.getState();',
     '      var send=function(s){var out=null;if(typeof s==="string"){out=s;}else if(s&&s.length!==undefined){out=b64(s);}parent.postMessage({type:"ejs-state",state:out,reqId:d.reqId},"*");};',
     '      if(r&&typeof r.then==="function"){r.then(send,function(){send(null);});}else{send(r);}',
+    '    }',
+    // трансляция: снимаем текущий кадр игрового canvas (самого большого) и отдаём как jpeg
+    '    else if(d.type==="get-frame"){',
+    '      var cs=document.querySelectorAll("canvas");var best=null,bestA=0;',
+    '      for(var i=0;i<cs.length;i++){var a=(cs[i].width||0)*(cs[i].height||0);if(a>bestA){bestA=a;best=cs[i];}}',
+    '      var out=null;',
+    '      if(best&&best.width>0){',
+    '        try{',
+    '          var w=320,h=Math.max(1,Math.round(320*best.height/best.width));',
+    '          var oc=document.createElement("canvas");oc.width=w;oc.height=h;',
+    '          oc.getContext("2d").drawImage(best,0,0,w,h);',
+    '          out=oc.toDataURL("image/jpeg",0.5);',
+    '        }catch(e){out=null;}',
+    '      }',
+    '      parent.postMessage({type:"ejs-frame",state:out,reqId:d.reqId},"*");',
     '    }',
     '  }catch(err){parent.postMessage({type:"ejs-error"},"*");}',
     '});',

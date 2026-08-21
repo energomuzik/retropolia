@@ -450,11 +450,7 @@ export default function TaskEditor() {
                         У этого рома нет сохранений — запустите его в эмуляторе и запишите состояния (и для NES, и для SEGA).
                       </p>
                     )}
-                    {fRom && roms.find((r) => r.id === fRom)?.ext !== 'nes' && (
-                      <p className="text-[11px] text-magma">
-                        SEGA: слоты работают так же, как у NES. Можно оставить «без сохранения» — тогда задание стартует с начала рома.
-                      </p>
-                    )}
+
                     <Field label="Название ячейки">
                       <input className="field-in w-full px-3 py-2 text-sm" placeholder="Например: Felix — уровень 3" value={fTitle} onChange={(e) => setFTitle(e.target.value)} />
                     </Field>
