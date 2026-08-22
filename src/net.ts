@@ -35,12 +35,23 @@ const ICE = {
   ],
 };
 
-// Пустая строка = облако PeerJS (0.peerjs.com). Иначе — свой сервер: «IP:порт» (запускается `npx peer --port 9000`).
+// Пустая строка = облако PeerJS (0.peerjs.com). Иначе — свой сервер:
+//   «https://имя.glitch.me» / «имя.glitch.me»  → защищённый, порт 443 (Glitch/Render/свой домен)
+//   «192.168.1.10:9000» / «localhost:9000»     → локальный PeerServer (npx peer)
 function relayOpts(custom: string | undefined): { host: string; port: number; secure: boolean; path: string; config: typeof ICE } {
-  const c = (custom ?? '').trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  const c = (custom ?? '').trim().replace(/\/+$/, '');
   if (!c) return { host: '0.peerjs.com', port: 443, secure: true, path: '/', config: ICE };
-  const [h, p] = c.split(':');
-  return { host: h, port: p ? Number(p) : 9000, secure: false, path: '/', config: ICE };
+  let secure = false;
+  let rest = c;
+  if (/^https:\/\//i.test(c)) { secure = true; rest = c.replace(/^https:\/\//i, ''); }
+  else if (/^http:\/\//i.test(c)) { rest = c.replace(/^http:\/\//i, ''); }
+  const [h, p] = rest.split(':');
+  let port: number;
+  if (p) port = Number(p);
+  else if (secure) port = 443;
+  else if (/\./.test(h) && !/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) { port = 443; secure = true; } // голый домен → https
+  else port = 9000; // IP или localhost → локальный PeerServer
+  return { host: h, port, secure, path: '/', config: ICE };
 }
 
 const errText: Record<string, string> = {

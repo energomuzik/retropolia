@@ -186,15 +186,17 @@ export default function OptionsScreen() {
                 <Field label="Свой реле-сервер (если облако 0.peerjs.com недоступно)">
                   <input
                     className="field-in w-full px-3 py-2 font-display text-sm tracking-wide"
-                    placeholder="пусто = облако PeerJS · иначе IP:порт, например 192.168.1.10:9000"
+                    placeholder="пусто = облако PeerJS · имя.glitch.me · 192.168.1.10:9000"
                     value={options.relay}
                     onChange={(e) => setOptions({ relay: e.target.value.trim() })}
                   />
                 </Field>
                 <p className="text-[11px] text-faint mt-2 leading-relaxed">
-                  Облако PeerJS иногда недоступно (блокировки, VPN, антивирус). Тогда запустите свой сервер знакомств на любом
-                  компьютере локальной сети: <span className="text-sky font-display">npx peer --port 9000</span> — и впишите его{' '}
-                  <span className="text-paper">IP:9000</span> на всех компьютерах. Интернет для этого не нужен.
+                  Облако PeerJS иногда недоступно или перегружено. Поднимите свой сервер знакомств бесплатно на{' '}
+                  <span className="text-sky font-display">Glitch</span> (пошагово — в <span className="text-paper">server/README.md</span>) и
+                  впишите сюда его имя вида <span className="text-paper">moj-relay.glitch.me</span> — свой IP раздавать никому не надо.
+                  Для игры в одной сети без интернета: <span className="text-sky font-display">npx peer --port 9000</span> → сюда{' '}
+                  <span className="text-paper">IP:9000</span>.
                 </p>
               </div>
             </div>

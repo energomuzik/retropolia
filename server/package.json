@@ -1,0 +1,17 @@
+{
+  "name": "retropolia-relay",
+  "version": "1.0.0",
+  "description": "Signaling-сервер (PeerJS) для онлайн-партий RETROPOLIA",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "peer": "^1.0.2"
+  }
+}
