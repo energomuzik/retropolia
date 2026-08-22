@@ -2,10 +2,11 @@
 #
 # Один раз включить:
 #   Settings → Pages → Build and deployment → Source: выбрать «GitHub Actions».
+#   Settings → Environments → github-pages → Deployment branches and tags: «All branches».
 #
-# Сборка запускается при пуше в ЛЮБУЮ ветку (платформа может вести свою рабочую
-# ветку — так надёжнее). Сайт публикуется на https://ВАШ_ЛОГИН.github.io/ИМЯ_РЕПОЗИТОРИЯ
-# (запустить вручную: вкладка Actions → deploy-pages → Run workflow).
+# Дальше каждый push в любую ветку автоматически собирает игру
+# и публикует её на https://ВАШ_ЛОГИН.github.io/ИМЯ_РЕПОЗИТОРИЯ
+# (запустить вручную можно: вкладка Actions → deploy-pages → Run workflow).
 name: deploy-pages
 
 on:
@@ -25,15 +26,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       # относительные пути ассетов — обязательны для GitHub Pages (сайт лежит в подкаталоге)
       - run: npm run build -- --base=./
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: dist
 
