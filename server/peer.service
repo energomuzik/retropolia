@@ -1,0 +1,25 @@
+# Служба реле-сервера RETROPOLIA (PeerJS signaling)
+#
+# Установка (после того как папка server/ скопирована в /opt/retropolia-relay
+# и в ней выполнен npm install):
+#   sudo cp peer.service /etc/systemd/system/peer.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now peer
+#   sudo systemctl status peer
+#
+# Логи:  journalctl -u peer -f
+[Unit]
+Description=RETROPOLIA relay (PeerJS signaling server)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/retropolia-relay
+ExecStart=/usr/bin/node /opt/retropolia-relay/server.js
+Restart=always
+RestartSec=3
+User=root
+Environment=PORT=9000
+
+[Install]
+WantedBy=multi-user.target

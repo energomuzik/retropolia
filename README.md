@@ -122,26 +122,28 @@ npx serve dist
 видят друг друга (пиров 0). Решение — **свой сервер знакомств**. Это работает как сервер TeamSpeak:
 один публичный адрес (имя, а не ваш IP), его знают все игроки, свой IP раздавать никому не нужно.
 
-> Glitch закрыл хостинг, поэтому используем **Render** или **Koyeb** (бесплатно, через GitHub).
-> В корне проекта уже лежит готовый сервер — папка **`server/`**, полная инструкция в `server/README.md`.
+> Бесплатные западные PaaS (Glitch закрыт, Render/Koyeb недоступны из РФ) не вариант.
+> Рабочий путь для России — **свой VPS + Caddy + peer** (от ~130 ₽/мес). Всё готовое —
+> в папке **`server/`** (`server.js`, `package.json`, `peer.service`, `Caddyfile`),
+> полная пошаговая инструкция — **`server/README.md`**.
 
-**Вариант А — интернет-сервер на Render (рекомендуется, бесплатно):**
+**Вариант А — VPS + Caddy (рекомендуется для РФ):**
 
-1. Создайте бесплатный репозиторий на github.com и загрузите туда `server/server.js` и `server/package.json`.
-2. https://render.com → войти через GitHub → «New» → «Web Service» → выбрать репозиторий.
-3. Build: `npm install`, Start: `npm start`, Instance Type: **Free** → «Create Web Service».
-4. Адрес — `https://имя.onrender.com`. Проверка: `https://имя.onrender.com/health` → `{"ok":true,...}`.
-5. На **всех** компьютерах: «Опции» → «Свой реле-сервер» → вписать `имя.onrender.com`.
+1. Возьмите VPS с «белым» IP (Timeweb Cloud / Selectel / REG.RU / Beget, Ubuntu).
+2. На сервере: Node.js → `npm i -g peer` → `peer` как systemd-служба → Caddy (авто-HTTPS).
+   Команды — блоками в `server/README.md`.
+3. Домен не обязателен: Caddy поднимет самоподписанный TLS прямо по IP
+   (каждый игрок один раз примет сертификат в браузере).
+4. На **всех** компьютерах: «Опции» → «Свой реле-сервер» → вписать **со схемой** —
+   `https://relay.example.com` (домен) или `https://ВАШ_IP` (без домена).
 
-(Альтернатива — **Koyeb**, тоже бесплатно из GitHub: `server/README.md`, Вариант 2.)
-
-**Вариант Б — свой компьютер + Cloudflare Tunnel (публичный адрес без раздачи IP):**
+**Вариант Б — свой ПК + Cloudflare Tunnel (без VPS и без раздачи IP):**
 
 1. Локально: `cd server && npm install && npm start` (порт 9000).
-2. `cloudflared tunnel --url http://localhost:9000` → получите адрес `https://слово-слово.trycloudflare.com`.
+2. `cloudflared tunnel --url http://localhost:9000` → адрес `https://слово-слово.trycloudflare.com`.
 3. На всех компьютерах: «Опции» → «Свой реле-сервер» → вписать этот адрес.
 
-**Вариант В — локально, без интернета (одна сеть):**
+**Вариант В — локальная сеть, без интернета:**
 
 1. На любом компьютере сети: `cd server && npm install && npm start`.
 2. Его IP: `ipconfig` → «IPv4-адрес» (например `192.168.1.10`).

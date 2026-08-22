@@ -4,14 +4,14 @@
  * Это аналог «сервера TeamSpeak»: один публичный адрес, к нему подключаются
  * все игроки для знакомства, дальше игра идёт напрямую P2P.
  *
- * ЗАПУСК:
- *  — Glitch / Render / Railway / Fly.io: загрузите эту папку как проект
- *    (см. server/README.md) — сервер поднимется автоматически;
+ * ЗАПУСК (подробно — server/README.md):
+ *  — VPS + Caddy (основной путь для РФ): скопировать папку на сервер,
+ *    npm install, затем peer.service как systemd-служба + Caddy (авто-HTTPS);
  *  — локально:  npm install && npm start   (порт 9000);
- *  — или одной командой из корня игры:  npx peer --port 9000
+ *  — или одной командой:  npx peer --port 9000
  *
  * В игре: Опции → «Свой реле-сервер» → впишите адрес, например
- *   https://moj-relay.glitch.me   (или  192.168.1.10:9000  для локального)
+ *   https://relay.example.com  /  https://ВАШ_IP  /  192.168.1.10:9000
  */
 const express = require('express');
 const { ExpressPeerServer } = require('peer');
