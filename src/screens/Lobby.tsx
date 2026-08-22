@@ -351,10 +351,16 @@ export function LobbyScreen() {
             >
               {netInfo.signal === 'online' ? 'РЕЛЕ: НА СВЯЗИ' : netInfo.signal === 'error' ? 'РЕЛЕ: НЕТ СВЯЗИ' : 'РЕЛЕ: ПОДКЛ…'}
             </span>
-            <span className={`hud-chip pixel-corners px-2.5 py-1 font-pixel text-[8px] ${netInfo.online ? 'text-teal' : netInfo.local ? 'text-sky' : 'text-gold'}`}>
-              {netInfo.online ? 'P2P-КАНАЛ' : netInfo.local ? 'TAB-КАНАЛ' : 'СОЕДИНЕНИЕ…'}
-            </span>
-            <span className="hud-chip pixel-corners px-2.5 py-1 font-pixel text-[8px] text-dim">ПИРОВ: {netInfo.links}</span>
+            {options.relayHub ? (
+              <span className={`hud-chip pixel-corners px-2.5 py-1 font-pixel text-[8px] ${netInfo.online ? 'text-teal' : 'text-gold'}`}>
+                {netInfo.online ? 'ХАБ: НА СВЯЗИ' : 'ХАБ: ПОДКЛ…'}
+              </span>
+            ) : (
+              <span className={`hud-chip pixel-corners px-2.5 py-1 font-pixel text-[8px] ${netInfo.online ? 'text-teal' : netInfo.local ? 'text-sky' : 'text-gold'}`}>
+                {netInfo.online ? 'P2P-КАНАЛ' : netInfo.local ? 'TAB-КАНАЛ' : 'СОЕДИНЕНИЕ…'}
+              </span>
+            )}
+            <span className="hud-chip pixel-corners px-2.5 py-1 font-pixel text-[8px] text-dim">ИГРОКОВ: {netInfo.links}</span>
           </div>
           {netInfo.signal === 'error' && (
             <div className="mb-2 space-y-2">

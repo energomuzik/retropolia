@@ -57,6 +57,7 @@ export const useApp = create<AppState>()((set, get) => ({
     emuVolume: 1,
     hideUnrevealed: false,
     relay: '',
+    relayHub: '',
   },
   setOptions: (p) => {
     const options = { ...get().options, ...p };

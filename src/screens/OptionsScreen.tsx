@@ -183,6 +183,21 @@ export default function OptionsScreen() {
                 (BroadcastChannel) — откройте две вкладки браузера, чтобы мгновенно протестировать мультиплеер на одной машине.
               </p>
               <div className="border-t-2 border-edge pt-3 mt-2">
+                <Field label="Игровой хаб — приоритетный канал (если заполнен, PeerJS не используется)">
+                  <input
+                    className="field-in w-full px-3 py-2 font-display text-sm tracking-wide"
+                    placeholder="https://xxxx.ngrok-free.app"
+                    value={options.relayHub}
+                    onChange={(e) => setOptions({ relayHub: e.target.value.trim() })}
+                  />
+                </Field>
+                <p className="text-[11px] text-faint mt-2 leading-relaxed">
+                  Хаб (сервер <span className="text-paper">server/relay-hub.js</span> + бесплатный туннель ngrok/localhost.run)
+                  пересылает весь трафик партии через себя — работает там, где облако PeerJS недоступно. Весь трафик идёт через
+                  сервер хоста, поэтому для больших компаний надёжнее VPS. Запуск: <span className="text-sky font-display">node relay-hub.js</span>,
+                  туннель: <span className="text-sky font-display">ngrok http 9001</span>, сюда вписать полученный <span className="text-paper">https://…</span>.
+                </p>
+                <div className="border-t-2 border-edge pt-3 mt-3">
                 <Field label="Свой реле-сервер (если облако 0.peerjs.com недоступно)">
                   <input
                     className="field-in w-full px-3 py-2 font-display text-sm tracking-wide"
@@ -199,6 +214,7 @@ export default function OptionsScreen() {
                   Для игры в одной сети без интернета: <span className="text-sky font-display">npx peer --port 9000</span> → сюда{' '}
                   <span className="text-paper">IP:9000</span>.
                 </p>
+                </div>
               </div>
             </div>
           </Panel>

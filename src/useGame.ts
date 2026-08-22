@@ -1,5 +1,6 @@
 import { useApp } from './store';
 import { createRoom, type Room } from './net';
+import { createHubRoom } from './hub';
 import { applyAction, type Action } from './engine';
 import type { GameMap, GameSession, NetMsg } from './types';
 import { APP_VERSION } from './types';
@@ -71,14 +72,10 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
     }
   };
 
-  room = createRoom(
-    code,
-    isHost,
-    app.selfId,
-    onMsg,
-    (info) => useApp.getState().setNetInfo(info),
-    useApp.getState().options.relay,
-  );
+  const hubBase = useApp.getState().options.relayHub?.trim();
+  room = hubBase
+    ? createHubRoom(hubBase, code, isHost, app.selfId, onMsg, (info) => useApp.getState().setNetInfo(info))
+    : createRoom(code, isHost, app.selfId, onMsg, (info) => useApp.getState().setNetInfo(info), useApp.getState().options.relay);
 
   app.boot(room, isHost, initial.session, initial.map);
   if (initial.session && initial.session.phase !== 'lobby') useApp.getState().setScreen('game');

@@ -216,6 +216,7 @@ export interface GameOptions {
   emuVolume: number; // 0..1 — громкость звука эмуляторов
   hideUnrevealed: boolean; // скрывать непосещённые ячейки (иконки бонусов/ловушек и картинки заданий)
   relay: string; // свой сигнальный сервер «IP:порт» (пусто = облако 0.peerjs.com)
+  relayHub: string; // игровой хаб (WebSocket): весь трафик через сервер; приоритетнее PeerJS
 }
 
 export interface NetMsg {
