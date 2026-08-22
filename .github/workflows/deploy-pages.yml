@@ -32,7 +32,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # относительные пути ассетов — обязательны для GitHub Pages (сайт лежит в подкаталоге)
       - run: npm run build -- --base=./
       - uses: actions/upload-pages-artifact@v4
         with:
