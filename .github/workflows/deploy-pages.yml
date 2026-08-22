@@ -3,14 +3,13 @@
 # Один раз включить:
 #   Settings → Pages → Build and deployment → Source: выбрать «GitHub Actions».
 #
-# Дальше каждый `git push` в ветку main автоматически собирает игру
-# и публикует её на https://ВАШ_ЛОГИН.github.io/ИМЯ_РЕПОЗИТОРИЯ
-# (запустить вручную можно: вкладка Actions → deploy-pages → Run workflow).
+# Сборка запускается при пуше в ЛЮБУЮ ветку (платформа может вести свою рабочую
+# ветку — так надёжнее). Сайт публикуется на https://ВАШ_ЛОГИН.github.io/ИМЯ_РЕПОЗИТОРИЯ
+# (запустить вручную: вкладка Actions → deploy-pages → Run workflow).
 name: deploy-pages
 
 on:
   push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -20,7 +19,7 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
