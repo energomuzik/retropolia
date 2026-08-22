@@ -6,9 +6,10 @@ export interface NetInfo {
   online: boolean; // есть ли peer-соединение через интернет (PeerJS)
   local: boolean; // доступен tab-канал (BroadcastChannel)
   links: number; // число подключённых пиров (у хоста)
-  signal: 'connecting' | 'online' | 'error'; // статус соединения с ретранслятором (сигнальным сервером)
+  signal: 'connecting' | 'online' | 'error'; // статус соединения с сигнальным сервером
   errorType?: string; // 'peer-unavailable' = комната не найдена, 'unavailable-id' = код занят, прочее = сеть
   attempts: number; // сколько раз пробовали достучаться до реле
+  lastError?: string; // человекочитаемая причина последней ошибки
 }
 
 export interface Room {
@@ -22,13 +23,15 @@ export interface Room {
 
 const prefix = (code: string) => `retropolia-v${APP_VERSION}-${code.toUpperCase()}`;
 
-// STUN + публичный TURN — повышают шанс P2P после «знакомства» даже за строгими NAT
+/**
+ * Живые бесплатные STUN/TURN. (metered.ca закрыт — не использовать.)
+ * TURN повышает шанс P2P за строгими NAT после «знакомства».
+ */
 const ICE = {
   iceServers: [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:global.stun.twilio.com:3478'] },
-    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] },
+    { urls: 'turn:relay1.expressturn.com:443', username: 'efQKXKFWYQ0P1M5J0P', credential: 'v6tVXn0f7m4V4m8d' },
+    { urls: 'turn:relay1.expressturn.com:443?transport=tcp', username: 'efQKXKFWYQ0P1M5J0P', credential: 'v6tVXn0f7m4V4m8d' },
   ],
 };
 
@@ -40,11 +43,24 @@ function relayOpts(custom: string | undefined): { host: string; port: number; se
   return { host: h, port: p ? Number(p) : 9000, secure: false, path: '/', config: ICE };
 }
 
+const errText: Record<string, string> = {
+  'peer-unavailable': 'Комната не найдена (хост ещё не создал игру или код неверный)',
+  'unavailable-id': 'Этот код комнаты уже занят другим хостом',
+  'network': 'Сеть недоступна или заблокирована (VPN / файрвол / антивирус)',
+  'browser-incompatible': 'Браузер не поддерживает WebRTC',
+  'invalid-id': 'Неверный формат кода комнаты',
+  'server-error': 'Ошибка сигнального сервера',
+};
+
 /**
  * Транспорт комнаты: PeerJS (онлайн, P2P; «знакомство» через сигнальный сервер —
  * облако 0.peerjs.com или свой `npx peer`) + BroadcastChannel (мгновенная
  * синхронизация вкладок одного браузера). Хост — авторитет: ретранслирует
- * сообщения гостей остальным пирам. При недоступности реле — автоповторы.
+ * сообщения гостей остальным пирам.
+ *
+ * Надёжность: при обрыве/ошибке соединение пересоздаётся автоматически,
+ * причём ХОСТ переподключается с ТЕМ ЖЕ id комнаты (гости его не теряют),
+ * а статус «online» не сбрасывается, пока есть живые peer-соединения.
  */
 export function createRoom(
   code: string,
@@ -60,9 +76,10 @@ export function createRoom(
   let closed = false;
   const conns = new Map<string, DataConnection>();
   let hostConn: DataConnection | null = null;
-  let onlineLink = false;
+  let onlineLink = false; // есть хоть одно живое peer-соединение
   let signal: NetInfo['signal'] = 'connecting';
   let errorType: string | undefined;
+  let lastError: string | undefined;
   let attempts = 0;
   let retryTimer: number | null = null;
   let peer: Peer | null = null;
@@ -75,7 +92,23 @@ export function createRoom(
       signal,
       errorType,
       attempts,
+      lastError,
     });
+
+  // Сигнальный канал считается «на связи», если:
+  //  — peer подключён к серверу И нет свежих ошибок, ИЛИ
+  //  — есть живые peer-соединения (тогда «online» даже при временных сбоях сервера).
+  const markSignal = (s: NetInfo['signal'], err?: string) => {
+    signal = s;
+    if (err !== undefined) {
+      errorType = err;
+      lastError = errText[err] ?? err;
+    } else {
+      errorType = undefined;
+      lastError = undefined;
+    }
+    info();
+  };
 
   const deliver = (m: NetMsg) => {
     if (closed || !m || typeof m.mid !== 'string') return;
@@ -119,21 +152,24 @@ export function createRoom(
     if (isHost) onMsg(m);
   };
 
-  const scheduleRetry = () => {
-    if (closed || retryTimer !== null) return;
-    if (attempts >= 30) {
-      signal = 'error';
-      errorType = errorType ?? 'unreachable';
-      info();
-      return;
+  const hasLiveLinks = () => {
+    if (isHost) {
+      for (const c of conns.values()) if (c.open) return true;
+      return false;
     }
+    return !!(hostConn && hostConn.open);
+  };
+
+  const scheduleRetry = (delay = 4000) => {
+    if (closed || retryTimer !== null) return;
     retryTimer = window.setTimeout(() => {
       retryTimer = null;
       setup();
-    }, 5000);
+    }, delay);
   };
 
-  // (пере)создание пира; вызывается при старте, сбоях и ручной кнопке «Повторить»
+  // (пере)создание пира. Хост ВСЕГДА использует id комнаты (chanName),
+  // чтобы при переподключении гости находили его по тому же адресу.
   const setup = () => {
     if (closed) return;
     if (peer) {
@@ -141,66 +177,83 @@ export function createRoom(
       peer = null;
     }
     attempts++;
-    signal = 'connecting';
-    errorType = undefined;
-    info();
+    markSignal('connecting');
 
     const opts = relayOpts(customRelay);
     try {
       if (isHost) {
+        // ВАЖНО: id = chanName, чтобы переподключение не теряло комнату
         peer = new Peer(chanName, { ...opts, debug: 0 });
-        peer.on('open', () => { signal = 'online'; errorType = undefined; info(); });
+        peer.on('open', () => markSignal('online'));
         peer.on('connection', (conn) => {
           conns.set(conn.peer, conn);
-          conn.on('open', () => { onlineLink = true; info(); });
+          conn.on('open', () => { onlineLink = true; markSignal('online'); });
           conn.on('data', (d) => deliver(d as NetMsg));
-          conn.on('close', () => { conns.delete(conn.peer); onlineLink = conns.size > 0; info(); });
-          conn.on('error', () => { conns.delete(conn.peer); info(); });
+          conn.on('close', () => {
+            conns.delete(conn.peer);
+            onlineLink = hasLiveLinks();
+            // обрыв пира не означает обрыв реле — не трогаем signal, пока реле живо
+            info();
+          });
+          conn.on('error', () => { conns.delete(conn.peer); onlineLink = hasLiveLinks(); info(); });
         });
         peer.on('error', (e) => {
-          const t = (e as { type?: string }).type;
-          errorType = t ?? 'network';
-          if (t === 'unavailable-id') { signal = 'error'; info(); return; } // код занят — не крутим бесконечно
+          const t = (e as { type?: string }).type ?? 'network';
+          // Пока есть живые соединения — считаем, что всё ок (временный сбой сервера)
+          if (hasLiveLinks()) { onlineLink = true; info(); return; }
+          markSignal('error', t);
+          if (t === 'unavailable-id') return; // код занят — не крутим бесконечно
           scheduleRetry();
-          info();
         });
         peer.on('disconnected', () => {
+          // потеряли связь с сигнальным сервером — пробуем восстановить
+          if (!hasLiveLinks()) markSignal('connecting');
           try { peer?.reconnect(); } catch { scheduleRetry(); }
         });
       } else {
         peer = new Peer({ ...opts, debug: 0 });
         peer.on('open', () => {
-          signal = 'online';
-          errorType = undefined;
-          info();
+          markSignal('online');
           if (!peer) return;
           const conn = peer.connect(chanName, { reliable: true });
           hostConn = conn;
           conn.on('open', () => {
             onlineLink = true;
+            markSignal('online');
             while (guestQueue.length) {
               const m = guestQueue.shift()!;
               try { conn.send(m); } catch { /* noop */ }
             }
-            info();
           });
           conn.on('data', (d) => deliver(d as NetMsg));
-          conn.on('close', () => { onlineLink = false; info(); });
+          conn.on('close', () => {
+            onlineLink = false;
+            // хост мог переподключиться — пробуем найти его снова
+            markSignal('connecting');
+            scheduleRetry(2500);
+          });
           conn.on('error', () => { onlineLink = false; info(); });
         });
         peer.on('error', (e) => {
-          const t = (e as { type?: string }).type;
-          signal = 'error';
-          errorType = t === 'peer-unavailable' ? 'peer-unavailable' : (t ?? 'network');
-          info();
-          // комната может появиться позже (хост ещё создаёт) — повторяем, если это не «не найдена»
-          if (t !== 'peer-unavailable') scheduleRetry();
+          const t = (e as { type?: string }).type ?? 'network';
+          if (t === 'peer-unavailable') {
+            // комната ещё не создана хостом — ждём и повторяем (хост может появиться позже)
+            markSignal('error', t);
+            scheduleRetry(3000);
+            return;
+          }
+          if (hasLiveLinks()) { info(); return; }
+          markSignal('error', t);
+          scheduleRetry();
+        });
+        peer.on('disconnected', () => {
+          if (!hasLiveLinks()) markSignal('connecting');
+          try { peer?.reconnect(); } catch { scheduleRetry(); }
         });
       }
     } catch {
-      errorType = 'init';
+      markSignal('error', 'init');
       scheduleRetry();
-      info();
     }
   };
 

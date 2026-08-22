@@ -222,6 +222,9 @@ function GuestWaitPanel({
           <div className="font-pixel text-[10px] text-paper mt-4 blink-hard">
             {signal === 'connecting' ? 'ПОДКЛЮЧАЕМСЯ К РЕЛЕ-СЕРВЕРУ…' : `СТУЧИМСЯ В КОМНАТУ ${code}…`}
           </div>
+          {attempts > 1 && (
+            <div className="tick-label text-gold mt-2">Попытка {attempts} · переподключаемся автоматически…</div>
+          )}
           <p className="text-[12px] text-dim mt-3 leading-relaxed">
             {signal === 'connecting'
               ? 'Устанавливаем связь с интернет-ретранслятором PeerJS. Обычно пара секунд.'
@@ -357,7 +360,9 @@ export function LobbyScreen() {
             <div className="mb-2 space-y-2">
               <p className="text-[11px] text-coral leading-relaxed">
                 Нет связи с реле-сервером — игроки с других компьютеров не подключатся.
-                Отключите VPN, проверьте антивирус (сканирование HTTPS) или укажите свой реле в Опциях.
+                {netInfo.lastError ? <span className="text-paper"> {netInfo.lastError}.</span> : null}
+                {' '}Отключите VPN, проверьте антивирус (сканирование HTTPS) или укажите свой реле в Опциях.
+                {netInfo.attempts > 1 ? ` (идёт автопереподключение, попытка ${netInfo.attempts})` : null}
               </p>
               <div className="flex items-center justify-center gap-2">
                 <GhostBtn small onClick={() => room?.retry()}>{Ic.rotate(12)} Повторить подключение</GhostBtn>
