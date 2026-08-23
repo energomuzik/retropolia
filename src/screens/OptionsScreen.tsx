@@ -5,6 +5,7 @@ import { idbDel, idbAll, exportLibrary, importLibrary } from '../db';
 import { STORES } from '../db';
 import { sfx } from '../sound';
 import KeyBinder from '../KeyBinder';
+import { downloadHostBat } from '../host/hostPackage';
 
 export default function OptionsScreen() {
   const { options, setOptions, setScreen, toast, refresh } = useApp();
@@ -186,16 +187,20 @@ export default function OptionsScreen() {
                 <Field label="Игровой хаб — приоритетный канал (если заполнен, PeerJS не используется)">
                   <input
                     className="field-in w-full px-3 py-2 font-display text-sm tracking-wide"
-                    placeholder="https://xxxx.ngrok-free.app"
+                    placeholder="https://xxxx-xxxx.trycloudflare.com"
                     value={options.relayHub}
                     onChange={(e) => setOptions({ relayHub: e.target.value.trim() })}
                   />
                 </Field>
+                <div className="flex items-center gap-2 mt-2 flex-wrap">
+                  <PxBtn small color="sky" onClick={() => { downloadHostBat(); toast('retropolia-host.bat скачан — запустите его двойным кликом', 'ok'); }}>
+                    {Ic.download(13)} Скачать сервер (стать хостом)
+                  </PxBtn>
+                </div>
                 <p className="text-[11px] text-faint mt-2 leading-relaxed">
-                  Хаб (сервер <span className="text-paper">server/relay-hub.js</span> + бесплатный туннель ngrok/localhost.run)
-                  пересылает весь трафик партии через себя — работает там, где облако PeerJS недоступно. Весь трафик идёт через
-                  сервер хоста, поэтому для больших компаний надёжнее VPS. Запуск: <span className="text-sky font-display">node relay-hub.js</span>,
-                  туннель: <span className="text-sky font-display">ngrok http 9001</span>, сюда вписать полученный <span className="text-paper">https://…</span>.
+                  Самый простой способ: нажмите «Скачать сервер», запустите <span className="text-paper">retropolia-host.bat</span> — он сам
+                  поставит туннель Cloudflare и <span className="text-paper">скопирует ссылку в буфер</span>. Вставьте её сюда (и передайте друзьям —
+                  они вставят в это же поле). Хаб пересылает весь трафик через компьютер хоста — работает там, где облако PeerJS недоступно.
                 </p>
                 <div className="border-t-2 border-edge pt-3 mt-3">
                 <Field label="Свой реле-сервер (если облако 0.peerjs.com недоступно)">

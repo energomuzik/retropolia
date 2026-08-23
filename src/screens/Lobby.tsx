@@ -5,6 +5,7 @@ import { openRoom, dispatch } from '../useGame';
 import { genRoomCode } from '../net';
 import { newSession } from '../engine';
 import { idbDel, idbGet, idbPut, uid } from '../db';
+import { downloadHostBat } from '../host/hostPackage';
 import type { GameMap, SessionSnapshot } from '../types';
 import { PLAYER_COLORS, PLAYER_NAMES } from '../types';
 import { sfx } from '../sound';
@@ -68,6 +69,35 @@ export function CreateScreen() {
             <PxBtn big color="gold" disabled={!sel} onClick={create}>{Ic.dice(18)} Открыть комнату</PxBtn>
           </div>
         )}
+
+        <HostYourselfBlock />
+      </div>
+    </div>
+  );
+}
+
+/* ---------- «стать хостом самому» (если облако недоступно) ---------- */
+
+export function HostYourselfBlock() {
+  const { toast } = useApp();
+  return (
+    <div className="mt-8 pixel-panel pixel-corners p-5 border-sky/40">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-sky">{Ic.globe(18)}</span>
+        <span className="font-display uppercase tracking-wider text-sky text-sm">Не подключается через облако?</span>
+      </div>
+      <p className="text-[13px] text-dim leading-relaxed mb-3">
+        Публичное реле иногда недоступно. Тогда <span className="text-paper">станьте хостом сами</span>: скачайте
+        маленький сервер, запустите его двойным кликом — он сам создаст публичную ссылку и скопирует её в буфер.
+        Ссылку передайте друзьям любым мессенджером. Нужен только Node.js и доступ к Cloudflare.
+      </p>
+      <div className="flex items-center gap-3 flex-wrap">
+        <PxBtn color="sky" onClick={() => { downloadHostBat(); toast('retropolia-host.bat скачан — запустите его двойным кликом', 'ok'); }}>
+          {Ic.download(15)} Скачать сервер (Windows)
+        </PxBtn>
+        <span className="text-[11px] text-faint max-w-sm">
+          1) Запустите .bat · 2) Скопируется ссылка · 3) Вставьте её в «Опции → Игровой хаб» (вы и друзья)
+        </span>
       </div>
     </div>
   );
