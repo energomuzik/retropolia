@@ -5,6 +5,7 @@ export interface Room {
   code: string;
   isHost: boolean;
   selfId: string;
+  transport: 'peer' | 'hub';
   send: (t: string, p?: unknown) => void;
   retry: () => void;
   close: () => void;
@@ -33,6 +34,9 @@ export function createHubRoom(
   let others = 0;
   let retryTimer: number | null = null;
   const seen = new Set<string>();
+  // Очередь исходящих: сообщения, отправленные до открытия сокета (например,
+  // «hello» гостя сразу после входа), не должны теряться — они уйдут при open.
+  const outQueue: string[] = [];
 
   const info = () =>
     onNet({
@@ -71,6 +75,10 @@ export function createHubRoom(
       if (w !== current) return;
       open = true;
       attempt = 0;
+      // спустить накопившиеся сообщения (hello гостя и т.п.)
+      while (outQueue.length && w.readyState === WebSocket.OPEN) {
+        try { w.send(outQueue.shift()!); } catch { break; }
+      }
       info();
     };
     w.onmessage = (e) => {
@@ -117,12 +125,17 @@ export function createHubRoom(
       t,
       p,
     };
+    const payload = JSON.stringify({ type: 'msg', data: m });
     if (current && current.readyState === WebSocket.OPEN) {
       try {
-        current.send(JSON.stringify({ type: 'msg', data: m }));
+        current.send(payload);
       } catch {
-        /* noop */
+        outQueue.push(payload);
       }
+    } else {
+      // сокет ещё не открыт (или переподключается) — сохраним, отправим при open
+      outQueue.push(payload);
+      if (outQueue.length > 200) outQueue.splice(0, outQueue.length - 200);
     }
     // хост — авторитет: применяет собственные действия локально
     if (isHost) onMsg(m);
@@ -134,6 +147,7 @@ export function createHubRoom(
     code,
     isHost,
     selfId,
+    transport: 'hub' as const,
     send,
     retry: () => {
       attempt = 0;

@@ -199,7 +199,7 @@ export function LoadScreen() {
 /* ---------- панель ожидания гостя с диагностикой ---------- */
 
 function GuestWaitPanel({
-  isGuest, code, signal, errorType, waited, attempts, onBack, onRetry,
+  isGuest, code, signal, errorType, waited, attempts, transport, onBack, onRetry,
 }: {
   isGuest: boolean;
   code: string;
@@ -207,9 +207,11 @@ function GuestWaitPanel({
   errorType?: string;
   waited: number;
   attempts: number;
+  transport?: 'peer' | 'hub';
   onBack: () => void;
   onRetry: () => void;
 }) {
+  const channelName = transport === 'hub' ? 'игровой хаб' : 'облако PeerJS';
   // Конкретная причина, а не вечное «подключение…»
   const failed = signal === 'error';
   const roomNotFound = errorType === 'peer-unavailable';
@@ -228,10 +230,15 @@ function GuestWaitPanel({
           )}
           <p className="text-[12px] text-dim mt-3 leading-relaxed">
             {signal === 'connecting'
-              ? 'Устанавливаем связь с интернет-ретранслятором PeerJS. Обычно пара секунд.'
-              : 'Ретранслятор на связи, ищем хоста с таким кодом. Хост должен держать игру открытой.'}
+              ? 'Устанавливаем связь с сервером. Обычно пара секунд.'
+              : 'Сервер на связи, ищем хоста с таким кодом. Хост должен держать игру открытой.'}
           </p>
-          <p className="tick-label text-faint mt-2">ждём {waited} с</p>
+          <p className="tick-label text-gold mt-2">
+            канал: {channelName} · ждём {waited} с
+          </p>
+          <p className="tick-label text-faint mt-1">
+            Важно: у вас и у хоста должен быть ОДИНАКОВЫЙ канал (см. чип «КАНАЛ:» в лобби хоста)
+          </p>
         </>
       )}
 
@@ -381,6 +388,7 @@ export function LobbyScreen() {
             errorType={netInfo.errorType}
             waited={waited}
             attempts={netInfo.attempts}
+            transport={room?.transport}
             onBack={() => { leaveRoom(); setScreen('menu'); }}
             onRetry={() => room?.retry()}
           />
@@ -418,17 +426,28 @@ export function LobbyScreen() {
             >
               {netInfo.signal === 'online' ? 'РЕЛЕ: НА СВЯЗИ' : netInfo.signal === 'error' ? 'РЕЛЕ: НЕТ СВЯЗИ' : 'РЕЛЕ: ПОДКЛ…'}
             </span>
-            {options.relayHub ? (
+            {room.transport === 'hub' ? (
               <span className={`hud-chip pixel-corners px-2.5 py-1 font-pixel text-[8px] ${netInfo.online ? 'text-teal' : 'text-gold'}`}>
-                {netInfo.online ? 'ХАБ: НА СВЯЗИ' : 'ХАБ: ПОДКЛ…'}
+                {netInfo.online ? 'КАНАЛ: ИГРОВОЙ ХАБ' : 'КАНАЛ: ХАБ (ПОДКЛ…)'}
               </span>
             ) : (
               <span className={`hud-chip pixel-corners px-2.5 py-1 font-pixel text-[8px] ${netInfo.online ? 'text-teal' : netInfo.local ? 'text-sky' : 'text-gold'}`}>
-                {netInfo.online ? 'P2P-КАНАЛ' : netInfo.local ? 'TAB-КАНАЛ' : 'СОЕДИНЕНИЕ…'}
+                {netInfo.online ? 'КАНАЛ: ОБЛАКО (P2P)' : netInfo.local ? 'КАНАЛ: ВКЛАДКИ' : 'КАНАЛ: ОБЛАКО (ПОДКЛ…)'}
               </span>
             )}
             <span className="hud-chip pixel-corners px-2.5 py-1 font-pixel text-[8px] text-dim">ИГРОКОВ: {netInfo.links}</span>
           </div>
+          {options.relayHub && room.transport === 'peer' && (
+            <div className="mb-2">
+              <p className="text-[11px] text-magma leading-relaxed">
+                Ссылка на игровой хаб вставлена, но <span className="text-paper">эта комната открыта через облако</span> (ссылку вставили
+                после создания комнаты). Игроки на хабе не смогут подключиться.{' '}
+                <button onClick={() => restartViaHub(options.relayHub)} className="underline underline-offset-2 hover:text-gold cursor-pointer text-paper">
+                  Переоткрыть комнату через хаб
+                </button>.
+              </p>
+            </div>
+          )}
           {netInfo.signal === 'error' && (
             <div className="mb-2 space-y-2">
               <p className="text-[11px] text-coral leading-relaxed">

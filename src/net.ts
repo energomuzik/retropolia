@@ -16,6 +16,7 @@ export interface Room {
   code: string;
   isHost: boolean;
   selfId: string;
+  transport: 'peer' | 'hub'; // каким каналом реально открыта комната
   send: (t: string, p?: unknown) => void;
   retry: () => void; // пересоздать соединение с реле вручную
   close: () => void;
@@ -275,6 +276,7 @@ export function createRoom(
     code,
     isHost,
     selfId,
+    transport: 'peer' as const,
     send,
     retry: () => {
       attempts = 0;
