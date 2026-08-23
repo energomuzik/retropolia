@@ -437,6 +437,15 @@ export function LobbyScreen() {
             )}
             <span className="hud-chip pixel-corners px-2.5 py-1 font-pixel text-[8px] text-dim">ИГРОКОВ: {netInfo.links}</span>
           </div>
+          {options.relayHub && /^https?:\/\/(api\.)?trycloudflare\.com\/?$/i.test(options.relayHub) && (
+            <div className="mb-2">
+              <p className="text-[11px] text-coral leading-relaxed">
+                В поле «Игровой хаб» — <span className="text-paper">адрес Cloudflare API, а не туннеля</span> (в нём нет дефисов).
+                Правильная ссылка выглядит как <span className="text-paper">https://слово-слово-1234.trycloudflare.com</span>.
+                Запустите <span className="text-paper">retropolia-host.bat</span> заново и вставьте новую ссылку.
+              </p>
+            </div>
+          )}
           {options.relayHub && room.transport === 'peer' && (
             <div className="mb-2">
               <p className="text-[11px] text-magma leading-relaxed">
