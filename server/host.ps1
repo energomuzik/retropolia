@@ -1,27 +1,27 @@
 # =====================================================================
-# RETROPOLIA host launcher (generated-friendly, plain ASCII comments).
-# Starts the game hub (node relay-hub.js) and a Cloudflare quick tunnel,
-# finds the public URL, copies it to the clipboard, waits for a keypress,
-# then stops everything.
+# RETROPOLIA host launcher. Plain ASCII only (safe for any Windows
+# codepage). Starts the game hub (node relay-hub.js) and a Cloudflare
+# quick tunnel, finds the public URL, copies it to the clipboard, waits
+# for a keypress, then stops everything.
 # =====================================================================
 $ErrorActionPreference = 'SilentlyContinue'
 $root = $PSScriptRoot
 if (-not $root) { $root = (Get-Location).Path }
 
 Write-Host ''
-Write-Host '  RETROPOLIA HOST - запуск...'
+Write-Host '  RETROPOLIA HOST - starting...'
 Write-Host ''
 
 # --- 1. start the game hub (port 9001) ---
 $hub = Start-Process -FilePath 'node' -ArgumentList 'relay-hub.js' -WorkingDirectory $root -PassThru -WindowStyle Minimized
 if (-not $hub) {
-    Write-Host '  [X] Не удалось запустить node relay-hub.js. Установлен ли Node.js?'
-    Write-Host '  Нажмите любую клавишу для выхода...'
+    Write-Host '  [X] Failed to start: node relay-hub.js. Is Node.js installed?'
+    Write-Host '  Press any key to exit...'
     $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
     exit 1
 }
 Start-Sleep -Seconds 2
-Write-Host '  [OK] Сервер RETROPOLIA запущен (порт 9001)'
+Write-Host '  [OK] RETROPOLIA hub started (port 9001)'
 
 # --- 2. start the Cloudflare quick tunnel ---
 $cfExe = Join-Path $root 'cloudflared.exe'
@@ -31,7 +31,7 @@ if (Test-Path $outLog) { Remove-Item $outLog -Force }
 if (Test-Path $errLog) { Remove-Item $errLog -Force }
 
 $cf = Start-Process -FilePath $cfExe -ArgumentList 'tunnel','--url','http://localhost:9001' -WorkingDirectory $root -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru -WindowStyle Hidden
-Write-Host '  [..] Создаю публичный туннель Cloudflare (10-40 секунд)...'
+Write-Host '  [..] Creating Cloudflare public tunnel (10-40 seconds)...'
 
 # --- 3. find the public URL ---
 $url = ''
@@ -49,25 +49,25 @@ Write-Host ''
 if ($url) {
     Set-Clipboard $url
     Write-Host '  =============================================='
-    Write-Host '   ССЫЛКА СКОПИРОВАНА В БУФЕР ОБМЕНА:'
+    Write-Host '   LINK COPIED TO CLIPBOARD:'
     Write-Host "   $url"
     Write-Host '  =============================================='
     Write-Host ''
-    Write-Host '   Что дальше:'
-    Write-Host '   1. Откройте игру и вставьте ссылку:'
-    Write-Host '      Опции -> Игровой хаб'
-    Write-Host '   2. Передайте эту ссылку друзьям (соцсети, мессенджер).'
-    Write-Host '      Они вставят её в том же поле "Игровой хаб".'
-    Write-Host '   3. Создайте комнату и назовите друзьям код.'
+    Write-Host '   Next steps:'
+    Write-Host '   1. Open the game and paste the link into:'
+    Write-Host '      Options -> Game hub (Igrovoi hab)'
+    Write-Host '   2. Send this link to your friends.'
+    Write-Host '      They paste it into the same "Game hub" field.'
+    Write-Host '   3. Create a room and share the room code.'
 } else {
-    Write-Host '  [!] Не удалось автоматически получить ссылку.'
-    Write-Host '      Откройте файлы cf-out.log / cf-err.log в этой папке -'
-    Write-Host '      там будет строка вида https://....trycloudflare.com'
+    Write-Host '  [!] Could not get the link automatically.'
+    Write-Host '      Open cf-out.log / cf-err.log in this folder -'
+    Write-Host '      look for a line like https://....trycloudflare.com'
 }
 
 Write-Host ''
-Write-Host '  Сервер работает. Держите это окно открытым, пока играете!'
-Write-Host '  Нажмите любую клавишу, чтобы остановить сервер и выйти.'
+Write-Host '  Server is RUNNING. Keep this window open while playing!'
+Write-Host '  Press any key to stop the server and exit.'
 Write-Host ''
 $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
 
@@ -75,5 +75,5 @@ $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
 if ($cf)  { Stop-Process -Id $cf.Id  -Force -ErrorAction SilentlyContinue }
 if ($hub) { Stop-Process -Id $hub.Id -Force -ErrorAction SilentlyContinue }
 Write-Host ''
-Write-Host '  Сервер остановлен. До встречи!'
+Write-Host '  Server stopped. Bye!'
 Write-Host ''
