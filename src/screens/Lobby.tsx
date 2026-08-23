@@ -69,35 +69,6 @@ export function CreateScreen() {
             <PxBtn big color="gold" disabled={!sel} onClick={create}>{Ic.dice(18)} Открыть комнату</PxBtn>
           </div>
         )}
-
-        <HostYourselfBlock />
-      </div>
-    </div>
-  );
-}
-
-/* ---------- «стать хостом самому» (если облако недоступно) ---------- */
-
-export function HostYourselfBlock() {
-  const { toast } = useApp();
-  return (
-    <div className="mt-8 pixel-panel pixel-corners p-5 border-sky/40">
-      <div className="flex items-center gap-2 mb-2">
-        <span className="text-sky">{Ic.globe(18)}</span>
-        <span className="font-display uppercase tracking-wider text-sky text-sm">Не подключается через облако?</span>
-      </div>
-      <p className="text-[13px] text-dim leading-relaxed mb-3">
-        Публичное реле иногда недоступно. Тогда <span className="text-paper">станьте хостом сами</span>: скачайте
-        маленький сервер, запустите его двойным кликом — он сам создаст публичную ссылку и скопирует её в буфер.
-        Ссылку передайте друзьям любым мессенджером. Нужен только Node.js и доступ к Cloudflare.
-      </p>
-      <div className="flex items-center gap-3 flex-wrap">
-        <PxBtn color="sky" onClick={() => { downloadHostBat(); toast('retropolia-host.bat скачан — запустите его двойным кликом', 'ok'); }}>
-          {Ic.download(15)} Скачать сервер (Windows)
-        </PxBtn>
-        <span className="text-[11px] text-faint max-w-sm">
-          1) Запустите .bat · 2) Скопируется ссылка · 3) Вставьте её в «Опции → Игровой хаб» (вы и друзья)
-        </span>
       </div>
     </div>
   );
@@ -284,7 +255,7 @@ function GuestWaitPanel({
                 <p>• На этом компьютере <span className="text-paper">нет интернета</span> или он закрыт (VPN, корпоративный файрвол, антивирус).</p>
                 <p>• Попробуйте раздать мобильный хот-спот и отключить VPN.</p>
                 <p>• Для онлайн-игры интернет нужен <span className="text-paper">обоим</span> компьютерам, даже в одной квартире.</p>
-                <p>• Если облако недоступно — запустите свой реле (<span className="text-sky font-display">npx peer --port 9000</span>) и укажите его IP в Опциях → «Свой реле-сервер».</p>
+                <p>• Если создатель комнаты <span className="text-paper">стал хостом</span> — вставьте его ссылку в «Опции → Игровой хаб» и попробуйте снова.</p>
               </>
             )}
           </div>
@@ -320,11 +291,47 @@ function GuestWaitPanel({
   );
 }
 
+/* ---------- запасной вариант: стать хостом самому (только когда облако подвело) ---------- */
+
+function HostFallbackPanel({ onRestart }: { onRestart: (url: string) => void }) {
+  const { options, toast } = useApp();
+  const [hubUrl, setHubUrl] = useState(options.relayHub ?? '');
+  return (
+    <div className="mt-3 pixel-panel pixel-corners p-4 text-left border-magma/50 pop-in">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-magma">{Ic.globe(18)}</span>
+        <span className="font-display uppercase tracking-wider text-magma text-sm">Облако не справилось — станьте хостом сами</span>
+      </div>
+      <p className="text-[12px] text-dim leading-relaxed mb-3">
+        Скачайте маленький сервер и запустите его двойным кликом — он сам создаст публичную ссылку и{' '}
+        <span className="text-paper">скопирует её в буфер</span>. Вставьте ссылку ниже и перезапустите комнату через ваш хаб.
+        Друзья вставят эту же ссылку в «Опции → Игровой хаб» и подключатся по тому же коду.
+      </p>
+      <div className="mb-3">
+        <PxBtn small color="sky" onClick={() => { downloadHostBat(); toast('retropolia-host.bat скачан — запустите его двойным кликом', 'ok'); }}>
+          {Ic.download(13)} Скачать сервер (Windows)
+        </PxBtn>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <input
+          className="field-in flex-1 min-w-[220px] px-3 py-2 font-display text-sm"
+          placeholder="https://xxxx-xxxx.trycloudflare.com"
+          value={hubUrl}
+          onChange={(e) => setHubUrl(e.target.value.trim())}
+        />
+        <PxBtn small color="magma" onClick={() => onRestart(hubUrl)}>{Ic.rotate(13)} Через мой хаб</PxBtn>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- лобби комнаты ---------- */
 
 export function LobbyScreen() {
   const { session, room, netInfo, setScreen, leaveRoom, selfId, options, tokens } = useApp();
   const [waited, setWaited] = useState(0);
+  const [lobbySeconds, setLobbySeconds] = useState(0);
+  const [hubPanelOpen, setHubPanelOpen] = useState(false);
 
   useEffect(() => {
     if (!room) setScreen('menu');
@@ -336,6 +343,30 @@ export function LobbyScreen() {
     const t = setInterval(() => setWaited((w) => w + 1), 1000);
     return () => clearInterval(t);
   }, [room, session]);
+
+  // сколько секунд хост сидит в лобби (для предложения «стать хостом», если никто не идёт)
+  useEffect(() => {
+    if (!room || !room.isHost) return;
+    const t = setInterval(() => setLobbySeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [room]);
+
+  // перезапуск комнаты через собственный игровой хаб
+  const restartViaHub = (url: string) => {
+    const st = useApp.getState();
+    const clean = url.trim();
+    if (!clean) { st.toast('Сначала вставьте ссылку хаба (https://…)', 'err'); return; }
+    st.setOptions({ relayHub: clean });
+    const isHost = st.room?.isHost ?? true;
+    const code = st.session?.code;
+    if (!code) return;
+    const newRoom = openRoom(code, isHost, {
+      session: isHost ? st.session : null,
+      map: isHost ? st.sessionMap : null,
+    });
+    if (!isHost) newRoom.send('action', { t: 'hello', id: st.selfId, name: st.options.name });
+    st.toast('Переподключаемся через игровой хаб…', 'info');
+  };
 
   if (!room || !session) {
     const isGuest = room ? !room.isHost : false;
@@ -367,6 +398,12 @@ export function LobbyScreen() {
       () => useApp.getState().toast(session.code, 'info'),
     );
   };
+
+  // «Стать хостом» предлагаем не сразу, а только когда облако реально подвело:
+  // либо нет связи с реле, либо хост онлайн, но за 25+ секунд никто не подключился.
+  const cloudDown = netInfo.signal === 'error';
+  const noPeersLong = isHost && netInfo.online && netInfo.links === 0 && lobbySeconds > 25;
+  const showFallback = cloudDown || hubPanelOpen;
 
   return (
     <div className="h-full crt-grid-bg overflow-y-auto relative">
@@ -406,6 +443,17 @@ export function LobbyScreen() {
               </div>
             </div>
           )}
+          {noPeersLong && !showFallback && (
+            <div className="mb-2">
+              <button
+                onClick={() => setHubPanelOpen(true)}
+                className="text-[11px] text-magma hover:text-gold cursor-pointer underline underline-offset-2 transition-colors"
+              >
+                Никто не подключается? Возможно, облако недоступно игрокам — стать хостом самому
+              </button>
+            </div>
+          )}
+          {showFallback && <HostFallbackPanel onRestart={restartViaHub} />}
           <div className="font-pixel text-gold title-glow text-lg">КОМНАТА</div>
           <button onClick={copyCode} className="mt-3 inline-flex items-center gap-4 hud-chip pixel-corners px-8 py-4 cursor-pointer hover:border-gold transition-colors group">
             <span className="font-pixel text-4xl tracking-[0.3em] text-paper group-hover:text-gold transition-colors">{session.code}</span>
