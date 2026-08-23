@@ -51,6 +51,7 @@ export interface QuizRun {
   startedAt: number;
   resolved: boolean;
   answered?: { id: string; name: string }[]; // ошибившиеся игроки (в гонке отвечают один раз)
+  pending?: { id: string; name: string; sentAt: number }[]; // верные ответы в «окне сбора»
   result?: {
     correct: boolean;
     deltaMin: number;
