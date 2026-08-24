@@ -13,9 +13,26 @@ import { sfx } from '../sound';
 /* ---------- создание игры ---------- */
 
 export function CreateScreen() {
-  const { maps, setScreen, toast } = useApp();
+  const { maps, roms, setScreen, toast } = useApp();
   const ready = maps.filter((m) => m.ready);
   const [sel, setSel] = useState<string | null>(null);
+
+  // сводка по карте: что на ней есть (для списка с галочками)
+  const mapFacts = (m: GameMap) => {
+    const romExt = (id?: string) => roms.find((r) => r.id === id)?.ext;
+    const taskCells = m.cells.filter((c) => c.type === 'task' && c.task);
+    const bonusCells = m.cells.filter((c) => c.type === 'bonus').length;
+    const trapCells = m.cells.filter((c) => c.type === 'trap').length;
+    return {
+      cells: m.cells.length,
+      bonus: bonusCells,
+      trap: trapCells,
+      quiz: m.quizzes?.length ?? 0,
+      nes: taskCells.filter((c) => romExt(c.task!.romId) === 'nes').length,
+      sega: taskCells.filter((c) => romExt(c.task!.romId) && romExt(c.task!.romId) !== 'nes').length,
+      empty: m.cells.filter((c) => c.type === 'task' && !c.task).length,
+    };
+  };
 
   const create = () => {
     const st = useApp.getState();
@@ -49,8 +66,25 @@ export function CreateScreen() {
                 <span className="font-display uppercase text-paper text-lg">{m.name}</span>
                 {sel === m.id && <span className="text-gold">{Ic.check(16)}</span>}
               </div>
-              <div className="tick-label text-faint mt-2">
-                {m.cells.length} ячеек · бонусы {m.bonusCards.length} · ловушки {m.trapCards.length} · <span className="text-sky">квизы {m.quizzes?.length ?? 0}</span>
+              <div className="tick-label text-faint mt-2">{(() => { const f = mapFacts(m); return `${f.cells} ячеек на маршруте`; })()}</div>
+              <div className="mt-2.5 grid grid-cols-2 gap-x-3 gap-y-1">
+                {(() => {
+                  const f = mapFacts(m);
+                  const rows: { on: boolean; label: string; color: string }[] = [
+                    { on: f.nes > 0, label: `NES-задания · ${f.nes}`, color: 'text-sky' },
+                    { on: f.sega > 0, label: `SEGA-задания · ${f.sega}`, color: 'text-magma' },
+                    { on: f.quiz > 0, label: `Квизы · ${f.quiz}`, color: 'text-sky' },
+                    { on: f.bonus > 0, label: `Бонусы · ${f.bonus}`, color: 'text-teal' },
+                    { on: f.trap > 0, label: `Ловушки · ${f.trap}`, color: 'text-coral' },
+                    { on: f.empty > 0, label: `Ячейки без заданий · ${f.empty}`, color: 'text-magma' },
+                  ];
+                  return rows.map((r) => (
+                    <span key={r.label} className={`flex items-center gap-1.5 text-[11px] ${r.on ? r.color : 'text-faint'}`}>
+                      <span className="font-pixel text-[8px]">{r.on ? '✓' : '·'}</span>
+                      {r.label}
+                    </span>
+                  ));
+                })()}
               </div>
             </button>
           ))}
@@ -199,7 +233,7 @@ export function LoadScreen() {
 /* ---------- панель ожидания гостя с диагностикой ---------- */
 
 function GuestWaitPanel({
-  isGuest, code, signal, errorType, waited, attempts, transport, onBack, onRetry,
+  isGuest, code, signal, errorType, waited, attempts, transport, mapName, onBack, onRetry,
 }: {
   isGuest: boolean;
   code: string;
@@ -208,6 +242,7 @@ function GuestWaitPanel({
   waited: number;
   attempts: number;
   transport?: 'peer' | 'hub';
+  mapName?: string | null;
   onBack: () => void;
   onRetry: () => void;
 }) {
@@ -227,6 +262,12 @@ function GuestWaitPanel({
           </div>
           {attempts > 1 && (
             <div className="tick-label text-gold mt-2">Попытка {attempts} · переподключаемся автоматически…</div>
+          )}
+          {mapName && (
+            <div className="hud-chip pixel-corners inline-block px-3 py-1.5 mt-3">
+              <span className="tick-label text-gold">Карта хоста:</span>{' '}
+              <span className="font-display uppercase text-paper text-[12px]">{mapName}</span>
+            </div>
           )}
           <p className="text-[12px] text-dim mt-3 leading-relaxed">
             {signal === 'connecting'
@@ -335,7 +376,7 @@ function HostFallbackPanel({ onRestart }: { onRestart: (url: string) => void }) 
 /* ---------- лобби комнаты ---------- */
 
 export function LobbyScreen() {
-  const { session, room, netInfo, setScreen, leaveRoom, selfId, options, tokens } = useApp();
+  const { session, sessionMap, roms, room, netInfo, setScreen, leaveRoom, selfId, options, tokens } = useApp();
   const [waited, setWaited] = useState(0);
   const [lobbySeconds, setLobbySeconds] = useState(0);
   const [hubPanelOpen, setHubPanelOpen] = useState(false);
@@ -389,6 +430,7 @@ export function LobbyScreen() {
             waited={waited}
             attempts={netInfo.attempts}
             transport={room?.transport}
+            mapName={useApp.getState().sessionMap?.name}
             onBack={() => { leaveRoom(); setScreen('menu'); }}
             onRetry={() => room?.retry()}
           />
@@ -490,7 +532,41 @@ export function LobbyScreen() {
           <p className="text-[12px] text-dim mt-3">Передайте код соперникам — раздел «Подключиться». Ресурсы у всех: 60 минут + 60 попыток.</p>
         </div>
 
-        <div className="mt-8 grid sm:grid-cols-2 gap-3">
+        {/* карта партии: данные видят все игроки и подтверждают, нажав «Готов» */}
+        {sessionMap && (
+          <div className="mt-6 pixel-panel pixel-corners p-4">
+            <div className="flex items-center gap-2 mb-2.5">
+              <span className="text-gold">{Ic.map(16)}</span>
+              <span className="font-display uppercase tracking-wider text-paper text-sm">{sessionMap.name}</span>
+              <span className="tick-label text-faint ml-auto">карту раздаёт хост — у всех игроков она одинаковая</span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1">
+              {(() => {
+                const romExt = (id?: string) => roms.find((r) => r.id === id)?.ext;
+                const taskCells = sessionMap.cells.filter((c) => c.type === 'task' && c.task);
+                const rows: { label: string; color: string }[] = [
+                  { label: `Ячеек на маршруте · ${sessionMap.cells.length}`, color: 'text-paper' },
+                  { label: `NES-задания · ${taskCells.filter((c) => romExt(c.task!.romId) === 'nes').length}`, color: 'text-sky' },
+                  { label: `SEGA-задания · ${taskCells.filter((c) => romExt(c.task!.romId) && romExt(c.task!.romId) !== 'nes').length}`, color: 'text-magma' },
+                  { label: `Квизы · ${sessionMap.quizzes?.length ?? 0}`, color: 'text-sky' },
+                  { label: `Бонусы · ${sessionMap.cells.filter((c) => c.type === 'bonus').length}`, color: 'text-teal' },
+                  { label: `Ловушки · ${sessionMap.cells.filter((c) => c.type === 'trap').length}`, color: 'text-coral' },
+                ];
+                return rows.map((r) => (
+                  <span key={r.label} className={`flex items-center gap-1.5 text-[11px] ${r.color}`}>
+                    <span className="font-pixel text-[8px]">✓</span>
+                    {r.label}
+                  </span>
+                ));
+              })()}
+            </div>
+            <p className="text-[10.5px] text-faint mt-2.5">
+              Нажимая «Готов», игрок подтверждает, что согласен играть на этой карте. Ромы заданий хост подгрузит всем автоматически.
+            </p>
+          </div>
+        )}
+
+        <div className="mt-6 grid sm:grid-cols-2 gap-3">
           {[0, 1, 2, 3].map((i) => {
             const p = session.players[i];
             return (

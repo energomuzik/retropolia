@@ -278,10 +278,13 @@ export default function GameScreen() {
               d.y += dy * Math.min(1, 0.085 * dt);
               lift = -Math.abs(Math.sin(t / 110)) * 7; // лёгкое подпрыгивание
             }
-          } else {
+          } else if (!mvActive) {
+            // тянем к авторитетной клетке только когда это движение не «висит» в ожидании
             d.x += (center.x - d.x) * Math.min(1, 0.14 * dt);
             d.y += (center.y - d.y) * Math.min(1, 0.14 * dt);
           }
+          // если mvActive, а очередь пуста — стоим на месте (ждём подтверждения хоста),
+          // иначе фишка визуально «отскакивала» назад к старой клетке
           return {
             x: d.x, y: d.y + lift, color: PLAYER_COLORS[p.color],
             active: act?.id === p.id, alive: p.alive, label: p.name,

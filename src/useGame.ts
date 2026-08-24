@@ -2,9 +2,9 @@ import { useApp, getRomData } from './store';
 import { createRoom, type Room } from './net';
 import { createHubRoom } from './hub';
 import { applyAction, type Action } from './engine';
-import type { GameMap, GameSession, NetMsg } from './types';
+import type { GameMap, GameSession, NetMsg, RomDef, SaveDef } from './types';
 import { APP_VERSION } from './types';
-import { idbGet } from './db';
+import { idbGet, idbPut } from './db';
 
 /* base64 <-> ArrayBuffer для передачи ромов по сети */
 function bufToB64(buf: ArrayBuffer): string {
@@ -19,6 +19,25 @@ function b64ToBuf(b64: string): ArrayBuffer {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return bytes.buffer;
+}
+
+/* Хост собирает ромы и сохранения, на которые ссылается карта, и отдаёт их гостю. */
+async function sendLibrary(room: Room, map: GameMap): Promise<void> {
+  const romIds = new Set<string>();
+  const saveIds = new Set<string>();
+  for (const c of map.cells) {
+    if (c.task?.romId) romIds.add(c.task.romId);
+    if (c.task?.saveId) saveIds.add(c.task.saveId);
+  }
+  const st = useApp.getState();
+  const roms = st.roms.filter((r) => romIds.has(r.id));
+  const saves = st.saves.filter((s) => saveIds.has(s.id));
+  const blobs: Record<string, string> = {};
+  for (const r of roms) {
+    const buf = await getRomData(r.id);
+    if (buf) blobs[r.id] = bufToB64(buf);
+  }
+  room.send('library', { roms, saves, blobs });
 }
 
 /* мини-шина для кадров трансляции */
@@ -78,8 +97,26 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
           // карту рассылаем только когда она реально нужна/меняется: новому игроку (hello)
           // или при создании задания на лету (setCellTask). Это резко снижает трафик.
           if (act.t === 'hello' || act.t === 'setCellTask') room.send('map', h.sessionMap);
+          // при подключении игрока хост заранее раздаёт ромы и сохранения карты,
+          // чтобы в игре задания открывались у всех мгновенно
+          if (act.t === 'hello') void sendLibrary(room, h.sessionMap);
           room.send('state', next);
         }
+        break;
+      }
+      /* Гость получил библиотеку ромов/сохранений от хоста — кладёт её в свою базу. */
+      case 'library': {
+        const lib = m.p as { roms: RomDef[]; saves: SaveDef[]; blobs: Record<string, string> };
+        void (async () => {
+          for (const r of lib.roms) {
+            await idbPut('roms', r.id, r);
+            const b = lib.blobs[r.id];
+            if (b) await idbPut('blobs', `rom-${r.id}`, b64ToBuf(b));
+          }
+          for (const sv of lib.saves) await idbPut('saves', sv.id, sv);
+          await useApp.getState().refresh();
+          useApp.getState().toast('Данные карты загружены от хоста', 'ok');
+        })().catch(() => undefined);
         break;
       }
       /* Гость запросил ром/сохранение, которых нет в его IndexedDB — хост отдаёт бинарник. */
