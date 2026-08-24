@@ -44,6 +44,29 @@ export default function GameScreen() {
      показывают одни и те же числа — никаких расхождений из-за пинга. */
   const [rolling, setRolling] = useState(false);
   const lastRollRef = useRef(0);
+
+  /* ---------- жеребьёвка: тряска кубика и автозапуск ---------- */
+  const [roShake, setRoShake] = useState(false);
+  const [roFace, setRoFace] = useState(6);
+  const roShakeIntRef = useRef(0);
+  const roStartRef = useRef(0);
+  const startRoShake = () => {
+    if (roShake) return;
+    roStartRef.current = Date.now();
+    setRoShake(true);
+    roShakeIntRef.current = window.setInterval(() => {
+      setRoFace(1 + Math.floor(Math.random() * 6));
+      sfx.dice();
+    }, 75);
+  };
+  const endRoShake = () => {
+    if (!roShake) return;
+    clearInterval(roShakeIntRef.current);
+    const holdMs = Date.now() - roStartRef.current;
+    setRoShake(false);
+    sfx.drop();
+    dispatch({ t: 'roll', id: me, holdMs });
+  };
   const [romBuf, setRomBuf] = useState<ArrayBuffer | null>(null);
   const [saveState, setSaveState] = useState<unknown>(null);
   const [emuKey, setEmuKey] = useState(0);
@@ -381,8 +404,14 @@ export default function GameScreen() {
   const aliveCount = s.players.filter((p) => p.alive).length;
   const votesNeed = aliveCount;
 
+  /* holdingRef — надёжный флаг «кнопка нажата» (state мог запаздывать в замыканиях,
+     из-за чего повторное нажатие плодило интервалы и кубики тряслись вечно). */
+  const holdingRef = useRef(false);
   const startHold = () => {
     if (!myTurn || s.moving || ch || s.pendingCard || s.awaitPost || s.quiz) return;
+    if (rolling || holdingRef.current) return; // защита от повторного нажатия/залипания
+    clearInterval(shakeIntRef.current); // глушим возможный «осиротевший» интервал
+    holdingRef.current = true;
     holdStartRef.current = Date.now();
     setShake({ holding: true, a: 1, b: 1 });
     shakeIntRef.current = window.setInterval(() => {
@@ -391,7 +420,8 @@ export default function GameScreen() {
     }, 75);
   };
   const endHold = () => {
-    if (!shake.holding) return;
+    if (!holdingRef.current) return;
+    holdingRef.current = false;
     clearInterval(shakeIntRef.current);
     const holdMs = Date.now() - holdStartRef.current;
     setShake((x) => ({ ...x, holding: false }));
@@ -408,6 +438,23 @@ export default function GameScreen() {
       setRolling(false);
     }
   }, [rollId]);
+
+  /* страховка: если хост не ответил и «катание» зависло — сбрасываем, чтобы не висеть вечно */
+  useEffect(() => {
+    if (!rolling) return;
+    const t = setTimeout(() => setRolling(false), 6000);
+    return () => clearTimeout(t);
+  }, [rolling]);
+
+  /* жеребьёвка: когда определён победитель, хост через паузу запускает игру —
+     все успевают увидеть, кто ходит первым */
+  const roWinner = s?.rollOffWinner ?? null;
+  useEffect(() => {
+    if (!roWinner || !room?.isHost || s?.phase !== 'rollOff') return;
+    const t = setTimeout(() => dispatch({ t: 'rollOffGo' }), 2600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roWinner]);
 
   /* пока кубики катятся — показываем быструю смену граней */
   useEffect(() => {
@@ -627,7 +674,7 @@ export default function GameScreen() {
         )}
 
         {/* ---------- жеребьёвка ---------- */}
-        {s.phase === 'rollOff' && (
+        {s.phase === 'rollOff' && !s.rollOffWinner && (
           <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.55)] z-10">
             <div className="pixel-panel pixel-corners pop-in p-6 max-w-md w-full mx-4 text-center">
               <div className="font-display uppercase tracking-wider text-gold text-lg">Кто ходит первым?</div>
@@ -641,9 +688,49 @@ export default function GameScreen() {
                 ))}
               </div>
               {s.players[s.rollOffIdx]?.id === me ? (
-                <PxBtn big onClick={() => dispatch({ t: 'roll', id: me, holdMs: 400 + Math.random() * 800 })}>{Ic.dice(16)} Бросить кубик</PxBtn>
+                <div className="flex flex-col items-center gap-3">
+                  <DieFace v={roShake ? roFace : s.rollOffValues[me] ?? 6} dropping={false} rolling={roShake} />
+                  <button
+                    onPointerDown={startRoShake}
+                    onPointerUp={endRoShake}
+                    onPointerLeave={() => { if (roShake) endRoShake(); }}
+                    className={`btn-px pixel-corners btn-gold px-7 py-3 text-sm select-none touch-none ${roShake ? 'shake-hard' : ''}`}
+                  >
+                    {Ic.dice(16)} {roShake ? 'ОТПУСТИТЕ — БРОСОК!' : 'ДЕРЖИТЕ, ЧТОБЫ СМЕШАТЬ'}
+                  </button>
+                </div>
               ) : (
                 <div className="font-pixel text-[9px] text-dim blink-hard">БРОСАЕТ {s.players[s.rollOffIdx]?.name}…</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ---------- победитель жеребьёвки ---------- */}
+        {s.phase === 'rollOff' && s.rollOffWinner && (
+          <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.6)] z-10">
+            <div className="pixel-panel pixel-corners pop-in p-7 max-w-md w-full mx-4 text-center">
+              <span className="text-gold inline-block floaty">{Ic.dice(40)}</span>
+              <div className="font-pixel text-gold text-[11px] mt-3">ПЕРВЫМ ХОДИТ</div>
+              <div
+                className="font-display uppercase text-3xl mt-2"
+                style={{ color: PLAYER_COLORS[(s.players.find((p) => p.id === s.rollOffWinner)?.color ?? 0)] }}
+              >
+                {s.players.find((p) => p.id === s.rollOffWinner)?.name ?? '—'}
+              </div>
+              <div className="flex justify-center gap-2 mt-4 flex-wrap">
+                {s.players.map((p) => (
+                  <div key={p.id} className="hud-chip pixel-corners px-3 py-1.5">
+                    <span className="font-display text-[10px] uppercase" style={{ color: PLAYER_COLORS[p.color] }}>{p.name}</span>
+                    <span className="font-pixel text-[11px] text-paper ml-2">{s.rollOffValues[p.id] ?? '·'}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="font-pixel text-[9px] text-dim mt-4 blink-hard">ИГРА НАЧНЁТСЯ ЧЕРЕЗ МГНОВЕНИЕ…</div>
+              {room.isHost && (
+                <div className="mt-3">
+                  <GhostBtn small onClick={() => dispatch({ t: 'rollOffGo' })}>Начать сразу</GhostBtn>
+                </div>
               )}
             </div>
           </div>

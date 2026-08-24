@@ -2,7 +2,7 @@ import { useApp, getRomData } from './store';
 import { createRoom, type Room } from './net';
 import { createHubRoom } from './hub';
 import { applyAction, type Action } from './engine';
-import type { GameMap, GameSession, NetMsg, RomDef, SaveDef } from './types';
+import type { GameMap, GameSession, NetMsg, RomDef, SaveDef, SessionSnapshot } from './types';
 import { APP_VERSION } from './types';
 import { idbGet, idbPut } from './db';
 
@@ -19,6 +19,37 @@ function b64ToBuf(b64: string): ArrayBuffer {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return bytes.buffer;
+}
+
+/* Гость сообщает прогресс загрузки: и хосту (по сети), и себе (чтобы собственная
+   полоска в лобби двигалась, а не стояла на нуле). */
+function reportSync(room: Room, pct: number) {
+  useApp.getState().setSync(room.selfId, pct);
+  room.send('action', { t: 'syncProgress', id: room.selfId, pct });
+}
+
+/* Автосейв партии хостом: чтобы при зависании/перезагрузке сессию можно было
+   восстановить из «Загрузить игру». Пишем не чаще раза в 8 с и при смене хода. */
+let lastAutosave = 0;
+let lastAutosaveTurn = -1;
+async function autosaveSession(next: GameSession) {
+  if (next.phase === 'lobby') return; // в лобби сохранять нечего
+  const st = useApp.getState();
+  if (!st.sessionMap) return;
+  const now = Date.now();
+  const turnChanged = next.turn !== lastAutosaveTurn;
+  if (!turnChanged && now - lastAutosave < 8000) return;
+  lastAutosave = now;
+  lastAutosaveTurn = next.turn;
+  const snap: SessionSnapshot = {
+    id: `auto-${next.code}`,
+    name: `Автосохранение · ${st.sessionMap.name}`,
+    mapName: st.sessionMap.name,
+    code: next.code,
+    state: next,
+    createdAt: now,
+  };
+  try { await idbPut('sessions', snap.id, snap); } catch { /* noop */ }
 }
 
 /* Хост собирает ромы и сохранения, на которые ссылается карта, и отдаёт их гостю. */
@@ -58,6 +89,7 @@ export function dispatch(a: Action) {
     const next = applyAction(st.session, a, st.sessionMap, st.options);
     st.setSession(next);
     room.send('state', next);
+    void autosaveSession(next);
   } else {
     room.send('action', a);
   }
@@ -74,7 +106,7 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
     switch (m.t) {
       case 'map': {
         useApp.setState({ sessionMap: m.p as GameMap });
-        if (!room.isHost) room.send('action', { t: 'syncProgress', id: room.selfId, pct: 40 });
+        if (!room.isHost) reportSync(room, 40);
         break;
       }
       case 'state': {
@@ -100,6 +132,7 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
           const act = m.p as Action;
           const next = applyAction(h.session, act, h.sessionMap, h.options);
           h.setSession(next);
+          void autosaveSession(next);
           if (h.screen === 'lobby' && next.phase !== 'lobby') h.setScreen('game');
           // карту рассылаем только когда она реально нужна/меняется: новому игроку (hello)
           // или при создании задания на лету (setCellTask). Это резко снижает трафик.
@@ -122,7 +155,7 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
           }
           for (const sv of lib.saves) await idbPut('saves', sv.id, sv);
           await useApp.getState().refresh();
-          if (!room.isHost) room.send('action', { t: 'syncProgress', id: room.selfId, pct: 100 });
+          if (!room.isHost) reportSync(room, 100);
           useApp.getState().toast('Данные карты загружены от хоста', 'ok');
         })().catch(() => undefined);
         break;

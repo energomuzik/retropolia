@@ -7,6 +7,7 @@ export type Action =
   | { t: 'kick'; id: string }
   | { t: 'start' }
   | { t: 'roll'; id: string; holdMs: number }
+  | { t: 'rollOffGo' }
   | { t: 'arrived'; id: string }
   | { t: 'chooseMode'; id: string; mode: 'time' | 'tries' }
   | { t: 'startTask'; id: string }
@@ -374,9 +375,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           const max = Math.max(...vals);
           const leaders = s.players.filter((p) => (s.rollOffValues[p.id] ?? 0) === max);
           if (leaders.length === 1) {
+            // фиксируем победителя, но не стартуем сразу: всем показывается экран
+            // «первым ходит …», а запуск подтверждает действие rollOffGo
             s.turn = s.players.indexOf(leaders[0]);
-            s.phase = 'playing';
-            log(`🚀 Первым ходит ${leaders[0].name}!`);
+            s.rollOffWinner = leaders[0].id;
+            log(`🎲 Первым ходит ${leaders[0].name}!`);
           } else {
             s.rollOffValues = {};
             s.rollOffIdx = 0;
@@ -399,6 +402,14 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       for (let i = 1; i <= va + vb; i++) path.push((p.pos + i) % N);
       s.moving = { player: p.id, path, ts: Date.now() };
       log(`🎲 ${p.name}: ${va} + ${vb} = ${va + vb}`);
+      break;
+    }
+    case 'rollOffGo': {
+      // подтверждение старта после жеребьёвки: все уже увидели, кто ходит первым
+      if (s.phase !== 'rollOff' || !s.rollOffWinner) break;
+      const w = s.players.find((p) => p.id === s.rollOffWinner);
+      s.phase = 'playing';
+      log(`🚀 Игра началась! Ход ${w?.name ?? '—'}`);
       break;
     }
     case 'arrived': {

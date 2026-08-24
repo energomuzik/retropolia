@@ -27,12 +27,21 @@ export default function QuizOverlay() {
   const [text, setText] = useState('');
   const [sent, setSent] = useState(false);
   const wasResolvedRef = useRef(false);
+  /* Таймер идёт по ЛОКАЛЬНЫМ часам игрока с момента, когда он получил вопрос.
+     Иначе рассинхрон часов двух ПК (±5–10 с) давал одному игроку меньше времени. */
+  const localStartRef = useRef(0);
 
   // сброс локального состояния при новом вопросе
   useEffect(() => {
     setText('');
     setSent(false);
     wasResolvedRef.current = false;
+  }, [q?.quizId, q?.startedAt]);
+
+  // запоминаем локальный момент старта отсчёта для этого вопроса
+  useEffect(() => {
+    if (q?.startedAt && q.startedAt > 0) localStartRef.current = Date.now();
+    else localStartRef.current = 0;
   }, [q?.quizId, q?.startedAt]);
 
   // тик таймера
@@ -65,7 +74,9 @@ export default function QuizOverlay() {
   const isMystery = quiz.type === 'mystery';
   const picking = isMystery && !q.startedAt;
   const limit = Math.max(5, quiz.timeLimit);
-  const remain = q.startedAt ? Math.max(0, limit - (Date.now() - q.startedAt) / 1000) : limit;
+  const remain = q.startedAt && localStartRef.current
+    ? Math.max(0, limit - (Date.now() - localStartRef.current) / 1000)
+    : limit;
   const remainPct = Math.max(0, Math.min(100, (remain / limit) * 100));
   const iAmAsker = me === q.askerId;
   const iAmTarget = me === q.targetId;

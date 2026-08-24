@@ -190,6 +190,7 @@ export interface GameSession {
   players: PlayerState[];
   rollOffIdx: number;
   rollOffValues: Record<string, number>;
+  rollOffWinner?: string | null; // победитель жеребьёвки — показывается всем перед стартом
   turn: number;
   dice: { a: number; b: number; roll: number } | null;
   moving: { player: string; path: number[]; ts: number } | null;
