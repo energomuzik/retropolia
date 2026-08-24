@@ -3,7 +3,7 @@ import { useApp } from '../store';
 import { Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
 import { openRoom, dispatch } from '../useGame';
 import { genRoomCode } from '../net';
-import { newSession } from '../engine';
+import { newSession, fmtClock } from '../engine';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import { downloadHostBat } from '../host/hostPackage';
 import type { GameMap, SessionSnapshot } from '../types';
@@ -176,12 +176,14 @@ export function LoadScreen() {
     const map = maps.find((m) => m.id === s.state.mapId);
     if (!map) { toast('Карта этой партии не найдена в библиотеке', 'err'); return; }
     const st = useApp.getState();
-    // восстанавливаем хостом с тем же кодом комнаты; онлайн-игроки смогут переподключиться по коду
-    const session = { ...s.state, players: s.state.players.map((p, i) => (i === 0 ? { ...p, id: st.selfId, isHost: true } : p)) };
-    openRoom(s.code, true, { session, map });
-    void idbPut('sessions', s.id, { ...s, state: session });
+    /* Сначала собираем команду: открываем новую комнату-лобби, игроки подключаются
+       по коду и заявляют, кем они играли. Только потом хост восстанавливает партию. */
+    st.setResumeSnap(s);
+    const code = genRoomCode();
+    const session = newSession(code, map.id, st.selfId, st.options.name);
+    openRoom(code, true, { session, map });
     sfx.start();
-    toast('Партия восстановлена — вы хост комнаты', 'ok');
+    toast(`Комната ${code} открыта — передайте код команде, затем восстановите партию`, 'ok');
   };
 
   const del = async (id: string) => {
@@ -200,6 +202,10 @@ export function LoadScreen() {
             <span>{Ic.save(22)}</span> Загрузить игру
           </h1>
         </div>
+        <p className="text-[12px] text-dim mb-4 max-w-2xl">
+          Автосейвы (5 слотов, перезаписываются каждый ход) и ручные сохранения. «Собрать команду» откроет комнату:
+          передайте код игрокам, каждый нажмёт «Это я» напротив своей роли, и хост восстановит партию с того же места.
+        </p>
         <div className="space-y-3">
           {snaps.map((s) => (
             <div key={s.id} className="pixel-panel pixel-corners p-4 flex items-center gap-4 flex-wrap">
@@ -214,7 +220,7 @@ export function LoadScreen() {
                 </div>
               </div>
               <div className="flex gap-2">
-                <PxBtn color="teal" onClick={() => resume(s)}>{Ic.play(13)} Продолжить</PxBtn>
+                <PxBtn color="teal" onClick={() => resume(s)}>{Ic.play(13)} Собрать команду</PxBtn>
                 <GhostBtn onClick={() => void del(s.id)}>{Ic.trash(13)}</GhostBtn>
               </div>
             </div>
@@ -376,7 +382,7 @@ function HostFallbackPanel({ onRestart }: { onRestart: (url: string) => void }) 
 /* ---------- лобби комнаты ---------- */
 
 export function LobbyScreen() {
-  const { session, sessionMap, roms, room, netInfo, setScreen, leaveRoom, selfId, options, tokens, sync } = useApp();
+  const { session, sessionMap, roms, room, netInfo, setScreen, leaveRoom, selfId, options, tokens, sync, resumeSnap, resumeClaims, setResumeClaim } = useApp();
   const [waited, setWaited] = useState(0);
   const [lobbySeconds, setLobbySeconds] = useState(0);
   const [hubPanelOpen, setHubPanelOpen] = useState(false);
@@ -447,6 +453,29 @@ export function LobbyScreen() {
       () => useApp.getState().toast('Код скопирован', 'ok'),
       () => useApp.getState().toast(session.code, 'info'),
     );
+  };
+
+  /* восстановление партии: заявить сохранённую роль (или снять заявку) */
+  const claimRole = (savedId: string) => {
+    const cur = useApp.getState();
+    const next = cur.resumeClaims[selfId] === savedId ? '' : savedId;
+    cur.setResumeClaim(selfId, next);
+    room?.send('claim', { curId: selfId, savedId: next });
+    sfx.click();
+  };
+
+  /* хост запускает восстановление: движок заменит сессию на сохранённую,
+     переназначив игроков по заявкам; непризванные роли будут удалены */
+  const doResume = () => {
+    const cur = useApp.getState();
+    if (!cur.resumeSnap) return;
+    // убираем пустые заявки, чтобы не перенести «призрак» игрока
+    const claims = Object.fromEntries(Object.entries(cur.resumeClaims).filter(([, sid]) => sid));
+    dispatch({ t: 'resume', snap: { state: cur.resumeSnap.state, mapName: cur.resumeSnap.mapName }, claims });
+    // у хоста сбор команды завершён (у гостей очистится при получении нового state)
+    cur.setResumeSnap(null);
+    useApp.setState({ resumeClaims: {} });
+    sfx.start();
   };
 
   // «Стать хостом» предлагаем не сразу, а только когда облако реально подвело:
@@ -563,6 +592,53 @@ export function LobbyScreen() {
             <p className="text-[10.5px] text-faint mt-2.5">
               Нажимая «Готов», игрок подтверждает, что согласен играть на этой карте. Ромы заданий хост подгрузит всем автоматически.
             </p>
+          </div>
+        )}
+
+        {/* ---------- восстановление партии: каждый заявляет, кем играл ---------- */}
+        {resumeSnap && (
+          <div className="mt-6 pixel-panel pixel-corners p-4 border-gold/50">
+            <div className="flex items-center gap-2 mb-1.5">
+              <span className="text-gold">{Ic.rotate(16)}</span>
+              <span className="font-display uppercase tracking-wider text-gold text-sm">Восстановление партии</span>
+              <span className="tick-label text-faint ml-auto">сохранено {new Date(resumeSnap.createdAt).toLocaleString('ru-RU')}</span>
+            </div>
+            <p className="text-[12px] text-dim mb-3">
+              Каждый подключившийся игрок нажмите «Это я» напротив своей сохранённой роли. Непризванные роли будут удалены из партии.
+            </p>
+            <div className="space-y-2">
+              {resumeSnap.state.players.map((sp) => {
+                const claimedByCur = Object.entries(resumeClaims).find(([, sid]) => sid === sp.id)?.[0];
+                const claimer = claimedByCur ? session.players.find((p) => p.id === claimedByCur) : null;
+                const isMine = resumeClaims[selfId] === sp.id;
+                return (
+                  <div key={sp.id} className={`flex items-center gap-3 border-2 px-3 py-2 ${isMine ? 'border-gold bg-gold/5' : 'border-edge bg-panel'}`}>
+                    <span className="w-7 h-7 shrink-0 border-2 border-abyss" style={{ background: PLAYER_COLORS[sp.color] }} />
+                    <div className="flex-1 min-w-0">
+                      <div className="font-display uppercase text-paper text-[13px] truncate">{sp.name}</div>
+                      <div className="tick-label text-faint">
+                        {fmtClock(sp.secLeft)} · {sp.triesLeft} поп. · ячейка №{sp.pos + 1}{!sp.alive && ' · выбыл'}
+                      </div>
+                    </div>
+                    {claimer ? (
+                      <span className="tick-label text-teal whitespace-nowrap">→ {claimer.isHost ? 'хост' : claimer.name}{isMine ? ' (вы)' : ''}</span>
+                    ) : (
+                      <PxBtn small color={isMine ? 'dim' : 'gold'} onClick={() => claimRole(sp.id)}>{isMine ? 'Отменить' : 'Это я'}</PxBtn>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {isHost && (
+              <div className="mt-3 flex items-center justify-end gap-3">
+                <span className="tick-label text-faint">
+                  Призвано {Object.keys(resumeClaims).length} из {resumeSnap.state.players.length}
+                </span>
+                <PxBtn color="teal" disabled={!resumeClaims[selfId]} onClick={doResume}>
+                  {Ic.play(14)} Восстановить партию
+                </PxBtn>
+              </div>
+            )}
           </div>
         )}
 

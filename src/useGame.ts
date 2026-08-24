@@ -30,8 +30,12 @@ function reportSync(room: Room, pct: number) {
 
 /* Автосейв партии хостом: чтобы при зависании/перезагрузке сессию можно было
    восстановить из «Загрузить игру». Пишем не чаще раза в 8 с и при смене хода. */
+/* Автосейв: 5 циклических слотов на комнату, перезаписываются по кругу на каждом
+   ходе. Идентификатор слота auto-CODE-0..4, поэтому старых копий не копится. */
+const AUTO_SLOTS = 5;
 let lastAutosave = 0;
 let lastAutosaveTurn = -1;
+let autoSlotByCode: Record<string, number> = {};
 async function autosaveSession(next: GameSession) {
   if (next.phase === 'lobby') return; // в лобби сохранять нечего
   const st = useApp.getState();
@@ -41,13 +45,18 @@ async function autosaveSession(next: GameSession) {
   if (!turnChanged && now - lastAutosave < 8000) return;
   lastAutosave = now;
   lastAutosaveTurn = next.turn;
+  const slot = ((autoSlotByCode[next.code] ?? -1) + 1) % AUTO_SLOTS;
+  autoSlotByCode[next.code] = slot;
+  const turnNo = Math.floor(next.turn / Math.max(1, next.players.length)) + 1;
   const snap: SessionSnapshot = {
-    id: `auto-${next.code}`,
-    name: `Автосохранение · ${st.sessionMap.name}`,
+    id: `auto-${next.code}-${slot}`,
+    name: `Автосейв · ход ${turnNo}`,
     mapName: st.sessionMap.name,
     code: next.code,
     state: next,
     createdAt: now,
+    auto: true,
+    slot,
   };
   try { await idbPut('sessions', snap.id, snap); } catch { /* noop */ }
 }
@@ -109,6 +118,27 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
         if (!room.isHost) reportSync(room, 40);
         break;
       }
+      /* синхронное перемешивание кубиков: все видят грани бросающего */
+      case 'shake': {
+        const d = m.p as { from: string; a: number; b: number };
+        cur.setDiceShake(d);
+        break;
+      }
+      /* восстановление партии: игрок заявляет, кем он играл */
+      case 'claim': {
+        const c = m.p as { curId: string; savedId: string };
+        cur.setResumeClaim(c.curId, c.savedId);
+        break;
+      }
+      /* хост прислал сохранённый ростер — гость видит, кем может заявиться */
+      case 'resumeInfo': {
+        const info = m.p as { players: GameSession['players']; mapName: string };
+        cur.setResumeSnap({
+          id: 'remote', name: 'Партия', mapName: info.mapName, code: room.code,
+          state: { players: info.players } as GameSession, createdAt: Date.now(),
+        });
+        break;
+      }
       case 'state': {
         const s = m.p as GameSession;
         if (!s || s.v !== APP_VERSION) {
@@ -117,6 +147,11 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
         }
         cur.setSession(s);
         if (cur.screen === 'lobby' && s.phase !== 'lobby') cur.setScreen('game');
+        // партия восстановлена/идёт — данные сбора команды больше не нужны
+        if (s.phase !== 'lobby' && (cur.resumeSnap || Object.keys(cur.resumeClaims).length)) {
+          cur.setResumeSnap(null);
+          useApp.setState({ resumeClaims: {} });
+        }
         break;
       }
       case 'action': {
@@ -140,6 +175,11 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
           // при подключении игрока хост заранее раздаёт ромы и сохранения карты,
           // чтобы в игре задания открывались у всех мгновенно
           if (act.t === 'hello') void sendLibrary(room, h.sessionMap);
+          // если идёт сбор команды для восстановления — гостю нужен сохранённый ростер
+          if (act.t === 'hello') {
+            const rs = useApp.getState().resumeSnap;
+            if (rs) room.send('resumeInfo', { players: rs.state.players, mapName: rs.mapName });
+          }
           room.send('state', next);
         }
         break;

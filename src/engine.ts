@@ -6,8 +6,10 @@ export type Action =
   | { t: 'ready'; id: string; ready: boolean }
   | { t: 'kick'; id: string }
   | { t: 'start' }
+  | { t: 'rollStart'; id: string }
   | { t: 'roll'; id: string; holdMs: number }
   | { t: 'rollOffGo' }
+  | { t: 'resume'; snap: { state: GameSession; mapName: string }; claims: Record<string, string> }
   | { t: 'arrived'; id: string }
   | { t: 'chooseMode'; id: string; mode: 'time' | 'tries' }
   | { t: 'startTask'; id: string }
@@ -66,10 +68,41 @@ export function fmtClock(totalSec: number): string {
 type Log = (t: string) => void;
 
 export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: GameOptions): GameSession {
+  /* Восстановление партии: полная замена сессии на сохранённую с переназначением
+     игроков (claims: currentId -> savedId). Непризванные сохранённые игроки выбывают. */
+  if (a.t === 'resume') {
+    if (s0.phase !== 'lobby') return s0;
+    const base = clone(a.snap.state);
+    base.v = APP_VERSION;
+    base.code = s0.code;
+    const claims = a.claims ?? {};
+    const claimedBy = new Map<string, string>(); // savedId -> currentId
+    for (const [curId, savedId] of Object.entries(claims)) claimedBy.set(savedId, curId);
+    const hostCurId = s0.players.find((p) => p.isHost)?.id;
+    base.players = base.players
+      .filter((p) => claimedBy.has(p.id))
+      .map((p) => {
+        const curId = claimedBy.get(p.id)!;
+        const lobbyP = s0.players.find((x) => x.id === curId);
+        return { ...p, id: curId, isHost: curId === hostCurId, name: lobbyP?.name ?? p.name, tokenImg: lobbyP?.tokenImg ?? p.tokenImg, ready: true };
+      });
+    if (base.players.length === 0) return s0;
+    const savedTurnId = a.snap.state.players[a.snap.state.turn % a.snap.state.players.length]?.id;
+    const targetCurId = savedTurnId ? claimedBy.get(savedTurnId) : undefined;
+    const ti = targetCurId ? base.players.findIndex((p) => p.id === targetCurId) : 0;
+    base.turn = ti < 0 ? 0 : ti;
+    base.moving = null; base.challenge = null; base.pendingCard = null; base.quiz = null;
+    base.notice = null; base.dice = null; base.sealedDice = null; base.awaitPost = false;
+    if (base.phase !== 'over') base.phase = 'playing';
+    base.log = [`♻️ Партия восстановлена из сохранения (игроков: ${base.players.length})`, ...(base.log ?? [])].slice(0, 50);
+    return base;
+  }
+
   const s = clone(s0);
   // старые сохранённые сессии могут не иметь новых полей
   if (!s.usedQuizzes) s.usedQuizzes = [];
   if (s.quiz === undefined) s.quiz = null;
+  if (s.sealedDice === undefined) s.sealedDice = null;
   const log: Log = (t) => { s.log = [t, ...s.log].slice(0, 50); };
   const alive = () => s.players.filter((p) => p.alive);
   const aid = 'id' in a ? (a as { id: string }).id : '';
@@ -361,6 +394,15 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       log('Игра начинается! Бросок за первый ход…');
       break;
     }
+    case 'rollStart': {
+      /* игрок начал перемешивать кубики — хост заранее «запечатывает» результат,
+         чтобы на релизе не ждать сеть */
+      if (s.phase !== 'playing') break;
+      const p = current();
+      if (!p || p.id !== a.id || s.moving || s.challenge || s.pendingCard || s.awaitPost || s.quiz) break;
+      s.sealedDice = { a: rnd6(), b: rnd6(), ts: Date.now() };
+      break;
+    }
     case 'roll': {
       if (s.phase === 'rollOff') {
         if (s.rollOffIdx >= s.players.length) break;
@@ -392,10 +434,21 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const p = current();
       if (!p || p.id !== a.id || s.moving || s.challenge || s.pendingCard || s.awaitPost || s.quiz) break;
       s.notice = null;
-      const shuffles = Math.min(6, 1 + Math.floor(Math.max(0, a.holdMs) / 450));
-      let va = rnd6();
-      for (let i = 1; i < shuffles; i++) va = rnd6();
-      const vb = rnd6();
+      /* если есть свежий «запечатанный» бросок (создан при начале перемешивания) —
+         используем его: у бросающего кубики останавливаются без сетевой задержки,
+         а все игроки видят одинаковые числа */
+      let va: number;
+      let vb: number;
+      if (s.sealedDice && Date.now() - s.sealedDice.ts < 20000) {
+        va = s.sealedDice.a;
+        vb = s.sealedDice.b;
+      } else {
+        const shuffles = Math.min(6, 1 + Math.floor(Math.max(0, a.holdMs) / 450));
+        va = rnd6();
+        for (let i = 1; i < shuffles; i++) va = rnd6();
+        vb = rnd6();
+      }
+      s.sealedDice = null;
       s.dice = { a: va, b: vb, roll: (s.dice?.roll ?? 0) + 1 };
       const N = map.cells.length;
       const path: number[] = [];

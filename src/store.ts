@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { GameMap, GameOptions, GameSession, RomDef, SaveDef, TileDef, TokenDef } from './types';
+import type { GameMap, GameOptions, GameSession, RomDef, SaveDef, SessionSnapshot, TileDef, TokenDef } from './types';
 import type { NetInfo, Room } from './net';
 import { idbAll, idbGet, idbPut } from './db';
 import { builtinTiles } from './assets';
@@ -36,6 +36,14 @@ interface AppState {
   sessionMap: GameMap | null;
   sync: Record<string, number>; // прогресс загрузки данных игрока (0..100), видит хост
   setSync: (id: string, pct: number) => void;
+  /* синхронное «перемешивание» кубиков: грани, которые сейчас показывает бросающий */
+  diceShake: { from: string; a: number; b: number; ts: number } | null;
+  setDiceShake: (d: { from: string; a: number; b: number } | null) => void;
+  /* восстановление партии: кто из подключившихся кем играет (currentId -> savedId) */
+  resumeClaims: Record<string, string>;
+  setResumeClaim: (curId: string, savedId: string) => void;
+  resumeSnap: SessionSnapshot | null;
+  setResumeSnap: (s: SessionSnapshot | null) => void;
   boot: (room: Room, isHost: boolean, session: GameSession | null, map: GameMap | null) => void;
   setSession: (s: GameSession | null) => void;
   setNetInfo: (n: NetInfo) => void;
@@ -117,13 +125,19 @@ export const useApp = create<AppState>()((set, get) => ({
   sessionMap: null,
   sync: {},
   setSync: (id, pct) => set((st) => ({ sync: { ...st.sync, [id]: pct } })),
+  diceShake: null,
+  setDiceShake: (d) => set({ diceShake: d ? { ...d, ts: Date.now() } : null }),
+  resumeClaims: {},
+  setResumeClaim: (curId, savedId) => set((st) => ({ resumeClaims: { ...st.resumeClaims, [curId]: savedId } })),
+  resumeSnap: null,
+  setResumeSnap: (snap) => set({ resumeSnap: snap }),
   boot: (room, _isHost, session, map) => set({ room, session, sessionMap: map, screen: 'lobby' }),
   setSession: (s) => set({ session: s }),
   setNetInfo: (n) => set({ netInfo: n }),
   leaveRoom: () => {
     const r = get().room;
     if (r) r.close();
-    set({ room: null, session: null, sessionMap: null, romCache: {}, saveCache: {}, romReadyTick: 0, sync: {}, netInfo: { online: false, local: true, links: 0, signal: 'connecting', attempts: 0 } });
+    set({ room: null, session: null, sessionMap: null, romCache: {}, saveCache: {}, romReadyTick: 0, sync: {}, diceShake: null, resumeClaims: {}, resumeSnap: null, netInfo: { online: false, local: true, links: 0, signal: 'connecting', attempts: 0 } });
   },
 
   romCache: {},

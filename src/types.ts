@@ -139,6 +139,8 @@ export interface SessionSnapshot {
   code: string;
   state: GameSession;
   createdAt: number;
+  auto?: boolean; // автосейв (перезаписываемый слот) или ручное сохранение
+  slot?: number; // номер слота автосейва 0..4
 }
 
 /* ---------- runtime ---------- */
@@ -193,6 +195,9 @@ export interface GameSession {
   rollOffWinner?: string | null; // победитель жеребьёвки — показывается всем перед стартом
   turn: number;
   dice: { a: number; b: number; roll: number } | null;
+  /* «запечатанный» результат: хост предопределяет кубики в момент начала
+     перемешивания, поэтому у бросающего они останавливаются без сетевой задержки */
+  sealedDice?: { a: number; b: number; ts: number } | null;
   moving: { player: string; path: number[]; ts: number } | null;
   awaitPost: boolean;
   challenge: ChallengeState | null;
