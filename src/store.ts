@@ -38,6 +38,12 @@ interface AppState {
   setSession: (s: GameSession | null) => void;
   setNetInfo: (n: NetInfo) => void;
   leaveRoom: () => void;
+
+  /* in-memory кэш ромов/сохранений, полученных по сети (для гостей, у которых их нет в IndexedDB) */
+  romCache: Record<string, ArrayBuffer>;
+  saveCache: Record<string, unknown>;
+  romReadyTick: number; // инкрементируется при получении рома — триггерит перезагрузку эмулятора
+  cacheRomData: (romId: string, buf: ArrayBuffer, saveId?: string, saveState?: unknown) => void;
 }
 
 const mkSelfId = () => `p-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
@@ -113,7 +119,17 @@ export const useApp = create<AppState>()((set, get) => ({
   leaveRoom: () => {
     const r = get().room;
     if (r) r.close();
-    set({ room: null, session: null, sessionMap: null, netInfo: { online: false, local: true, links: 0, signal: 'connecting', attempts: 0 } });
+    set({ room: null, session: null, sessionMap: null, romCache: {}, saveCache: {}, romReadyTick: 0, netInfo: { online: false, local: true, links: 0, signal: 'connecting', attempts: 0 } });
+  },
+
+  romCache: {},
+  saveCache: {},
+  romReadyTick: 0,
+  cacheRomData: (romId, buf, saveId, saveState) => {
+    const st = get();
+    const romCache = { ...st.romCache, [romId]: buf };
+    const saveCache = saveId !== undefined ? { ...st.saveCache, [saveId]: saveState ?? null } : st.saveCache;
+    set({ romCache, saveCache, romReadyTick: st.romReadyTick + 1 });
   },
 }));
 

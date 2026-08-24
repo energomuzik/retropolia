@@ -65,23 +65,42 @@ export default function GameScreen() {
   const taskImg = useBlobImage(task?.imageId);
   const cardImg = useBlobImage(s?.pendingCard?.card.imageId);
 
-  /* ---------- загрузка рома и сохранения под челлендж ---------- */
+  /* ---------- загрузка рома и сохранения под челлендж ----------
+     Гость сначала смотрит in-memory кэш (полученный по сети от хоста), затем свою
+     IndexedDB. Если рома нет нигде — просит хост прислать бинарник (needRom). */
+  const romReadyTick = useApp((x) => x.romReadyTick);
+  const isHost = !!room?.isHost;
   useEffect(() => {
     let on = true;
     setRomBuf(null);
     setSaveState(null);
     if (!task) return;
     void (async () => {
-      const buf = await getRomData(task.romId);
-      const sv = st.saves.find((x) => x.id === task.saveId);
+      const cache = useApp.getState();
+      let buf: ArrayBuffer | null = cache.romCache[task.romId] ?? null;
+      if (!buf) buf = (await getRomData(task.romId)) ?? null;
+      if (!on) return;
+      if (!buf) {
+        if (!isHost) {
+          // рома нет — запрашиваем у хоста; эффект перезапустится по romReadyTick
+          room?.send('needRom', { romId: task.romId, saveId: task.saveId });
+        } else {
+          useApp.getState().toast('Ром не найден в библиотеке — загрузите его в эмуляторе', 'err');
+        }
+        return;
+      }
+      const cache2 = useApp.getState();
+      const sv = task.saveId
+        ? (cache2.saveCache[task.saveId] ?? st.saves.find((x) => x.id === task.saveId)?.state ?? null)
+        : null;
       if (!on) return;
       setRomBuf(buf);
-      setSaveState(sv?.state ?? null);
+      setSaveState(sv);
       setEmuKey((k) => k + 1);
     })();
     return () => { on = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ch?.cellIdx, s?.challenge?.status === 'choose' ? 0 : 1]);
+  }, [ch?.cellIdx, s?.challenge?.status === 'choose' ? 0 : 1, romReadyTick, isHost]);
 
   /* ---------- перезагрузка сохранения (попытка / нарушение) ---------- */
   const reloadId = ch?.reloadId ?? 0;
@@ -209,7 +228,11 @@ export default function GameScreen() {
   /* ---------- главный цикл отрисовки ---------- */
   useEffect(() => {
     let raf = 0;
+    let lastT = 0;
     const loop = (t: number) => {
+      // dt в «кадрах по 60fps» — анимация не зависит от производительности ПК
+      const dt = lastT ? Math.min(3, (t - lastT) / 16.7) : 1;
+      lastT = t;
       const cv = canvasRef.current;
       const cur = useApp.getState();
       const m = cur.sessionMap;
@@ -232,6 +255,10 @@ export default function GameScreen() {
           if (!d) { d = { ...center }; dispRef.current[p.id] = d; }
           const hop = hopRef.current[p.id];
           let lift = 0; // вертикальный «подскок» фишки при движении
+          // хост уже завершил это движение (moving null или принадлежит другому ходу) —
+          // сбрасываем устаревшую очередь, чтобы фишка сошлась с авторитетной позицией
+          const mvActive = !!sess.moving && sess.moving.player === p.id;
+          if (hop && hop.queue.length && !mvActive) hop.queue.length = 0;
           if (hop && hop.queue.length) {
             anyoneMoving = true;
             const nextIdx = hop.queue[0];
@@ -247,13 +274,13 @@ export default function GameScreen() {
                 dispatch({ t: 'arrived', id: me });
               }
             } else {
-              d.x += dx * 0.085; // медленный плавный шаг
-              d.y += dy * 0.085;
+              d.x += dx * Math.min(1, 0.085 * dt); // плавный шаг, не зависит от FPS
+              d.y += dy * Math.min(1, 0.085 * dt);
               lift = -Math.abs(Math.sin(t / 110)) * 7; // лёгкое подпрыгивание
             }
           } else {
-            d.x += (center.x - d.x) * 0.14;
-            d.y += (center.y - d.y) * 0.14;
+            d.x += (center.x - d.x) * Math.min(1, 0.14 * dt);
+            d.y += (center.y - d.y) * Math.min(1, 0.14 * dt);
           }
           return {
             x: d.x, y: d.y + lift, color: PLAYER_COLORS[p.color],

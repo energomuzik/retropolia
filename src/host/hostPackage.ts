@@ -4,6 +4,9 @@ import hostPsSource from '../../server/host.ps1?raw';
 const CLOUDFLARED_URL =
   'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe';
 
+const NODE_VER = 'v20.18.0';
+const NODE_ZIP_URL = `https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-win-x64.zip`;
+
 function toBase64Lines(s: string, width = 60): string[] {
   /* btoa работает только с latin1, поэтому сначала кодируем UTF-8 */
   const b64 = btoa(unescape(encodeURIComponent(s)));
@@ -34,14 +37,30 @@ export function buildHostBat(): string {
     'echo.',
     '',
     'where node >nul 2>nul',
-    'if errorlevel 1 goto NO_NODE',
-    'echo [OK] Node.js found',
+    'if errorlevel 1 goto PORTABLE_NODE',
+    'echo [OK] Node.js found in system',
     'goto CHECK_CF',
     '',
-    ':NO_NODE',
-    'echo [X] Node.js NOT found!',
-    'echo     Install the LTS version from https://nodejs.org',
-    'echo     Then run this file again.',
+    ':PORTABLE_NODE',
+    'if exist node-portable\\node.exe goto USE_PORTABLE',
+    'echo [..] Node.js not installed - downloading a portable copy - one time, about 30 MB ...',
+    `powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '${NODE_ZIP_URL}' -OutFile 'node.zip'"`,
+    'if not exist node.zip goto NODE_FAIL',
+    'echo [..] Unpacking Node.js ...',
+    `powershell -NoProfile -Command "Expand-Archive -Path 'node.zip' -DestinationPath '.' -Force"`,
+    `if exist "node-${NODE_VER}-win-x64" ren "node-${NODE_VER}-win-x64" node-portable`,
+    'del node.zip >nul 2>nul',
+    'if not exist node-portable\\node.exe goto NODE_FAIL',
+    ':USE_PORTABLE',
+    'set "PATH=%~dp0node-portable;%PATH%"',
+    'echo [OK] Using portable Node.js from this folder',
+    'goto CHECK_CF',
+    '',
+    ':NODE_FAIL',
+    'echo [X] Could not get Node.js automatically.',
+    'echo     Either install it from https://nodejs.org',
+    'echo     or download the portable zip from the link above,',
+    'echo     unpack it as a folder named node-portable next to this file.',
     'echo.',
     'pause',
     'exit /b 1',
