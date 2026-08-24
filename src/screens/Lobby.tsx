@@ -376,7 +376,7 @@ function HostFallbackPanel({ onRestart }: { onRestart: (url: string) => void }) 
 /* ---------- лобби комнаты ---------- */
 
 export function LobbyScreen() {
-  const { session, sessionMap, roms, room, netInfo, setScreen, leaveRoom, selfId, options, tokens } = useApp();
+  const { session, sessionMap, roms, room, netInfo, setScreen, leaveRoom, selfId, options, tokens, sync } = useApp();
   const [waited, setWaited] = useState(0);
   const [lobbySeconds, setLobbySeconds] = useState(0);
   const [hubPanelOpen, setHubPanelOpen] = useState(false);
@@ -569,36 +569,52 @@ export function LobbyScreen() {
         <div className="mt-6 grid sm:grid-cols-2 gap-3">
           {[0, 1, 2, 3].map((i) => {
             const p = session.players[i];
+            const pct = !p ? 0 : p.isHost ? 100 : (sync[p.id] ?? 0);
             return (
               <div
                 key={i}
-                className={`pixel-panel pixel-corners p-4 flex items-center gap-3 transition-all ${p ? 'pop-in' : 'opacity-40'} ${p && session.players[session.turn]?.id === p.id ? '' : ''}`}
+                className={`pixel-panel pixel-corners p-4 flex flex-col gap-2 transition-all ${p ? 'pop-in' : 'opacity-40'}`}
                 style={p ? { borderColor: PLAYER_COLORS[p.color] } : undefined}
               >
-                <span
-                  className="w-9 h-9 shrink-0 border-[3px] border-abyss shadow-[0_0_14px_rgba(0,0,0,0.5)]"
-                  style={{ background: p ? PLAYER_COLORS[p.color] : 'repeating-linear-gradient(45deg,#1a2244 0 6px,#131a33 6px 12px)' }}
-                />
-                {p ? (
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="font-display uppercase text-paper truncate">{p.name}</span>
-                      {p.isHost && <span className="font-pixel text-[7px] bg-gold text-abyss px-1 py-0.5">HOST</span>}
+                <div className="flex items-center gap-3">
+                  <span
+                    className="w-9 h-9 shrink-0 border-[3px] border-abyss shadow-[0_0_14px_rgba(0,0,0,0.5)]"
+                    style={{ background: p ? PLAYER_COLORS[p.color] : 'repeating-linear-gradient(45deg,#1a2244 0 6px,#131a33 6px 12px)' }}
+                  />
+                  {p ? (
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-display uppercase text-paper truncate">{p.name}</span>
+                        {p.isHost && <span className="font-pixel text-[7px] bg-gold text-abyss px-1 py-0.5">HOST</span>}
+                      </div>
+                      <div className="tick-label mt-0.5" style={{ color: p.ready ? '#2ee6a8' : '#8f97c9' }}>
+                        {p.ready ? 'ГОТОВ' : 'НЕ ГОТОВ'} · {PLAYER_NAMES[p.color]}
+                      </div>
                     </div>
-                    <div className="tick-label mt-0.5" style={{ color: p.ready ? '#2ee6a8' : '#8f97c9' }}>
-                      {p.ready ? 'ГОТОВ' : 'НЕ ГОТОВ'} · {PLAYER_NAMES[p.color]}
+                  ) : (
+                    <div className="flex-1">
+                      <div className="font-display uppercase text-faint text-sm">Слот {i + 1}</div>
+                      <div className="tick-label text-faint">ожидание игрока…</div>
+                    </div>
+                  )}
+                  {p && isHost && !p.isHost && (
+                    <button onClick={() => { dispatch({ t: 'kick', id: p.id }); }} className="text-faint hover:text-coral cursor-pointer" aria-label="Выгнать">
+                      {Ic.cross(14)}
+                    </button>
+                  )}
+                </div>
+                {p && (
+                  <div>
+                    <div className="h-2.5 border-2 border-edge bg-[rgba(0,0,0,0.35)] overflow-hidden">
+                      <div
+                        className={`h-full transition-[width] duration-700 ease-out ${pct >= 100 ? 'bg-teal' : 'bg-gold'}`}
+                        style={{ width: `${pct}%`, boxShadow: pct >= 100 ? '0 0 8px rgba(46,230,168,0.6)' : '0 0 8px rgba(255,207,63,0.5)' }}
+                      />
+                    </div>
+                    <div className={`tick-label mt-1 ${pct >= 100 ? 'text-teal' : 'text-gold'}`}>
+                      {pct >= 100 ? '✓ данные карты загружены' : p.isHost ? 'загрузка данных…' : `загрузка данных · ${pct}%`}
                     </div>
                   </div>
-                ) : (
-                  <div className="flex-1">
-                    <div className="font-display uppercase text-faint text-sm">Слот {i + 1}</div>
-                    <div className="tick-label text-faint">ожидание игрока…</div>
-                  </div>
-                )}
-                {p && isHost && !p.isHost && (
-                  <button onClick={() => { dispatch({ t: 'kick', id: p.id }); }} className="text-faint hover:text-coral cursor-pointer" aria-label="Выгнать">
-                    {Ic.cross(14)}
-                  </button>
                 )}
               </div>
             );
@@ -643,17 +659,22 @@ export function LobbyScreen() {
               {Ic.check(14)} {me.ready ? 'Отменить готовность' : 'Я готов'}
             </PxBtn>
           )}
-          {isHost && (
-            <PxBtn
-              big
-              color="gold"
-              onClick={() => dispatch({ t: 'start' })}
-              disabled={session.players.some((p) => !p.ready)}
-              title={session.players.some((p) => !p.ready) ? 'Все игроки должны быть готовы' : undefined}
-            >
-              {Ic.dice(18)} {session.players.length === 1 ? 'Тестовая партия (1 игрок)' : 'Начать игру'}
-            </PxBtn>
-          )}
+          {isHost && (() => {
+            const notReady = session.players.some((p) => !p.ready);
+            const notLoaded = session.players.some((p) => !p.isHost && (sync[p.id] ?? 0) < 100);
+            const blocked = notReady || notLoaded;
+            return (
+              <PxBtn
+                big
+                color="gold"
+                onClick={() => dispatch({ t: 'start' })}
+                disabled={blocked}
+                title={notReady ? 'Все игроки должны быть готовы' : notLoaded ? 'Ждём, пока все игроки загрузят данные карты' : undefined}
+              >
+                {Ic.dice(18)} {session.players.length === 1 ? 'Тестовая партия (1 игрок)' : notLoaded ? 'Загрузка данных…' : 'Начать игру'}
+              </PxBtn>
+            );
+          })()}
         </div>
         {isHost && session.players.length === 1 && (
           <p className="text-center text-[11px] text-faint mt-3">Один игрок — запустится тестовая партия: подтверждения заданий автоматические.</p>

@@ -37,7 +37,7 @@ export default function MenuScreen() {
             RETRO<span className="text-paper">POLIA</span>
           </h1>
           <p className="mt-3 font-display text-dim uppercase tracking-[0.24em] text-[11px] sm:text-xs">
-            Монополия, где вместо денег — ретро-челленджи
+            Настольная игра, где вместо денег — твой скилл
           </p>
         </div>
 
@@ -64,7 +64,7 @@ export default function MenuScreen() {
             </button>
           ))}
           <div className="text-center mt-5">
-            <span className="font-pixel text-[9px] text-faint blink-hard">INSERT COIN TO CONTINUE</span>
+            <span className="font-pixel text-[9px] text-faint blink-hard">INSERT SKILL TO CONTINUE</span>
           </div>
         </nav>
 

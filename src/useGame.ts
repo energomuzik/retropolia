@@ -74,6 +74,7 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
     switch (m.t) {
       case 'map': {
         useApp.setState({ sessionMap: m.p as GameMap });
+        if (!room.isHost) room.send('action', { t: 'syncProgress', id: room.selfId, pct: 40 });
         break;
       }
       case 'state': {
@@ -88,6 +89,12 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
       }
       case 'action': {
         if (!room.isHost) break;
+        /* прогресс загрузки данных гостя — служебное сообщение, в движок не идёт */
+        if ((m.p as { t?: string })?.t === 'syncProgress') {
+          const sp = m.p as { id: string; pct: number };
+          useApp.getState().setSync(sp.id, sp.pct);
+          break;
+        }
         const h = useApp.getState();
         if (h.session && h.sessionMap) {
           const act = m.p as Action;
@@ -115,6 +122,7 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
           }
           for (const sv of lib.saves) await idbPut('saves', sv.id, sv);
           await useApp.getState().refresh();
+          if (!room.isHost) room.send('action', { t: 'syncProgress', id: room.selfId, pct: 100 });
           useApp.getState().toast('Данные карты загружены от хоста', 'ok');
         })().catch(() => undefined);
         break;

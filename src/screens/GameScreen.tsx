@@ -39,6 +39,11 @@ export default function GameScreen() {
   const emuWrapRef = useRef<HTMLDivElement>(null);
   const prevPeekRef = useRef(false);
   const [shake, setShake] = useState<{ holding: boolean; a: number; b: number }>({ holding: false, a: 1, b: 1 });
+  /* «rolling» — кубики крутятся после отпускания кнопки, пока не придёт АВТОРИТЕТНЫЙ
+     результат от хоста. Так у всех игроков кубики «останавливаются» одновременно и
+     показывают одни и те же числа — никаких расхождений из-за пинга. */
+  const [rolling, setRolling] = useState(false);
+  const lastRollRef = useRef(0);
   const [romBuf, setRomBuf] = useState<ArrayBuffer | null>(null);
   const [saveState, setSaveState] = useState<unknown>(null);
   const [emuKey, setEmuKey] = useState(0);
@@ -390,9 +395,28 @@ export default function GameScreen() {
     clearInterval(shakeIntRef.current);
     const holdMs = Date.now() - holdStartRef.current;
     setShake((x) => ({ ...x, holding: false }));
+    setRolling(true); // кубики «катятся», пока хост не вернёт результат
     sfx.drop();
     dispatch({ t: 'roll', id: me, holdMs });
   };
+
+  /* пришёл авторитетный результат броска — останавливаем кубики на числах хоста */
+  const rollId = s?.dice?.roll ?? 0;
+  useEffect(() => {
+    if (rollId && rollId !== lastRollRef.current) {
+      lastRollRef.current = rollId;
+      setRolling(false);
+    }
+  }, [rollId]);
+
+  /* пока кубики катятся — показываем быструю смену граней */
+  useEffect(() => {
+    if (!rolling) return;
+    const iv = window.setInterval(() => {
+      setShake((x) => ({ ...x, a: 1 + Math.floor(Math.random() * 6), b: 1 + Math.floor(Math.random() * 6) }));
+    }, 70);
+    return () => clearInterval(iv);
+  }, [rolling]);
 
   useEffect(() => {
     const dn = (e: KeyboardEvent) => { if (e.code === 'Space' && myTurn && !e.repeat) { e.preventDefault(); startHold(); } };
@@ -403,7 +427,11 @@ export default function GameScreen() {
   });
 
   const winner = s.winner ? s.players.find((p) => p.id === s.winner) : null;
-  const streamFresh = stream && Date.now() - stream.ts < 1200;
+  /* трансляция: показываем последний кадр до 4 секунд (не «мигаем»),
+     а пометку LIVE держим, пока кадры идут чаще 1.2 с */
+  const streamAge = stream ? Date.now() - stream.ts : Infinity;
+  const streamLive = !!stream && streamAge < 1200;
+  const streamShow = !!stream && streamAge < 4000;
 
   return (
     <div className="h-full crt-grid-bg flex flex-col overflow-hidden">
@@ -538,14 +566,16 @@ export default function GameScreen() {
         </div>
 
         {/* трансляция соперника */}
-        {streamFresh && !myTurn && (
+        {streamShow && !myTurn && (
           <div className="absolute right-3 bottom-3 w-[240px] pop-in">
             <div className="hud-chip pixel-corners p-1.5">
               <div className="flex items-center gap-2 px-1 pb-1">
-                <span className="w-2 h-2 bg-coral blink-hard" />
-                <span className="font-pixel text-[7px] text-coral">ТРАНСЛЯЦИЯ · {stream!.name}</span>
+                <span className={`w-2 h-2 ${streamLive ? 'bg-coral blink-hard' : 'bg-gold'}`} />
+                <span className={`font-pixel text-[7px] ${streamLive ? 'text-coral' : 'text-gold'}`}>
+                  {streamLive ? 'ТРАНСЛЯЦИЯ' : 'ЖДЁМ КАДРЫ'} · {stream!.name}
+                </span>
               </div>
-              <img src={stream!.data} alt="Трансляция" className="w-full border-2 border-edge" style={{ imageRendering: 'auto' }} />
+              <img src={stream!.data} alt="Трансляция" className={`w-full border-2 border-edge ${streamLive ? '' : 'opacity-60'}`} style={{ imageRendering: 'auto' }} />
             </div>
           </div>
         )}
@@ -554,19 +584,32 @@ export default function GameScreen() {
         {s.phase === 'playing' && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2">
             <div className="flex gap-3">
-              <DieFace v={s.moving || (!myTurn && s.dice) ? s.dice?.a ?? 1 : shake.holding ? shake.a : s.dice?.a ?? 6} dropping={!!s.dice && !shake.holding && !s.moving} />
-              <DieFace v={s.moving || (!myTurn && s.dice) ? s.dice?.b ?? 1 : shake.holding ? shake.b : s.dice?.b ?? 6} dropping={!!s.dice && !shake.holding && !s.moving} delay />
+              <DieFace
+                v={rolling || shake.holding ? shake.a : s.moving || (!myTurn && s.dice) ? s.dice?.a ?? 1 : s.dice?.a ?? 6}
+                dropping={!!s.dice && !shake.holding && !rolling && !s.moving}
+                rolling={rolling}
+              />
+              <DieFace
+                v={rolling || shake.holding ? shake.b : s.moving || (!myTurn && s.dice) ? s.dice?.b ?? 1 : s.dice?.b ?? 6}
+                dropping={!!s.dice && !shake.holding && !rolling && !s.moving}
+                rolling={rolling}
+                delay
+              />
             </div>
             {myTurn ? (
               !s.moving ? (
-                <button
-                  onPointerDown={startHold}
-                  onPointerUp={endHold}
-                  onPointerLeave={() => { if (shake.holding) endHold(); }}
-                  className={`btn-px pixel-corners btn-gold px-7 py-3 text-sm select-none touch-none ${shake.holding ? 'shake-hard' : ''}`}
-                >
-                  {Ic.dice(16)} {shake.holding ? 'ОТПУСТИТЕ — БРОСОК!' : 'ДЕРЖИТЕ, ЧТОБЫ СМЕШАТЬ'}
-                </button>
+                rolling ? (
+                  <div className="hud-chip pixel-corners px-4 py-2 font-pixel text-[8px] text-gold blink-hard">КУБИКИ КАТЯТСЯ…</div>
+                ) : (
+                  <button
+                    onPointerDown={startHold}
+                    onPointerUp={endHold}
+                    onPointerLeave={() => { if (shake.holding) endHold(); }}
+                    className={`btn-px pixel-corners btn-gold px-7 py-3 text-sm select-none touch-none ${shake.holding ? 'shake-hard' : ''}`}
+                  >
+                    {Ic.dice(16)} {shake.holding ? 'ОТПУСТИТЕ — БРОСОК!' : 'ДЕРЖИТЕ, ЧТОБЫ СМЕШАТЬ'}
+                  </button>
+                )
               ) : (
                 <div className="hud-chip pixel-corners px-4 py-2 font-pixel text-[8px] text-gold blink-hard">ФИШКА ДВИЖЕТСЯ…</div>
               )
@@ -809,12 +852,14 @@ export default function GameScreen() {
                             </div>
                           </div>
                         </>
-                      ) : streamFresh ? (
+                      ) : streamShow ? (
                         <div className="border-[3px] border-edge bg-black">
-                          <img src={stream!.data} alt="Трансляция" className="w-full" />
+                          <img src={stream!.data} alt="Трансляция" className={`w-full ${streamLive ? '' : 'opacity-60'}`} />
                           <div className="px-2 py-1 flex items-center gap-2 bg-[rgba(7,9,18,0.9)]">
-                            <span className="w-2 h-2 bg-coral blink-hard" />
-                            <span className="font-pixel text-[7px] text-coral">ТРАНСЛЯЦИЯ · {stream!.name}</span>
+                            <span className={`w-2 h-2 ${streamLive ? 'bg-coral blink-hard' : 'bg-gold'}`} />
+                            <span className={`font-pixel text-[7px] ${streamLive ? 'text-coral' : 'text-gold'}`}>
+                              {streamLive ? 'ТРАНСЛЯЦИЯ' : 'ЖДЁМ КАДРЫ'} · {stream!.name}
+                            </span>
                           </div>
                         </div>
                       ) : (
@@ -974,7 +1019,7 @@ export default function GameScreen() {
 
 /* ---------- кубик ---------- */
 
-function DieFace({ v, dropping, delay }: { v: number; dropping?: boolean; delay?: boolean }) {
+function DieFace({ v, dropping, delay, rolling }: { v: number; dropping?: boolean; delay?: boolean; rolling?: boolean }) {
   const pips: Record<number, [number, number][]> = {
     1: [[1, 1]],
     2: [[0, 0], [2, 2]],
@@ -984,7 +1029,10 @@ function DieFace({ v, dropping, delay }: { v: number; dropping?: boolean; delay?
     6: [[0, 0], [0, 2], [1, 0], [1, 2], [2, 0], [2, 2]],
   };
   return (
-    <div className={`w-16 h-16 bg-paper border-[3px] border-abyss shadow-[0_6px_0_rgba(0,0,0,0.5)] grid grid-cols-3 grid-rows-3 p-2 ${dropping ? 'dice-drop' : ''}`} style={dropping && delay ? { animationDelay: '0.07s' } : undefined}>
+    <div
+      className={`w-16 h-16 bg-paper border-[3px] border-abyss shadow-[0_6px_0_rgba(0,0,0,0.5)] grid grid-cols-3 grid-rows-3 p-2 ${dropping ? 'dice-drop' : ''} ${rolling ? 'shake-hard' : ''}`}
+      style={dropping && delay ? { animationDelay: '0.07s' } : undefined}
+    >
       {[...Array(9)].map((_, i) => {
         const r = Math.floor(i / 3), c = i % 3;
         const on = (pips[v] ?? pips[1]).some(([pr, pc]) => pr === r && pc === c);
