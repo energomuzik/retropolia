@@ -483,6 +483,8 @@ export function LobbyScreen() {
     // у хоста сбор команды завершён (у гостей очистится при получении нового state)
     cur.setResumeSnap(null);
     useApp.setState({ resumeClaims: {} });
+    // сразу переводим хоста на игровой экран, не дожидаясь сетевого эха
+    useApp.getState().setScreen('game');
     sfx.start();
   };
 

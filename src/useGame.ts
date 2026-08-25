@@ -98,13 +98,13 @@ export function dispatch(a: Action) {
     if (!st.session || !st.sessionMap) return;
     const next = applyAction(st.session, a, st.sessionMap, st.options);
     st.setSession(next);
-    room.send('state', next);
-    /* после восстановления партии повторно рассылаем карту и библиотеку ромов:
-       у гостей sessionMap могла устареть — это страховка от «карты без тайлов» */
+    /* при восстановлении партии сначала рассылаем карту и библиотеку ромов,
+       и только потом новое состояние — чтобы гости встретили фазу игры уже с картой */
     if (a.t === 'resume' && next.phase !== 'lobby') {
       room.send('map', st.sessionMap);
       void sendLibrary(room, st.sessionMap);
     }
+    room.send('state', next);
     void autosaveSession(next);
   } else {
     room.send('action', a);

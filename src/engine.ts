@@ -104,7 +104,19 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     base.moving = null; base.challenge = null; base.pendingCard = null; base.quiz = null;
     base.notice = null; base.dice = null; base.sealedDice = null; base.awaitPost = false;
     if (base.phase !== 'over') base.phase = 'playing';
-    base.log = [`♻️ Партия восстановлена из сохранения (игроков: ${base.players.length})`, ...(base.log ?? [])].slice(0, 50);
+    /* Полная нормализация: сохранение могло быть сделано старой версией игры,
+       где части полей ещё не существовало. Без этого игровой экран молча падал
+       (например, на s.revealed.includes) и выглядело это как «карты нет». */
+    base.revealed = Array.isArray(base.revealed) ? base.revealed : [];
+    base.usedQuizzes = Array.isArray(base.usedQuizzes) ? base.usedQuizzes : [];
+    base.sessionTasks = base.sessionTasks ?? {};
+    base.captured = base.captured ?? {};
+    base.rollOffValues = base.rollOffValues ?? {};
+    base.rollOffIdx = base.rollOffIdx ?? 0;
+    base.rollOffWinner = base.rollOffWinner ?? null;
+    base.turnNo = base.turnNo ?? 1;
+    base.winner = base.winner ?? null;
+    base.log = [`♻️ Партия восстановлена из сохранения (игроков: ${base.players.length})`, ...(Array.isArray(base.log) ? base.log : [])].slice(0, 50);
     return base;
   }
 
@@ -114,6 +126,12 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   if (s.quiz === undefined) s.quiz = null;
   if (s.turnNo === undefined) s.turnNo = 1;
   if (s.sealedDice === undefined) s.sealedDice = null;
+  if (!Array.isArray(s.revealed)) s.revealed = [];
+  if (!s.sessionTasks) s.sessionTasks = {};
+  if (!s.captured) s.captured = {};
+  if (!s.rollOffValues) s.rollOffValues = {};
+  if (s.rollOffWinner === undefined) s.rollOffWinner = null;
+  if (!Array.isArray(s.log)) s.log = [];
   const log: Log = (t) => { s.log = [t, ...s.log].slice(0, 50); };
   const alive = () => s.players.filter((p) => p.alive);
   const aid = 'id' in a ? (a as { id: string }).id : '';

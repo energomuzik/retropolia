@@ -398,8 +398,10 @@ export default function GameScreen() {
   const mystery = useMemo(() => {
     if (!options.hideUnrevealed || !s || !map) return undefined;
     const set = new Set<number>();
+    const revealed = Array.isArray(s.revealed) ? s.revealed : [];
+    const captured = s.captured ?? {};
     map.cells.forEach((_, i) => {
-      if (!s.revealed.includes(i) && !s.captured[i]) set.add(i);
+      if (!revealed.includes(i) && !captured[i]) set.add(i);
     });
     return set;
     // eslint-disable-next-line react-hooks/exhaustive-deps
