@@ -193,7 +193,9 @@ export interface GameSession {
   rollOffIdx: number;
   rollOffValues: Record<string, number>;
   rollOffWinner?: string | null; // победитель жеребьёвки — показывается всем перед стартом
+  sealedRollOff?: { value: number; ts: number } | null; // «запечатанный» результат броска жеребьёвки
   turn: number;
+  turnNo?: number; // номер хода партии (для именования автосейвов)
   dice: { a: number; b: number; roll: number } | null;
   /* «запечатанный» результат: хост предопределяет кубики в момент начала
      перемешивания, поэтому у бросающего они останавливаются без сетевой задержки */

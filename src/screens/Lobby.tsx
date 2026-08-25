@@ -735,7 +735,7 @@ export function LobbyScreen() {
               {Ic.check(14)} {me.ready ? 'Отменить готовность' : 'Я готов'}
             </PxBtn>
           )}
-          {isHost && (() => {
+          {isHost && !resumeSnap && (() => {
             const notReady = session.players.some((p) => !p.ready);
             const notLoaded = session.players.some((p) => !p.isHost && (sync[p.id] ?? 0) < 100);
             const blocked = notReady || notLoaded;

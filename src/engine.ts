@@ -8,6 +8,7 @@ export type Action =
   | { t: 'start' }
   | { t: 'rollStart'; id: string }
   | { t: 'roll'; id: string; holdMs: number }
+  | { t: 'rollStartOff'; id: string }
   | { t: 'rollOffGo' }
   | { t: 'resume'; snap: { state: GameSession; mapName: string }; claims: Record<string, string> }
   | { t: 'arrived'; id: string }
@@ -102,6 +103,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   // старые сохранённые сессии могут не иметь новых полей
   if (!s.usedQuizzes) s.usedQuizzes = [];
   if (s.quiz === undefined) s.quiz = null;
+  if (s.turnNo === undefined) s.turnNo = 1;
   if (s.sealedDice === undefined) s.sealedDice = null;
   const log: Log = (t) => { s.log = [t, ...s.log].slice(0, 50); };
   const alive = () => s.players.filter((p) => p.alive);
@@ -161,6 +163,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
 
   const endTurnNow = () => {
     if (s.phase !== 'playing') return;
+    s.turnNo = (s.turnNo ?? 1) + 1; // номер хода партии (для автосейвов)
     nextTurn();
   };
 
@@ -403,12 +406,26 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       s.sealedDice = { a: rnd6(), b: rnd6(), ts: Date.now() };
       break;
     }
+    case 'rollStartOff': {
+      /* игрок начал перемешивать кубик жеребьёвки — хост заранее «запечатывает»
+         результат, чтобы на релизе не ждать сеть и всем показать одинаковое число */
+      if (s.phase !== 'rollOff' || s.rollOffWinner) break;
+      const p = s.players[s.rollOffIdx];
+      if (!p || p.id !== a.id) break;
+      s.sealedRollOff = { value: rnd6(), ts: Date.now() };
+      break;
+    }
     case 'roll': {
       if (s.phase === 'rollOff') {
         if (s.rollOffIdx >= s.players.length) break;
         const p = s.players[s.rollOffIdx];
         if (p.id !== a.id) break;
-        const v = rnd6();
+        /* используем «запечатанный» бросок, если он свежий (создан при начале
+           перемешивания) — так результат одинаков у всех игроков сразу */
+        const v = s.sealedRollOff && Date.now() - s.sealedRollOff.ts < 20000
+          ? s.sealedRollOff.value
+          : rnd6();
+        s.sealedRollOff = null;
         s.rollOffValues[p.id] = v;
         s.rollOffIdx++;
         log(`🎲 ${p.name} выбрасывает ${v}`);

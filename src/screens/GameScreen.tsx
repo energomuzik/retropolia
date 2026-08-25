@@ -56,8 +56,12 @@ export default function GameScreen() {
     if (roShake) return;
     roStartRef.current = Date.now();
     setRoShake(true);
+    dispatch({ t: 'rollStartOff', id: me }); // хост заранее «запечатывает» результат
     roShakeIntRef.current = window.setInterval(() => {
-      setRoFace(1 + Math.floor(Math.random() * 6));
+      const f = 1 + Math.floor(Math.random() * 6);
+      setRoFace(f);
+      /* транслируем перемешивание соперникам — они видят, как трясётся кубик */
+      room?.send('shake', { from: me, a: f, b: f });
       sfx.dice();
     }, 75);
   };
@@ -69,6 +73,9 @@ export default function GameScreen() {
     sfx.drop();
     dispatch({ t: 'roll', id: me, holdMs });
   };
+  /* зрители видят тряску кубика жеребьёвки из сетевых сообщений shake */
+  const roRoller = s?.phase === 'rollOff' ? s.players[s.rollOffIdx] : undefined;
+  const roRemoteShake = !!st.diceShake && !!roRoller && st.diceShake.from === roRoller.id && st.diceShake.from !== me && Date.now() - st.diceShake.ts < 700;
   const [romBuf, setRomBuf] = useState<ArrayBuffer | null>(null);
   const [saveState, setSaveState] = useState<unknown>(null);
   const [emuKey, setEmuKey] = useState(0);
@@ -647,8 +654,9 @@ export default function GameScreen() {
         </div>
 
         {/* трансляция соперника (миниатюра). Скрываем, когда трансляция открыта
-            в основном окне задания (ch), чтобы не дублировать картинку. */}
-        {streamShow && !myTurn && !ch && (
+            в основном окне задания (ch) — НО если зритель открыл «карту мира» поверх
+            задания (peekMap), миниатюра остаётся, чтобы трансляция не пропадала. */}
+        {streamShow && !myTurn && (!ch || peekMap) && (
           <div className="absolute right-3 bottom-3 w-[240px] pop-in">
             <div className="hud-chip pixel-corners p-1.5">
               <div className="flex items-center gap-2 px-1 pb-1">
@@ -726,7 +734,14 @@ export default function GameScreen() {
                   </button>
                 </div>
               ) : (
-                <div className="font-pixel text-[9px] text-dim blink-hard">БРОСАЕТ {s.players[s.rollOffIdx]?.name}…</div>
+                <div className="flex flex-col items-center gap-3">
+                  <DieFace
+                    v={roRemoteShake ? st.diceShake?.a ?? 1 : s.rollOffValues[s.players[s.rollOffIdx]?.id ?? ''] ?? 6}
+                    dropping={false}
+                    rolling={roRemoteShake}
+                  />
+                  <div className="font-pixel text-[9px] text-dim blink-hard">БРОСАЕТ {s.players[s.rollOffIdx]?.name}…</div>
+                </div>
               )}
             </div>
           </div>

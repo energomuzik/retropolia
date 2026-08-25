@@ -47,7 +47,8 @@ async function autosaveSession(next: GameSession) {
   lastAutosaveTurn = next.turn;
   const slot = ((autoSlotByCode[next.code] ?? -1) + 1) % AUTO_SLOTS;
   autoSlotByCode[next.code] = slot;
-  const turnNo = Math.floor(next.turn / Math.max(1, next.players.length)) + 1;
+  /* реальный номер хода партии (инкрементируется движком в endTurnNow) */
+  const turnNo = next.turnNo ?? 1;
   const snap: SessionSnapshot = {
     id: `auto-${next.code}-${slot}`,
     name: `Автосейв · ход ${turnNo}`,
