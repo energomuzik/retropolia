@@ -6,9 +6,7 @@ export type Action =
   | { t: 'ready'; id: string; ready: boolean }
   | { t: 'kick'; id: string }
   | { t: 'start' }
-  | { t: 'rollStart'; id: string }
   | { t: 'roll'; id: string; holdMs: number }
-  | { t: 'rollStartOff'; id: string }
   | { t: 'rollOffGo' }
   | { t: 'resume'; snap: { state: GameSession; mapName: string }; claims: Record<string, string> }
   | { t: 'arrived'; id: string }
@@ -397,35 +395,17 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       log('Игра начинается! Бросок за первый ход…');
       break;
     }
-    case 'rollStart': {
-      /* игрок начал перемешивать кубики — хост заранее «запечатывает» результат,
-         чтобы на релизе не ждать сеть */
-      if (s.phase !== 'playing') break;
-      const p = current();
-      if (!p || p.id !== a.id || s.moving || s.challenge || s.pendingCard || s.awaitPost || s.quiz) break;
-      s.sealedDice = { a: rnd6(), b: rnd6(), ts: Date.now() };
-      break;
-    }
-    case 'rollStartOff': {
-      /* игрок начал перемешивать кубик жеребьёвки — хост заранее «запечатывает»
-         результат, чтобы на релизе не ждать сеть и всем показать одинаковое число */
-      if (s.phase !== 'rollOff' || s.rollOffWinner) break;
-      const p = s.players[s.rollOffIdx];
-      if (!p || p.id !== a.id) break;
-      s.sealedRollOff = { value: rnd6(), ts: Date.now() };
-      break;
-    }
     case 'roll': {
       if (s.phase === 'rollOff') {
         if (s.rollOffIdx >= s.players.length) break;
         const p = s.players[s.rollOffIdx];
         if (p.id !== a.id) break;
-        /* используем «запечатанный» бросок, если он свежий (создан при начале
-           перемешивания) — так результат одинаков у всех игроков сразу */
-        const v = s.sealedRollOff && Date.now() - s.sealedRollOff.ts < 20000
-          ? s.sealedRollOff.value
-          : rnd6();
-        s.sealedRollOff = null;
+        /* игрок влияет на бросок временем удержания: чем дольше тряс,
+           тем больше «перемешиваний» (до 6). Результат вычисляется хостом
+           в момент прихода действия — отсюда небольшая задержка остановки. */
+        const shuffles = Math.min(6, 1 + Math.floor(Math.max(0, a.holdMs) / 450));
+        let v = rnd6();
+        for (let i = 1; i < shuffles; i++) v = rnd6();
         s.rollOffValues[p.id] = v;
         s.rollOffIdx++;
         log(`🎲 ${p.name} выбрасывает ${v}`);
@@ -451,21 +431,14 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const p = current();
       if (!p || p.id !== a.id || s.moving || s.challenge || s.pendingCard || s.awaitPost || s.quiz) break;
       s.notice = null;
-      /* если есть свежий «запечатанный» бросок (создан при начале перемешивания) —
-         используем его: у бросающего кубики останавливаются без сетевой задержки,
-         а все игроки видят одинаковые числа */
-      let va: number;
-      let vb: number;
-      if (s.sealedDice && Date.now() - s.sealedDice.ts < 20000) {
-        va = s.sealedDice.a;
-        vb = s.sealedDice.b;
-      } else {
-        const shuffles = Math.min(6, 1 + Math.floor(Math.max(0, a.holdMs) / 450));
-        va = rnd6();
-        for (let i = 1; i < shuffles; i++) va = rnd6();
-        vb = rnd6();
-      }
-      s.sealedDice = null;
+      /* игрок влияет на бросок временем удержания кнопки: чем дольше перемешивал,
+         тем больше «перемешиваний» (до 6). Результат вычисляется хостом, когда
+         приходит действие, поэтому после отпускания есть небольшая задержка —
+         кубики «докатываются», пока не придут официальные числа. */
+      const shuffles = Math.min(6, 1 + Math.floor(Math.max(0, a.holdMs) / 450));
+      let va = rnd6();
+      for (let i = 1; i < shuffles; i++) va = rnd6();
+      const vb = rnd6();
       s.dice = { a: va, b: vb, roll: (s.dice?.roll ?? 0) + 1 };
       const N = map.cells.length;
       const path: number[] = [];
