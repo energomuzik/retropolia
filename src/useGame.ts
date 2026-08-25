@@ -133,11 +133,22 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
       }
       /* хост прислал сохранённый ростер — гость видит, кем может заявиться */
       case 'resumeInfo': {
-        const info = m.p as { players: GameSession['players']; mapName: string };
+        const info = m.p as { players: GameSession['players']; mapName: string; hostSavedId?: string };
         cur.setResumeSnap({
           id: 'remote', name: 'Партия', mapName: info.mapName, code: room.code,
           state: { players: info.players } as GameSession, createdAt: Date.now(),
         });
+        /* авто-призыв: подключающийся игрок занимает первую роль, которая не
+           принадлежит сохранённому хосту. Покрывает типичный случай 2 игроков —
+           вручную «Это я» нажимать не нужно. ВАЖНО: сообщаем об этом хосту через
+           claim, иначе он не узнает о заявке и отбросит роль при восстановлении. */
+        if (info.hostSavedId) {
+          const guestRole = info.players.find((p) => p.id !== info.hostSavedId);
+          if (guestRole) {
+            cur.setResumeClaim(cur.selfId, guestRole.id);
+            room.send('claim', { curId: cur.selfId, savedId: guestRole.id });
+          }
+        }
         break;
       }
       case 'state': {
@@ -179,7 +190,10 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
           // если идёт сбор команды для восстановления — гостю нужен сохранённый ростер
           if (act.t === 'hello') {
             const rs = useApp.getState().resumeSnap;
-            if (rs) room.send('resumeInfo', { players: rs.state.players, mapName: rs.mapName });
+            if (rs) {
+              const hostSavedId = rs.state.players.find((p) => p.isHost)?.id;
+              room.send('resumeInfo', { players: rs.state.players, mapName: rs.mapName, hostSavedId });
+            }
           }
           room.send('state', next);
         }
