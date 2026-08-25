@@ -74,9 +74,20 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     const base = clone(a.snap.state);
     base.v = APP_VERSION;
     base.code = s0.code;
+    if (s0.mapId && base.mapId && base.mapId !== s0.mapId) return s0; // другая карта — не восстанавливаем
     const claims = a.claims ?? {};
     const claimedBy = new Map<string, string>(); // savedId -> currentId
     for (const [curId, savedId] of Object.entries(claims)) claimedBy.set(savedId, curId);
+    /* Автоназначение: подключённым игрокам без заявки (сообщение потерялось или
+       не успело) раздаём оставшиеся роли по порядку. Без этого восстановление
+       могло оставить «лишних» игроков вне партии. */
+    const claimedCurIds = new Set(Object.keys(claims));
+    const freeLobby = s0.players.filter((p) => !claimedCurIds.has(p.id));
+    const freeSaved = base.players.filter((p) => !claimedBy.has(p.id));
+    freeLobby.forEach((lp, i) => {
+      const sp = freeSaved[i];
+      if (sp) claimedBy.set(sp.id, lp.id);
+    });
     const hostCurId = s0.players.find((p) => p.isHost)?.id;
     base.players = base.players
       .filter((p) => claimedBy.has(p.id))
@@ -389,6 +400,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     }
     case 'start': {
       if (s.phase !== 'lobby') break;
+      if (s.players.length < 2) break; // партия только для двух и более игроков
       s.phase = 'rollOff';
       s.rollOffIdx = 0;
       s.rollOffValues = {};

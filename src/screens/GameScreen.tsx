@@ -602,9 +602,7 @@ export default function GameScreen() {
             <span className="font-display uppercase text-[11px] text-coral">Вы выбыли — режим наблюдения</span>
           </div>
         )}
-        {aliveCount === 1 && s.phase === 'playing' && (
-          <div className="absolute top-3 right-3 hud-chip pixel-corners px-3 py-1.5"><span className="tick-label text-gold">Соло-тест партии</span></div>
-        )}
+
         {canLookAround && (
           <div className="absolute top-14 right-3 hud-chip pixel-corners px-3 py-1.5 pointer-events-none">
             <span className="tick-label text-sky">Тяните карту мышью · колесо — зум · до броска</span>

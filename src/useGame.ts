@@ -99,6 +99,12 @@ export function dispatch(a: Action) {
     const next = applyAction(st.session, a, st.sessionMap, st.options);
     st.setSession(next);
     room.send('state', next);
+    /* после восстановления партии повторно рассылаем карту и библиотеку ромов:
+       у гостей sessionMap могла устареть — это страховка от «карты без тайлов» */
+    if (a.t === 'resume' && next.phase !== 'lobby') {
+      room.send('map', st.sessionMap);
+      void sendLibrary(room, st.sessionMap);
+    }
     void autosaveSession(next);
   } else {
     room.send('action', a);

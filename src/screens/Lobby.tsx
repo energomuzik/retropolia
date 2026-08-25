@@ -744,25 +744,23 @@ export function LobbyScreen() {
             </PxBtn>
           )}
           {isHost && !resumeSnap && (() => {
+            const fewPlayers = session.players.length < 2;
             const notReady = session.players.some((p) => !p.ready);
             const notLoaded = session.players.some((p) => !p.isHost && (sync[p.id] ?? 0) < 100);
-            const blocked = notReady || notLoaded;
+            const blocked = fewPlayers || notReady || notLoaded;
             return (
               <PxBtn
                 big
                 color="gold"
                 onClick={() => dispatch({ t: 'start' })}
                 disabled={blocked}
-                title={notReady ? 'Все игроки должны быть готовы' : notLoaded ? 'Ждём, пока все игроки загрузят данные карты' : undefined}
+                title={fewPlayers ? 'Для партии нужно минимум два игрока' : notReady ? 'Все игроки должны быть готовы' : notLoaded ? 'Ждём, пока все игроки загрузят данные карты' : undefined}
               >
-                {Ic.dice(18)} {session.players.length === 1 ? 'Тестовая партия (1 игрок)' : notLoaded ? 'Загрузка данных…' : 'Начать игру'}
+                {Ic.dice(18)} {fewPlayers ? 'Ждём игроков…' : notLoaded ? 'Загрузка данных…' : 'Начать игру'}
               </PxBtn>
             );
           })()}
         </div>
-        {isHost && session.players.length === 1 && (
-          <p className="text-center text-[11px] text-faint mt-3">Один игрок — запустится тестовая партия: подтверждения заданий автоматические.</p>
-        )}
         <div className="text-center tick-label text-faint mt-6">
           Имя: {options.name} · версия протокола v3 · карта синхронизируется хостом
         </div>
