@@ -44,8 +44,6 @@ export default function GameScreen() {
      показывают одни и те же числа — никаких расхождений из-за пинга. */
   const [rolling, setRolling] = useState(false);
   const lastRollRef = useRef(0);
-  /* мгновенно показанные «запечатанные» кубики (до прихода официального state) */
-  const [stoppedDice, setStoppedDice] = useState<{ a: number; b: number } | null>(null);
 
   /* ---------- жеребьёвка: тряска кубика и автозапуск ---------- */
   const [roShake, setRoShake] = useState(false);
@@ -56,7 +54,6 @@ export default function GameScreen() {
     if (roShake) return;
     roStartRef.current = Date.now();
     setRoShake(true);
-    dispatch({ t: 'rollStartOff', id: me }); // хост заранее «запечатывает» результат
     roShakeIntRef.current = window.setInterval(() => {
       const f = 1 + Math.floor(Math.random() * 6);
       setRoFace(f);
@@ -423,8 +420,6 @@ export default function GameScreen() {
     holdingRef.current = true;
     holdStartRef.current = Date.now();
     setShake({ holding: true, a: 1, b: 1 });
-    /* хост заранее «запечатывает» результат — на релизе кубики встанут без задержки */
-    dispatch({ t: 'rollStart', id: me });
     shakeIntRef.current = window.setInterval(() => {
       const a = 1 + Math.floor(Math.random() * 6);
       const b = 1 + Math.floor(Math.random() * 6);
@@ -451,20 +446,8 @@ export default function GameScreen() {
     if (rollId && rollId !== lastRollRef.current) {
       lastRollRef.current = rollId;
       setRolling(false);
-      setStoppedDice(null); // официальное значение уже в s.dice
     }
   }, [rollId]);
-
-  /* «запечатанный» бросок: если хост предопределил результат ещё во время
-     перемешивания, на релизе показываем его мгновенно — без сетевой задержки */
-  useEffect(() => {
-    if (!rolling) return;
-    const sealed = s?.sealedDice;
-    if (sealed && sealed.ts >= holdStartRef.current - 200) {
-      setStoppedDice({ a: sealed.a, b: sealed.b });
-      setRolling(false);
-    }
-  }, [rolling, s?.sealedDice]);
 
   /* страховка: если хост не ответил и «катание» зависло — сбрасываем, чтобы не висеть вечно */
   useEffect(() => {
@@ -507,16 +490,15 @@ export default function GameScreen() {
   const streamLive = !!stream && streamAge < 1200;
   const streamShow = !!stream && streamAge < 4000;
 
-  /* Грани кубиков. У бросающего — своё перемешивание, затем «запечатанные» числа
-     (мгновенно, без задержки). У зрителей — синхронное перемешивание из сети. */
+  /* Грани кубиков. У бросающего — своё перемешивание, затем результат приходит от
+     хоста (с небольшой задержкой, зато игрок влияет на бросок временем удержания).
+     У зрителей — синхронное перемешивание из сети. */
   const dShake = st.diceShake;
   const shakeFresh = !!dShake && !!active && dShake.from === active.id && !s.moving && Date.now() - dShake.ts < 700;
   const dieA = (shake.holding || rolling) && myTurn ? shake.a
-    : stoppedDice && myTurn ? stoppedDice.a
     : !myTurn && shakeFresh ? dShake!.a
     : s.dice?.a ?? 6;
   const dieB = (shake.holding || rolling) && myTurn ? shake.b
-    : stoppedDice && myTurn ? stoppedDice.b
     : !myTurn && shakeFresh ? dShake!.b
     : s.dice?.b ?? 6;
   const dieRolling = ((rolling || shake.holding) && myTurn) || (!myTurn && shakeFresh);

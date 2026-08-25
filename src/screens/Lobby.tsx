@@ -178,10 +178,18 @@ export function LoadScreen() {
     const st = useApp.getState();
     /* Сначала собираем команду: открываем новую комнату-лобби, игроки подключаются
        по коду и заявляют, кем они играли. Только потом хост восстанавливает партию. */
-    st.setResumeSnap(s);
+    const savedHost = s.state.players.find((p) => p.isHost) ?? s.state.players[0];
     const code = genRoomCode();
     const session = newSession(code, map.id, st.selfId, st.options.name);
+    /* ВАЖНО: openRoom внутри вызывает leaveRoom(), который очищает resumeSnap и
+       resumeClaims. Поэтому устанавливаем их ПОСЛЕ открытия комнаты, иначе снапшот
+       сотрётся и партия запустится заново. */
     openRoom(code, true, { session, map });
+    const st2 = useApp.getState();
+    st2.setResumeSnap(s);
+    /* автоматически призываем хоста к его сохранённой роли, чтобы кнопка
+       «Восстановить партию» была активна сразу и партия не запустилась заново */
+    if (savedHost) st2.setResumeClaim(st2.selfId, savedHost.id);
     sfx.start();
     toast(`Комната ${code} открыта — передайте код команде, затем восстановите партию`, 'ok');
   };
