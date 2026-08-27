@@ -192,6 +192,7 @@ export interface GameSession {
   players: PlayerState[];
   rollOffIdx: number;
   rollOffValues: Record<string, number>;
+  rollOffReady?: string[]; // игроки, нажавшие «Я готов начать игру» после жеребьёвки
   rollOffWinner?: string | null; // победитель жеребьёвки — показывается всем перед стартом
   sealedRollOff?: { value: number; ts: number } | null; // «запечатанный» результат броска жеребьёвки
   turn: number;

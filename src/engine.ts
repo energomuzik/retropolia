@@ -8,6 +8,7 @@ export type Action =
   | { t: 'start' }
   | { t: 'roll'; id: string; holdMs: number }
   | { t: 'rollOffGo' }
+  | { t: 'rollOffReady'; id: string }
   | { t: 'resume'; snap: { state: GameSession; mapName: string }; claims: Record<string, string> }
   | { t: 'arrived'; id: string }
   | { t: 'chooseMode'; id: string; mode: 'time' | 'tries' }
@@ -41,7 +42,7 @@ export function newSession(code: string, mapId: string, hostId: string, hostName
   return {
     v: APP_VERSION, code, mapId, usedQuizzes: [], phase: 'lobby',
     players: [mkPlayer(hostId, hostName, 0, true)],
-    rollOffIdx: 0, rollOffValues: {}, turn: 0,
+    rollOffIdx: 0, rollOffValues: {}, rollOffReady: [], turn: 0,
     dice: null, moving: null, challenge: null, pendingCard: null, quiz: null, notice: null,
     captured: {}, sessionTasks: {}, awaitPost: false, revealed: [],
     winner: null, log: [`Комната ${code} открыта. Ждём игроков…`], startedAt: Date.now(),
@@ -126,6 +127,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   if (s.quiz === undefined) s.quiz = null;
   if (s.turnNo === undefined) s.turnNo = 1;
   if (s.sealedDice === undefined) s.sealedDice = null;
+  if (!Array.isArray(s.rollOffReady)) s.rollOffReady = [];
   if (!Array.isArray(s.revealed)) s.revealed = [];
   if (!s.sessionTasks) s.sessionTasks = {};
   if (!s.captured) s.captured = {};
@@ -422,6 +424,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       s.phase = 'rollOff';
       s.rollOffIdx = 0;
       s.rollOffValues = {};
+      s.rollOffReady = [];
       log('Игра начинается! Бросок за первый ход…');
       break;
     }
@@ -483,6 +486,24 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const w = s.players.find((p) => p.id === s.rollOffWinner);
       s.phase = 'playing';
       log(`🚀 Игра началась! Ход ${w?.name ?? '—'}`);
+      break;
+    }
+    case 'rollOffReady': {
+      // игрок подтвердил, что готов начать игру после жеребьёвки;
+      // старт происходит, когда готовы ВСЕ игроки
+      if (s.phase !== 'rollOff' || !s.rollOffWinner) break;
+      const p = actor();
+      if (!p) break;
+      if (!s.rollOffReady) s.rollOffReady = [];
+      if (!s.rollOffReady.includes(a.id)) {
+        s.rollOffReady.push(a.id);
+        log(`✔ ${p.name}: готов начать`);
+      }
+      if (s.players.every((pl) => (s.rollOffReady ?? []).includes(pl.id))) {
+        s.phase = 'playing';
+        const w = s.players.find((pl) => pl.id === s.rollOffWinner);
+        log(`🚀 Все готовы! Игра началась — ход ${w?.name ?? '—'}`);
+      }
       break;
     }
     case 'arrived': {

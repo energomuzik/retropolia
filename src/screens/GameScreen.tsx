@@ -1159,7 +1159,7 @@ export default function GameScreen() {
 
 /* ---------- кубик ---------- */
 
-function DieFace({ v, dropping, delay, rolling }: { v: number; dropping?: boolean; delay?: boolean; rolling?: boolean }) {
+function DieFace({ v, dropping, delay, rolling, blank, frame }: { v: number; dropping?: boolean; delay?: boolean; rolling?: boolean; blank?: boolean; frame?: string }) {
   const pips: Record<number, [number, number][]> = {
     1: [[1, 1]],
     2: [[0, 0], [2, 2]],
@@ -1168,10 +1168,23 @@ function DieFace({ v, dropping, delay, rolling }: { v: number; dropping?: boolea
     5: [[0, 0], [0, 2], [1, 1], [2, 0], [2, 2]],
     6: [[0, 0], [0, 2], [1, 0], [1, 2], [2, 0], [2, 2]],
   };
+  if (blank) {
+    return (
+      <div
+        className="w-16 h-16 border-[3px] border-dashed border-edge2 shadow-[0_6px_0_rgba(0,0,0,0.35)] flex items-center justify-center"
+        style={frame ? { borderColor: frame, boxShadow: `0 6px 0 rgba(0,0,0,0.35), 0 0 10px ${frame}33` } : undefined}
+      >
+        <span className="font-pixel text-[12px] text-faint">?</span>
+      </div>
+    );
+  }
   return (
     <div
       className={`w-16 h-16 bg-paper border-[3px] border-abyss shadow-[0_6px_0_rgba(0,0,0,0.5)] grid grid-cols-3 grid-rows-3 p-2 ${dropping ? 'dice-drop' : ''} ${rolling ? 'shake-hard' : ''}`}
-      style={dropping && delay ? { animationDelay: '0.07s' } : undefined}
+      style={{
+        ...(dropping && delay ? { animationDelay: '0.07s' } : {}),
+        ...(frame ? { borderColor: frame, boxShadow: `0 6px 0 rgba(0,0,0,0.5), 0 0 14px ${frame}44` } : {}),
+      }}
     >
       {[...Array(9)].map((_, i) => {
         const r = Math.floor(i / 3), c = i % 3;
