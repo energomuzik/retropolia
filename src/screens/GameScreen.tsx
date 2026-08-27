@@ -50,8 +50,11 @@ export default function GameScreen() {
   const [roFace, setRoFace] = useState(6);
   const roShakeIntRef = useRef(0);
   const roStartRef = useRef(0);
+  /* roWaiting — отпустили кнопку, но официальное значение ещё не пришло от хоста.
+     Пока ждём, кубик продолжает вращаться (не «замирает» на дефолтной шестёрке). */
+  const [roWaiting, setRoWaiting] = useState(false);
   const startRoShake = () => {
-    if (roShake) return;
+    if (roShake || roWaiting) return;
     roStartRef.current = Date.now();
     setRoShake(true);
     roShakeIntRef.current = window.setInterval(() => {
@@ -64,15 +67,33 @@ export default function GameScreen() {
   };
   const endRoShake = () => {
     if (!roShake) return;
-    clearInterval(roShakeIntRef.current);
     const holdMs = Date.now() - roStartRef.current;
     setRoShake(false);
+    setRoWaiting(true); // кубик докрутится, пока не придёт значение
     sfx.drop();
     dispatch({ t: 'roll', id: me, holdMs });
   };
-  /* зрители видят тряску кубика жеребьёвки из сетевых сообщений shake */
+  /* официальное значение пришло — останавливаем докрутку на нём */
+  useEffect(() => {
+    if (!roWaiting) return;
+    if (s?.rollOffValues?.[me] !== undefined) {
+      clearInterval(roShakeIntRef.current);
+      setRoWaiting(false);
+    }
+  }, [roWaiting, s?.rollOffValues, me]);
+  /* страховка: если значение так и не пришло — не крутим вечно */
+  useEffect(() => {
+    if (!roWaiting) return;
+    const t = setTimeout(() => { clearInterval(roShakeIntRef.current); setRoWaiting(false); }, 6000);
+    return () => clearTimeout(t);
+  }, [roWaiting]);
+  /* зрители видят тряску кубика жеребьёвки из сетевых сообщений shake.
+     Запоминаем последний кадр, чтобы в паузах не «мигала» дефолтная шестёрка. */
   const roRoller = s?.phase === 'rollOff' ? s.players[s.rollOffIdx] : undefined;
   const roRemoteShake = !!st.diceShake && !!roRoller && st.diceShake.from === roRoller.id && st.diceShake.from !== me && Date.now() - st.diceShake.ts < 700;
+  const roRemoteFaceRef = useRef(1);
+  if (roRemoteShake && st.diceShake) roRemoteFaceRef.current = st.diceShake.a;
+  const roViewerWaiting = !!roRoller && roRoller.id !== me && s?.rollOffValues?.[roRoller.id] === undefined;
   const [romBuf, setRomBuf] = useState<ArrayBuffer | null>(null);
   const [saveState, setSaveState] = useState<unknown>(null);
   const [emuKey, setEmuKey] = useState(0);
@@ -705,22 +726,29 @@ export default function GameScreen() {
               </div>
               {s.players[s.rollOffIdx]?.id === me ? (
                 <div className="flex flex-col items-center gap-3">
-                  <DieFace v={roShake ? roFace : s.rollOffValues[me] ?? 6} dropping={false} rolling={roShake} />
+                  <DieFace
+                    v={roShake || roWaiting ? roFace : s.rollOffValues[me] ?? 6}
+                    dropping={false}
+                    rolling={roShake || roWaiting}
+                  />
                   <button
                     onPointerDown={startRoShake}
                     onPointerUp={endRoShake}
                     onPointerLeave={() => { if (roShake) endRoShake(); }}
+                    disabled={roWaiting}
                     className={`btn-px pixel-corners btn-gold px-7 py-3 text-sm select-none touch-none ${roShake ? 'shake-hard' : ''}`}
                   >
-                    {Ic.dice(16)} {roShake ? 'ОТПУСТИТЕ — БРОСОК!' : 'ДЕРЖИТЕ, ЧТОБЫ СМЕШАТЬ'}
+                    {Ic.dice(16)} {roShake ? 'ОТПУСТИТЕ — БРОСОК!' : roWaiting ? 'КУБИК КРУТИТСЯ…' : 'ДЕРЖИТЕ, ЧТОБЫ СМЕШАТЬ'}
                   </button>
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-3">
                   <DieFace
-                    v={roRemoteShake ? st.diceShake?.a ?? 1 : s.rollOffValues[s.players[s.rollOffIdx]?.id ?? ''] ?? 6}
+                    v={roViewerWaiting
+                      ? (roRemoteShake && st.diceShake ? st.diceShake.a : roRemoteFaceRef.current)
+                      : s.rollOffValues[s.players[s.rollOffIdx]?.id ?? ''] ?? 1}
                     dropping={false}
-                    rolling={roRemoteShake}
+                    rolling={roViewerWaiting}
                   />
                   <div className="font-pixel text-[9px] text-dim blink-hard">БРОСАЕТ {s.players[s.rollOffIdx]?.name}…</div>
                 </div>
@@ -848,6 +876,9 @@ export default function GameScreen() {
                 </div>
               )}
               <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
+              {myTurn && ch.status !== 'choose' && (
+                <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
+              )}
             </div>
 
             <div className="min-w-0">
@@ -999,7 +1030,6 @@ export default function GameScreen() {
                           <GhostBtn className="w-full" onClick={() => dispatch({ t: 'skip', id: me, instant: true, spentMs: 0, loads: 0 })}>
                             {Ic.bolt(13)} Заплатить {SKIP_COST} и пропустить
                           </GhostBtn>
-                          <GhostBtn className="w-full" onClick={() => setControlsOpen(true)}>{Ic.gear(13)} Управление</GhostBtn>
                         </>
                       )}
                       {myTurn && (ch.status === 'playing' || ch.status === 'voting') && (
