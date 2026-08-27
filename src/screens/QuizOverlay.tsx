@@ -82,10 +82,12 @@ export default function QuizOverlay() {
   const iAmTarget = me === q.targetId;
   const wrongList = q.answered ?? [];
   const pendingList = q.pending ?? [];
+  const correctList = q.correctBy ?? [];
   const meWrong = wrongList.some((x) => x.id === me);
   const mePending = pendingList.some((x) => x.id === me);
-  // гонка: каждый отвечает один раз (после ошибки — выбыл); «кот»: получивший может пробовать снова
-  const canAnswer = !q.resolved && q.startedAt > 0 && (isMystery ? iAmTarget && (!sent || meWrong) : !sent && !meWrong);
+  const meCorrect = correctList.includes(me);
+  // гонка: каждый отвечает один раз (после ошибки или верного — выбыл); «кот»: получивший может пробовать снова
+  const canAnswer = !q.resolved && q.startedAt > 0 && (isMystery ? iAmTarget && (!sent || meWrong) : !sent && !meWrong && !meCorrect);
   const seesQuestion = !isMystery || iAmTarget || q.resolved;
 
   const submit = (answer: number | string) => {
@@ -197,8 +199,15 @@ export default function QuizOverlay() {
                       {meWrong && !q.resolved && (
                         <div className="hud-chip pixel-corners border-coral px-3 py-2 text-center">
                           <span className="font-display text-[11px] uppercase text-coral">
-                            Ваш ответ неверный — −5 ресурсов.{' '}
+                            Ваш ответ неверный{quiz.noPenalty ? ' (без штрафа).' : ' — −5 ресурсов.'}{' '}
                             {isMystery ? 'Таймер идёт — пробуйте снова!' : 'Ждём остальных игроков…'}
+                          </span>
+                        </div>
+                      )}
+                      {meCorrect && !q.resolved && (
+                        <div className="hud-chip pixel-corners border-teal px-3 py-2 text-center">
+                          <span className="font-display text-[11px] uppercase text-teal">
+                            Верно! +5 ресурсов — ждём остальных игроков…
                           </span>
                         </div>
                       )}
@@ -210,6 +219,19 @@ export default function QuizOverlay() {
                               ✖ {w.name}
                             </span>
                           ))}
+                        </div>
+                      )}
+                      {!isMystery && correctList.length > 0 && (
+                        <div className="flex items-center justify-center gap-2 flex-wrap">
+                          <span className="tick-label text-faint">Верно:</span>
+                          {correctList.map((id) => {
+                            const pl = session?.players.find((p) => p.id === id);
+                            return (
+                              <span key={id} className="hud-chip pixel-corners px-2 py-0.5 font-pixel text-[8px] text-teal">
+                                ✔ {pl?.name ?? '—'}
+                              </span>
+                            );
+                          })}
                         </div>
                       )}
                       {!isMystery && pendingList.length > 0 && (
@@ -312,7 +334,17 @@ export default function QuizOverlay() {
                   <span className="tick-label text-faint">Штрафы за ошибки:</span>
                   {wrongList.map((w) => (
                     <span key={w.id} className="hud-chip pixel-corners px-2 py-0.5 font-pixel text-[8px] text-coral">
-                      ✖ {w.name} −5
+                      ✖ {w.name}{quiz.noPenalty ? '' : ' −5'}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {(q.result.winners ?? []).length > 0 && (
+                <div className="flex items-center justify-center gap-2 flex-wrap mt-3">
+                  <span className="tick-label text-faint">Ответили верно (+5):</span>
+                  {q.result.winners!.map((nm, i) => (
+                    <span key={i} className="hud-chip pixel-corners px-2 py-0.5 font-pixel text-[8px] text-teal">
+                      ✔ {nm}
                     </span>
                   ))}
                 </div>

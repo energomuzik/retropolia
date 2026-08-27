@@ -41,6 +41,8 @@ export interface QuizDef {
   answers?: string[]; // допустимые написания ответа (text)
   audioId?: string; // dataURL мелодии (music)
   timeLimit: number; // секунды на ответ
+  continueOnCorrect?: boolean; // верный ответ не завершает квиз — остальные тоже отвечают
+  noPenalty?: boolean; // неверный ответ не отнимает ресурсы
   createdAt: number;
 }
 
@@ -52,12 +54,14 @@ export interface QuizRun {
   resolved: boolean;
   answered?: { id: string; name: string }[]; // ошибившиеся игроки (в гонке отвечают один раз)
   pending?: { id: string; name: string; sentAt: number }[]; // верные ответы в «окне сбора»
+  correctBy?: string[]; // уже ответили верно (режим «квиз продолжается») — повторно не отвечают
   result?: {
     correct: boolean;
     deltaMin: number;
     deltaTries: number;
     targetName: string;
     reason: 'correct' | 'allWrong' | 'timeout';
+    winners?: string[]; // в режиме «квиз продолжается» — все, кто ответил верно
   };
 }
 

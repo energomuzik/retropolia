@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { useApp } from '../store';
-import { Field, GhostBtn, Ic, Panel, PxBtn, Stepper } from '../ui';
+import { Field, GhostBtn, Ic, Panel, PxBtn, Stepper, Toggle } from '../ui';
 import { fileToDataUrl } from '../assets';
 import { idbPut, uid } from '../db';
 import type { GameMap, QuizDef, QuizType } from '../types';
@@ -190,7 +190,11 @@ export default function QuizEditor() {
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="font-display text-[12px] uppercase text-paper truncate">{q.question}</div>
-                    <div className="tick-label text-faint mt-0.5">⏱ {q.timeLimit} сек · {q.type === 'text' ? `${(q.answers ?? []).length} отв.` : `верный: ${(q.options ?? [])[q.correct ?? 0] ?? '—'}`}</div>
+                    <div className="tick-label text-faint mt-0.5">
+                      ⏱ {q.timeLimit} сек · {q.type === 'text' ? `${(q.answers ?? []).length} отв.` : `верный: ${(q.options ?? [])[q.correct ?? 0] ?? '—'}`}
+                      {q.continueOnCorrect && <span className="text-teal"> · марафон</span>}
+                      {q.noPenalty && <span className="text-sky"> · без штрафа</span>}
+                    </div>
                   </div>
                   <button onClick={() => editQuiz(q)} className="text-faint hover:text-sky cursor-pointer" aria-label="Редактировать">{Ic.pen(15)}</button>
                   <button onClick={() => void delQuiz(q.id)} className="text-faint hover:text-coral cursor-pointer" aria-label="Удалить">{Ic.trash(15)}</button>
@@ -224,6 +228,21 @@ export default function QuizEditor() {
                 <Field label="Время на ответ (секунды)">
                   <Stepper value={draft.timeLimit} onChange={(v) => setDraft({ ...draft, timeLimit: Math.max(5, Math.min(180, v)) })} min={5} max={180} suffix=" сек" />
                 </Field>
+
+                <div className="grid sm:grid-cols-2 gap-2">
+                  <Toggle
+                    checked={!!draft.continueOnCorrect}
+                    onChange={(v) => setDraft({ ...draft, continueOnCorrect: v })}
+                    label="Верный ответ не завершает квиз"
+                    hint="Каждый ответивший верно сразу получает +5, квиз идёт, пока не ответят все"
+                  />
+                  <Toggle
+                    checked={!!draft.noPenalty}
+                    onChange={(v) => setDraft({ ...draft, noPenalty: v })}
+                    label="Ошибка без штрафа"
+                    hint="Неверный ответ не отнимает ресурсы (игрок всё равно выбывает из гонки)"
+                  />
+                </div>
 
                 <Field label="Текст вопроса">
                   <textarea className="field-in w-full px-3 py-2 text-sm h-16 resize-none" value={draft.question} onChange={(e) => setDraft({ ...draft, question: e.target.value })} placeholder="Какой босс в Mega Man 2 стреляет пузырями?" />

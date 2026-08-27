@@ -24,8 +24,41 @@ export const DEFAULT_KEYS: Record<PadAction, string> = {
 export interface EmuPrefs {
   keys: Record<PadAction, string>;
   gpad: Record<PadAction, number>; // индекс кнопки W3C-геймпада на каждое действие
+  segaKeys: Record<SegaAction, string>; // раскладка SEGA Genesis (значения e.key, нужны ядру EmulatorJS)
   gamepad: boolean;
   smoothing: boolean;
+}
+
+/* ---------- SEGA Genesis (Megadrive): 6 кнопок + Start, без Select ---------- */
+
+export type SegaAction = 'UP' | 'DOWN' | 'LEFT' | 'RIGHT' | 'A' | 'B' | 'C' | 'X' | 'Y' | 'Z' | 'START';
+
+export const SEGA_ACTIONS: SegaAction[] = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'A', 'B', 'C', 'X', 'Y', 'Z', 'START'];
+
+export const SEGA_ACTION_LABELS: Record<SegaAction, string> = {
+  UP: 'Вверх', DOWN: 'Вниз', LEFT: 'Влево', RIGHT: 'Вправо',
+  A: 'A', B: 'B', C: 'C', X: 'X', Y: 'Y', Z: 'Z', START: 'Start',
+};
+
+export const DEFAULT_SEGA_KEYS: Record<SegaAction, string> = {
+  UP: 'arrowup', DOWN: 'arrowdown', LEFT: 'arrowleft', RIGHT: 'arrowright',
+  A: 'z', B: 'x', C: 'c', X: 'a', Y: 's', Z: 'd', START: 'enter',
+};
+
+/* Индексы RetroPad для ядра genesis_plus_gx:
+   Genesis A→B(0), B→Y(1), C→A(8), X→X(9), Y→L(10), Z→R(11), Start→3, крест→4..7 */
+export const SEGA_TO_RETRO: Partial<Record<SegaAction, number>> = {
+  UP: 4, DOWN: 5, LEFT: 6, RIGHT: 7,
+  A: 0, B: 1, C: 8, X: 9, Y: 10, Z: 11, START: 3,
+};
+
+export function segaEjsMap(keys: Record<SegaAction, string>): Record<number, string> {
+  const out: Record<number, string> = {};
+  for (const a of SEGA_ACTIONS) {
+    const idx = SEGA_TO_RETRO[a];
+    if (idx !== undefined && keys[a]) out[idx] = keys[a];
+  }
+  return out;
 }
 
 export const DEFAULT_GPAD: Record<PadAction, number> = {
@@ -37,7 +70,7 @@ const PREFS_KEY = 'retropolia-emu-prefs';
 export const PREFS_EVENT = 'retropolia-prefs-changed';
 
 export function loadEmuPrefs(): EmuPrefs {
-  const base: EmuPrefs = { keys: { ...DEFAULT_KEYS }, gpad: { ...DEFAULT_GPAD }, gamepad: true, smoothing: false };
+  const base: EmuPrefs = { keys: { ...DEFAULT_KEYS }, gpad: { ...DEFAULT_GPAD }, segaKeys: { ...DEFAULT_SEGA_KEYS }, gamepad: true, smoothing: false };
   try {
     const raw = localStorage.getItem(PREFS_KEY);
     if (!raw) return base;
@@ -45,6 +78,7 @@ export function loadEmuPrefs(): EmuPrefs {
     return {
       keys: { ...base.keys, ...(p.keys ?? {}) },
       gpad: { ...base.gpad, ...(p.gpad ?? {}) },
+      segaKeys: { ...base.segaKeys, ...(p.segaKeys ?? {}) },
       gamepad: p.gamepad !== false,
       smoothing: !!p.smoothing,
     };

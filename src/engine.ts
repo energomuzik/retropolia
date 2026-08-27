@@ -711,7 +711,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const pending = q.pending ?? (q.pending = []);
       // в гонке каждый игрок фиксирует ответ ОДИН раз (верный или нет); «кот» может
       // пробовать снова после ошибки, но только до первого верного ответа
-      if (qd.type !== 'mystery' && (answered.some((x) => x.id === answerer.id) || pending.some((x) => x.id === answerer.id))) break;
+      const correctBy = q.correctBy ?? (q.correctBy = []);
+      if (qd.type !== 'mystery' && (answered.some((x) => x.id === answerer.id) || pending.some((x) => x.id === answerer.id) || correctBy.includes(answerer.id))) break;
       if (qd.type === 'mystery' && pending.some((x) => x.id === answerer.id)) break;
 
       const norm = (x: string) => x.trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
@@ -729,22 +730,55 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       // закрываем окно, когда все живые участники зафиксировали ответ
       const tryCloseWindow = () => {
         if (qd.type === 'mystery') return; // в «коте» участник один — закрывается сразу
-        const doneIds = [...answered, ...pending].map((x) => x.id);
-        if (alive().every((x) => doneIds.includes(x.id))) settleQuiz(q, pending);
+        const doneIds = [...answered, ...pending, ...(q.correctBy ?? []).map((id) => ({ id }))].map((x) => x.id);
+        if (alive().every((x) => doneIds.includes(x.id))) {
+          if (qd.continueOnCorrect) {
+            // марафон: бонус уже выдан каждому за верный ответ — просто закрываем
+            if (q.resolved) return;
+            const names = (q.correctBy ?? [])
+              .map((id) => s.players.find((pl) => pl.id === id)?.name ?? '')
+              .filter(Boolean);
+            q.resolved = true;
+            q.result = {
+              correct: names.length > 0, deltaMin: 0, deltaTries: 0, targetName: '',
+              reason: names.length > 0 ? 'correct' : 'allWrong', winners: names,
+            };
+            log(names.length > 0 ? `✔ Квиз завершён: верно ответили ${names.join(', ')}` : 'Квиз завершён: верных ответов не было');
+          } else {
+            settleQuiz(q, pending);
+          }
+        }
       };
 
       if (!correct) {
-        // ОШИБКА: ресурс снимается сразу, игрок выбывает из окна, квиз продолжается
-        const kind = Math.random() < 0.5 ? 'time' : 'tries';
-        if (kind === 'time') answerer.secLeft = Math.max(0, answerer.secLeft - 300);
-        else answerer.triesLeft = Math.max(0, answerer.triesLeft - 5);
+        // ОШИБКА: игрок выбывает из окна, квиз продолжается.
+        // Ресурс снимается сразу — если только вопрос не помечен «без штрафа».
+        if (!qd.noPenalty) {
+          const kind = Math.random() < 0.5 ? 'time' : 'tries';
+          if (kind === 'time') answerer.secLeft = Math.max(0, answerer.secLeft - 300);
+          else answerer.triesLeft = Math.max(0, answerer.triesLeft - 5);
+          log(`✖ ${answerer.name}: неверно (−5 ${kind === 'time' ? 'мин' : 'попыток'})`);
+        } else {
+          log(`✖ ${answerer.name}: неверно (без штрафа)`);
+        }
         if (!answered.some((x) => x.id === answerer.id)) answered.push({ id: answerer.id, name: answerer.name });
-        log(`✖ ${answerer.name}: неверно (−5 ${kind === 'time' ? 'мин' : 'попыток'})`);
         tryCloseWindow();
         break;
       }
 
-      // ВЕРНЫЙ ОТВЕТ: бонус пока НЕ выдаём — фиксируем в окне и ждём остальных.
+      // ВЕРНЫЙ ОТВЕТ в режиме «квиз продолжается»: бонус выдаётся СРАЗУ,
+      // игрок больше не отвечает, а квиз идёт, пока не ответят все.
+      if (qd.continueOnCorrect && qd.type !== 'mystery') {
+        const kind = Math.random() < 0.5 ? 'time' : 'tries';
+        if (kind === 'time') answerer.secLeft += 300;
+        else answerer.triesLeft += 5;
+        if (!correctBy.includes(answerer.id)) correctBy.push(answerer.id);
+        log(`✔ ${answerer.name}: верно! +5 ${kind === 'time' ? 'мин' : 'попыток'} — квиз продолжается`);
+        tryCloseWindow();
+        break;
+      }
+
+      // ВЕРНЫЙ ОТВЕТ (обычный): бонус пока НЕ выдаём — фиксируем в окне и ждём остальных.
       // Когда окно закроется, бонус получит самый быстрый по sentAt.
       if (!pending.some((x) => x.id === answerer.id)) pending.push({ id: answerer.id, name: answerer.name, sentAt });
       log(`✔ ${answerer.name}: ответ принят — окно сбора открыто`);
@@ -760,6 +794,19 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const qd = (map.quizzes ?? []).find((x) => x.id === q.quizId);
       if (!qd) { s.quiz = null; endTurnNow(); break; }
       if (Date.now() - q.startedAt < qd.timeLimit * 1000) break;
+      // марафон: штрафы уже выданы за ошибки — таймаут просто закрывает квиз
+      if (qd.continueOnCorrect && qd.type !== 'mystery') {
+        const names = (q.correctBy ?? [])
+          .map((id) => s.players.find((pl) => pl.id === id)?.name ?? '')
+          .filter(Boolean);
+        q.resolved = true;
+        q.result = {
+          correct: names.length > 0, deltaMin: 0, deltaTries: 0, targetName: '',
+          reason: names.length > 0 ? 'correct' : 'timeout', winners: names,
+        };
+        log('⏱ Время квиза вышло');
+        break;
+      }
       const pending = q.pending ?? [];
       if (pending.length > 0) {
         settleQuiz(q, pending);
