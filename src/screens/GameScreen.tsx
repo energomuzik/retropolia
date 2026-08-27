@@ -91,9 +91,7 @@ export default function GameScreen() {
      Запоминаем последний кадр, чтобы в паузах не «мигала» дефолтная шестёрка. */
   const roRoller = s?.phase === 'rollOff' ? s.players[s.rollOffIdx] : undefined;
   const roRemoteShake = !!st.diceShake && !!roRoller && st.diceShake.from === roRoller.id && st.diceShake.from !== me && Date.now() - st.diceShake.ts < 700;
-  const roRemoteFaceRef = useRef(1);
-  if (roRemoteShake && st.diceShake) roRemoteFaceRef.current = st.diceShake.a;
-  const roViewerWaiting = !!roRoller && roRoller.id !== me && s?.rollOffValues?.[roRoller.id] === undefined;
+
   const [romBuf, setRomBuf] = useState<ArrayBuffer | null>(null);
   const [saveState, setSaveState] = useState<unknown>(null);
   const [emuKey, setEmuKey] = useState(0);
@@ -479,15 +477,8 @@ export default function GameScreen() {
     return () => clearTimeout(t);
   }, [rolling]);
 
-  /* жеребьёвка: когда определён победитель, хост через паузу запускает игру —
-     все успевают увидеть, кто ходит первым */
-  const roWinner = s?.rollOffWinner ?? null;
-  useEffect(() => {
-    if (!roWinner || !room?.isHost || s?.phase !== 'rollOff') return;
-    const t = setTimeout(() => dispatch({ t: 'rollOffGo' }), 2600);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roWinner]);
+  /* жеребьёвка: старт игры — только когда ВСЕ игроки нажали «Старт игры»
+     (действие rollOffReady, движок запускает партию сам) */
 
   /* пока кубики катятся — показываем быструю смену граней */
   useEffect(() => {
@@ -710,82 +701,110 @@ export default function GameScreen() {
           </div>
         )}
 
-        {/* ---------- жеребьёвка ---------- */}
+        {/* ---------- жеребьёвка: все кубики видны сразу, бросают по очереди ---------- */}
         {s.phase === 'rollOff' && !s.rollOffWinner && (
           <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.55)] z-10">
-            <div className="pixel-panel pixel-corners pop-in p-6 max-w-md w-full mx-4 text-center">
+            <div className="pixel-panel pixel-corners pop-in p-6 max-w-lg w-full mx-4 text-center">
               <div className="font-display uppercase tracking-wider text-gold text-lg">Кто ходит первым?</div>
-              <p className="text-[12px] text-dim mt-1 mb-4">Классическая жеребьёвка: у кого больше на кубике — тот и начинает. При равенстве — переброс.</p>
-              <div className="flex justify-center gap-2 mb-4 flex-wrap">
-                {s.players.map((p) => (
-                  <div key={p.id} className={`hud-chip pixel-corners px-3 py-2 ${s.players[s.rollOffIdx]?.id === p.id ? 'border-gold' : ''}`}>
-                    <div className="font-display text-[10px] uppercase" style={{ color: PLAYER_COLORS[p.color] }}>{p.name}</div>
-                    <div className="font-pixel text-sm mt-1 text-paper">{s.rollOffValues[p.id] ?? '·'}</div>
-                  </div>
-                ))}
+              <p className="text-[12px] text-dim mt-1 mb-1">Бросайте по очереди — у кого больше, тот и начинает. При равенстве — переброс.</p>
+              <div className="flex justify-center gap-5 mt-4 mb-5 flex-wrap">
+                {s.players.map((p, i) => {
+                  const val = s.rollOffValues[p.id];
+                  const isRoller = i === s.rollOffIdx;
+                  const mine = isRoller && p.id === me;
+                  const theirs = isRoller && p.id !== me;
+                  /* тряска показывается ТОЛЬКО когда она реально идёт: у себя — пока
+                     держим кнопку или докручиваем; у соперника — пока приходят свежие
+                     кадры shake. До нажатия кнопки все видят пустой кубик. */
+                  const shaking = mine ? roShake || roWaiting : theirs && roRemoteShake;
+                  const face = mine
+                    ? (roShake || roWaiting ? roFace : val ?? roFace)
+                    : theirs && roRemoteShake && st.diceShake
+                      ? st.diceShake.a
+                      : val ?? 0;
+                  const color = PLAYER_COLORS[p.color];
+                  return (
+                    <div key={p.id} className="flex flex-col items-center gap-1.5">
+                      {val !== undefined && !shaking ? (
+                        <DieFace key={`${p.id}-${val}`} v={val} frame={color} dropping />
+                      ) : shaking ? (
+                        <DieFace v={face} frame={color} rolling />
+                      ) : (
+                        <DieFace v={0} frame={color} blank />
+                      )}
+                      <div className="font-display text-[10px] uppercase tracking-wide" style={{ color }}>{p.name}</div>
+                      <div className="tick-label text-faint">
+                        {val !== undefined ? `выпало ${val}` : isRoller ? (p.id === me ? 'ваш бросок' : 'бросает…') : 'ждёт очереди'}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
               {s.players[s.rollOffIdx]?.id === me ? (
-                <div className="flex flex-col items-center gap-3">
-                  <DieFace
-                    v={roShake || roWaiting ? roFace : s.rollOffValues[me] ?? 6}
-                    dropping={false}
-                    rolling={roShake || roWaiting}
-                  />
-                  <button
-                    onPointerDown={startRoShake}
-                    onPointerUp={endRoShake}
-                    onPointerLeave={() => { if (roShake) endRoShake(); }}
-                    disabled={roWaiting}
-                    className={`btn-px pixel-corners btn-gold px-7 py-3 text-sm select-none touch-none ${roShake ? 'shake-hard' : ''}`}
-                  >
-                    {Ic.dice(16)} {roShake ? 'ОТПУСТИТЕ — БРОСОК!' : roWaiting ? 'КУБИК КРУТИТСЯ…' : 'ДЕРЖИТЕ, ЧТОБЫ СМЕШАТЬ'}
-                  </button>
-                </div>
+                <button
+                  onPointerDown={startRoShake}
+                  onPointerUp={endRoShake}
+                  onPointerLeave={() => { if (roShake) endRoShake(); }}
+                  disabled={roWaiting}
+                  className={`btn-px pixel-corners btn-gold px-7 py-3 text-sm select-none touch-none ${roShake ? 'shake-hard' : ''}`}
+                >
+                  {Ic.dice(16)} {roShake ? 'ОТПУСТИТЕ — БРОСОК!' : roWaiting ? 'КУБИК КРУТИТСЯ…' : 'ДЕРЖИТЕ, ЧТОБЫ СМЕШАТЬ'}
+                </button>
               ) : (
-                <div className="flex flex-col items-center gap-3">
-                  <DieFace
-                    v={roViewerWaiting
-                      ? (roRemoteShake && st.diceShake ? st.diceShake.a : roRemoteFaceRef.current)
-                      : s.rollOffValues[s.players[s.rollOffIdx]?.id ?? ''] ?? 1}
-                    dropping={false}
-                    rolling={roViewerWaiting}
-                  />
-                  <div className="font-pixel text-[9px] text-dim blink-hard">БРОСАЕТ {s.players[s.rollOffIdx]?.name}…</div>
-                </div>
+                <div className="font-pixel text-[9px] text-dim blink-hard">БРОСАЕТ {s.players[s.rollOffIdx]?.name}…</div>
               )}
             </div>
           </div>
         )}
 
-        {/* ---------- победитель жеребьёвки ---------- */}
-        {s.phase === 'rollOff' && s.rollOffWinner && (
-          <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.6)] z-10">
-            <div className="pixel-panel pixel-corners pop-in p-7 max-w-md w-full mx-4 text-center">
-              <span className="text-gold inline-block floaty">{Ic.dice(40)}</span>
-              <div className="font-pixel text-gold text-[11px] mt-3">ПЕРВЫМ ХОДИТ</div>
-              <div
-                className="font-display uppercase text-3xl mt-2"
-                style={{ color: PLAYER_COLORS[(s.players.find((p) => p.id === s.rollOffWinner)?.color ?? 0)] }}
-              >
-                {s.players.find((p) => p.id === s.rollOffWinner)?.name ?? '—'}
-              </div>
-              <div className="flex justify-center gap-2 mt-4 flex-wrap">
-                {s.players.map((p) => (
-                  <div key={p.id} className="hud-chip pixel-corners px-3 py-1.5">
-                    <span className="font-display text-[10px] uppercase" style={{ color: PLAYER_COLORS[p.color] }}>{p.name}</span>
-                    <span className="font-pixel text-[11px] text-paper ml-2">{s.rollOffValues[p.id] ?? '·'}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="font-pixel text-[9px] text-dim mt-4 blink-hard">ИГРА НАЧНЁТСЯ ЧЕРЕЗ МГНОВЕНИЕ…</div>
-              {room.isHost && (
-                <div className="mt-3">
-                  <GhostBtn small onClick={() => dispatch({ t: 'rollOffGo' })}>Начать сразу</GhostBtn>
+        {/* ---------- победитель жеребьёвки: каждый подтверждает старт ---------- */}
+        {s.phase === 'rollOff' && s.rollOffWinner && (() => {
+          const readyList = s.rollOffReady ?? [];
+          const winnerP = s.players.find((p) => p.id === s.rollOffWinner);
+          const allReady = s.players.every((p) => readyList.includes(p.id));
+          return (
+            <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.6)] z-10">
+              <div className="pixel-panel pixel-corners pop-in p-7 max-w-lg w-full mx-4 text-center">
+                <span className="text-gold inline-block floaty">{Ic.dice(40)}</span>
+                <div className="font-pixel text-gold text-[11px] mt-3">ПЕРВЫМ ХОДИТ</div>
+                <div
+                  className="font-display uppercase text-3xl mt-2"
+                  style={{ color: winnerP ? PLAYER_COLORS[winnerP.color] : undefined }}
+                >
+                  {winnerP?.name ?? '—'}
                 </div>
-              )}
+                <div className="flex justify-center gap-4 mt-5 flex-wrap">
+                  {s.players.map((p) => (
+                    <div key={p.id} className="flex flex-col items-center gap-1">
+                      <DieFace v={s.rollOffValues[p.id] ?? 1} frame={PLAYER_COLORS[p.color]} dropping={p.id === s.rollOffWinner} />
+                      <span className="font-display text-[9px] uppercase" style={{ color: PLAYER_COLORS[p.color] }}>{p.name}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-5 space-y-2 text-left">
+                  {s.players.map((p) => {
+                    const isReady = readyList.includes(p.id);
+                    return (
+                      <div key={p.id} className={`flex items-center justify-between hud-chip pixel-corners px-3 py-2 ${p.id === me && !isReady ? 'border-gold pulse-ring' : ''}`}>
+                        <span className="font-display text-[11px] uppercase tracking-wide" style={{ color: PLAYER_COLORS[p.color] }}>{p.name}</span>
+                        {isReady ? (
+                          <span className="font-pixel text-[8px] text-teal">ГОТОВ ✓</span>
+                        ) : p.id === me ? (
+                          <PxBtn small color="teal" onClick={() => { sfx.start(); dispatch({ t: 'rollOffReady', id: me }); }}>{Ic.play(12)} Старт игры</PxBtn>
+                        ) : (
+                          <span className="font-pixel text-[8px] text-faint">ЖДЁМ…</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className={`font-pixel text-[9px] mt-4 ${allReady ? 'text-teal' : 'text-dim blink-hard'}`}>
+                  {allReady ? 'СТАРТ!' : `ГОТОВЫ ${readyList.length} ИЗ ${s.players.length}`}
+                </div>
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* ---------- победитель ---------- */}
         {s.phase === 'over' && (
