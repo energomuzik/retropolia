@@ -73,6 +73,11 @@ export default function SegaBox({
   const firstBootRef = useRef(false);
 
   const resolvedCore = core ?? coreFor(ext);
+  const coreLabel =
+    resolvedCore === 'nes' ? 'NES'
+    : resolvedCore === 'segaMS' ? 'SEGA MASTER SYSTEM'
+    : resolvedCore === 'segaGG' ? 'SEGA GAME GEAR'
+    : 'SEGA';
 
   // Документ iframe строится СИНХРОННО — iframe получает srcDoc уже при первом
   // рендере (нет состояния «html ещё null»). nonce гарантирует уникальность строки
@@ -110,6 +115,12 @@ export default function SegaBox({
       } else if (d.type === 'ejs-retrying') {
         // ядро не скачалось с первого раза — идёт автоповтор
         setLoadAttempt((d as { attempt?: number }).attempt ?? 0);
+      } else if (d.type === 'ejs-controls-live') {
+        const ok = !!(d as { ok?: boolean }).ok;
+        useApp.getState().toast(
+          ok ? 'Раскладка применена' : 'Раскладка сохранена — полностью применится при следующем запуске эмулятора',
+          ok ? 'ok' : 'info',
+        );
       } else if (d.type === 'ejs-error') {
         setStatus((prev) => (prev === 'ready' ? prev : 'error'));
       } else if ((d.type === 'ejs-state' || d.type === 'ejs-frame') && d.reqId) {
@@ -214,12 +225,12 @@ export default function SegaBox({
       {status === 'loading' && !firstBootRef.current && (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-[#05070f]">
           <span className="font-pixel text-[9px] text-magma blink-hard">
-            ЗАГРУЗКА ЯДРА SEGA{loadAttempt > 1 ? `… ПОПЫТКА ${loadAttempt}` : '…'}
+            ЗАГРУЗКА ЯДРА {coreLabel}{loadAttempt > 1 ? `… ПОПЫТКА ${loadAttempt}` : '…'}
           </span>
           <span className="text-[11px] text-dim px-6 text-center max-w-sm">
             {loadAttempt > 1
               ? 'Сеть нестабильна — пробуем другое зеркало. Ядро скачается автоматически.'
-              : 'Первый запуск SEGA-рома скачивает ядро с CDN (~10–20 МБ, один раз) — дальше браузер берёт его из кэша.'}
+              : `Первый запуск ${coreLabel}-рома скачивает ядро с CDN (один раз) — дальше браузер берёт его из кэша.`}
           </span>
         </div>
       )}
@@ -232,12 +243,14 @@ export default function SegaBox({
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-[#05070f] p-6 text-center">
           <span className="font-pixel text-[9px] text-coral">НЕ УДАЛОСЬ ЗАГРУЗИТЬ ЯДРО</span>
           <span className="text-[11px] text-dim leading-relaxed max-w-sm">
-            Для первого запуска SEGA нужен интернет — ядро Genesis Plus GX берётся с CDN emulatorjs.org
+            Для первого запуска нужен интернет — ядро {coreLabel} берётся с CDN emulatorjs.org
             (один раз, дальше из кэша браузера). Проверьте соединение и перезапустите ром.
           </span>
         </div>
       )}
-      <div className="absolute bottom-1 right-2 font-pixel text-[7px] text-[rgba(233,236,255,0.35)] z-10">GENESIS PLUS GX</div>
+      <div className="absolute bottom-1 right-2 font-pixel text-[7px] text-[rgba(233,236,255,0.35)] z-10">
+        {resolvedCore === 'nes' ? 'FCEUMM · EMULATORJS' : 'GENESIS PLUS GX'}
+      </div>
     </div>
   );
 }
@@ -263,13 +276,23 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     // Раскладка клавиатуры: индекс RetroPad → клавиша. Запекается при старте и
     // может быть заменена «на лету» сообщением set-controls (без перезапуска ядра).
     `var controlMap=${controlMapJson};`,
-    'function toBindings(m){var o={};for(var k in m){o[k]={value:m[k],value2:m[k]};}return o;}',
-    'window.EJS_defaultControls=toBindings(controlMap);',
+    // ВАЖНО: EmulatorJS ждёт раскладку «по игрокам»: {0:{индекс:{value:клавиша}}}.
+    // Плоский формат ломает инициализацию ядра (эмулятор зависает на загрузке).
+    'function toBindings(m){var o={};for(var k in m){o[k]={value:m[k],value2:m[k]};}return {0:o};}',
+    'try{window.EJS_defaultControls=toBindings(controlMap);}catch(e){}',
     'function applyControls(m){',
     '  controlMap=m;',
-    '  try{window.EJS_defaultControls=toBindings(m);}catch(e){}',
-    '  var g=gm();',
-    '  try{if(g&&g.controls&&g.controls.p1){for(var k2 in m){g.controls.p1[k2]={value:m[k2],value2:m[k2]};}}}catch(e){}',
+    '  var live=false;',
+    '  try{',
+    '    window.EJS_defaultControls=toBindings(m);',
+    '    var emu=window.EJS_emulator;',
+    '    if(emu&&emu.controls&&typeof emu.controls==="object"){',
+    '      var nb=toBindings(m);',
+    '      for(var pk in nb){emu.controls[pk]=nb[pk];}',
+    '      live=true;',
+    '    }',
+    '  }catch(e){}',
+    '  try{parent.postMessage({type:"ejs-controls-live",ok:live},"*");}catch(e){}',
     '}',
     `window.EJS_pathtodata=${JSON.stringify(base)};`,
     'window.EJS_language="ru";',

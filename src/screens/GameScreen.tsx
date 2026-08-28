@@ -6,7 +6,7 @@ import { cellTaskOf, fmtClock, spentInfo } from '../engine';
 import { effectLabel } from './TaskEditor';
 import { cardArt, cartridgeArt } from '../assets';
 import SegaBox, { type SegaApi } from '../SegaBox';
-import { loadEmuPrefs, nesEjsMap, segaEjsMap } from '../input';
+import { loadEmuPrefs, nesEjsMap, segaEjsMap, PREFS_EVENT } from '../input';
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import KeyBinder from '../KeyBinder';
@@ -114,10 +114,18 @@ export default function GameScreen() {
   const isSega = !!taskRom && taskRom.ext !== 'nes';
   // Раскладка клавиатуры для EmulatorJS (индекс RetroPad → клавиша).
   // Применяется при старте ядра и обновляется «на лету» по событию PREFS_EVENT.
+  // пересчёт при смене раскладки в окне «Управление» (событие PREFS_EVENT)
+  const [prefsTick, setPrefsTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setPrefsTick((x) => x + 1);
+    window.addEventListener(PREFS_EVENT, bump);
+    return () => window.removeEventListener(PREFS_EVENT, bump);
+  }, []);
   const controlMap = useMemo(() => {
     const p = loadEmuPrefs();
     return isSega ? segaEjsMap(p.segaKeys) : nesEjsMap(p.keys);
-  }, [isSega, emuKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSega, emuKey, prefsTick]);
   const segExt = (taskRom?.fileName.split('.').pop() ?? 'md').toLowerCase();
   const romName = taskRom?.name ?? 'ROM';
   const taskImg = useBlobImage(task?.imageId);
