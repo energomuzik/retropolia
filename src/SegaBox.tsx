@@ -48,6 +48,8 @@ export default function SegaBox({
 }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  // номер текущей попытки загрузки ядра (виден в оверлее «ЗАГРУЗКА ЯДРА SEGA…»)
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const pausedRef = useRef(paused ?? false);
   pausedRef.current = paused ?? false;
   const pendingRef = useRef<Record<string, (s: string | null) => void>>({});
@@ -99,6 +101,9 @@ export default function SegaBox({
         setStatus('ready');
         // применим текущую паузу сразу после старта (сохранение уже «впечено» через EJS_loadStateURL)
         try { frameRef.current?.contentWindow?.postMessage({ type: 'pause', paused: pausedRef.current }, '*'); } catch { /* noop */ }
+      } else if (d.type === 'ejs-retrying') {
+        // ядро не скачалось с первого раза — идёт автоповтор
+        setLoadAttempt((d as { attempt?: number }).attempt ?? 0);
       } else if (d.type === 'ejs-error') {
         setStatus((prev) => (prev === 'ready' ? prev : 'error'));
       } else if ((d.type === 'ejs-state' || d.type === 'ejs-frame') && d.reqId) {
@@ -161,6 +166,7 @@ export default function SegaBox({
   // готово — просто медленный CDN, оставляем «загрузка».
   useEffect(() => {
     setStatus('loading');
+    setLoadAttempt(0);
     readyRef.current = false;
     gotHelloRef.current = false;
     const t = setTimeout(() => {
@@ -193,10 +199,13 @@ export default function SegaBox({
       )}
       {status === 'loading' && !firstBootRef.current && (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-[#05070f]">
-          <span className="font-pixel text-[9px] text-magma blink-hard">ЗАГРУЗКА ЯДРА SEGA…</span>
+          <span className="font-pixel text-[9px] text-magma blink-hard">
+            ЗАГРУЗКА ЯДРА SEGA{loadAttempt > 1 ? `… ПОПЫТКА ${loadAttempt}` : '…'}
+          </span>
           <span className="text-[11px] text-dim px-6 text-center max-w-sm">
-            Первый запуск SEGA-рома скачивает ядро с CDN (~10–20 МБ, один раз) —
-            дальше браузер берёт его из кэша и повторной загрузки нет.
+            {loadAttempt > 1
+              ? 'Сеть нестабильна — пробуем другое зеркало. Ядро скачается автоматически.'
+              : 'Первый запуск SEGA-рома скачивает ядро с CDN (~10–20 МБ, один раз) — дальше браузер берёт его из кэша.'}
           </span>
         </div>
       )}
@@ -290,18 +299,22 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '          window.EJS_loadStateURL=URL.createObjectURL(new Blob([sb],{type:"application/octet-stream"}));',
     '        }catch(e){}',
     '      }',
-    '      var bases=[' + JSON.stringify(base) + ',"https://static.emulatorjs.org/stable/data/"];',
-    '      if(bases[0]===bases[1]){bases.pop();}',
-    '      var loadBase=function(i){',
-    '        if(i>=bases.length){showErr("Не удалось загрузить ядро (нужен интернет при первом запуске)");return;}',
-    '        window.EJS_pathtodata=bases[i];',
-    '        var s=document.createElement("script");',
-    '        s.src=bases[i]+"loader.js";',
-    '        s.onerror=function(){loadBase(i+1);};',
-    '        document.body.appendChild(s);',
-    '      };',
-    '      loadBase(0);',
-    '    }catch(err){showErr("Ошибка запуска: "+err);}',
+      // Автоповтор загрузки ядра: перебираем зеркала по кругу с растущей задержкой.
+      // Уже скачанное ядро браузер берёт из кэша мгновенно; при сбое сети пробуем снова.
+      '      var bases=[' + JSON.stringify(base) + ',"https://static.emulatorjs.org/stable/data/"];',
+      '      if(bases[0]===bases[1]){bases.pop();}',
+      '      var attempt=0;var MAX=8;',
+      '      var loadAttempt=function(){',
+      '        if(attempt>=MAX){showErr("Не удалось загрузить ядро после "+MAX+" попыток. Проверьте интернет и обновите страницу.");return;}',
+      '        var b=bases[attempt%bases.length];',
+      '        window.EJS_pathtodata=b;',
+      '        try{parent.postMessage({type:"ejs-retrying",attempt:attempt+1,round:Math.floor(attempt/bases.length)+1},"*");}catch(e){}',
+      '        var s=document.createElement("script");',
+      '        s.src=b+"loader.js?r="+attempt;',
+      '        s.onerror=function(){attempt++;setTimeout(loadAttempt,Math.min(4000,800*attempt));};',
+      '        document.body.appendChild(s);',
+      '      };',
+      '      loadAttempt();',    '    }catch(err){showErr("Ошибка запуска: "+err);}',
     '    return;',
     '  }',
     '  if(d.type==="pause"){',

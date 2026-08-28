@@ -1033,7 +1033,11 @@ export default function GameScreen() {
                         </div>
                       )}
                       {myTurn && (
-                        <div className="mt-1.5 tick-label text-faint">Стрелки · X=A · Z=B · Enter=Start · Shift=Select</div>
+                        <div className="mt-1.5 tick-label text-faint">
+                          {isSega
+                            ? 'SEGA · Стрелки · Z=A · X=B · C=C · A=X · S=Y · D=Z · Enter=Start'
+                            : 'NES · Стрелки · X=A · Z=B · Enter=Start · Shift=Select'}
+                        </div>
                       )}
                     </div>
 
@@ -1138,11 +1142,13 @@ export default function GameScreen() {
           <div className="relative pixel-panel pixel-corners pop-in w-full max-w-xl p-5">
             <div className="flex items-center gap-2 mb-3">
               <span className="text-magma">{Ic.gear(18)}</span>
-              <span className="font-display uppercase tracking-wider text-paper text-sm">Управление эмулятором</span>
+              <span className="font-display uppercase tracking-wider text-paper text-sm">
+                Управление · {isSega ? 'SEGA Genesis' : 'NES'}
+              </span>
               <span className="tick-label text-gold ml-2">применяется сразу</span>
               <GhostBtn small className="ml-auto" onClick={() => setControlsOpen(false)}>{Ic.cross(12)} Закрыть</GhostBtn>
             </div>
-            <KeyBinder compact />
+            <KeyBinder compact mode={isSega ? 'sega' : 'nes'} />
           </div>
         </div>
       )}
