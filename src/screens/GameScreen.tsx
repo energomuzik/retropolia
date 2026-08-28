@@ -159,16 +159,12 @@ export default function GameScreen() {
   const reloadId = ch?.reloadId ?? 0;
   useEffect(() => {
     if (reloadId > 0) {
-      if (isSega) {
-        // SEGA: перезапуск ядра с сохранением (или с начала, если слота нет)
-        segaApiRef.current?.loadSaveReliable((saveState as string | null) ?? null);
-      } else {
-        nesApiRef.current?.reload(saveState ?? undefined);
-      }
+      // и NES, и SEGA теперь на EmulatorJS: перезапуск ядра с сохранением (или с начала)
+      ejsApiRef.current?.loadSaveReliable((saveState as string | null) ?? null);
       sfx.alarm();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadId, isSega]);
+  }, [reloadId]);
 
   /* ---------- трансляция (NES — canvas напрямую, SEGA — снимок кадра из iframe) ---------- */
   const streaming = options.broadcast && myTurn && ch?.status === 'playing';
