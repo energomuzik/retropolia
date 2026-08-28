@@ -74,12 +74,12 @@ export default function EmulatorLauncher() {
     sfx.start();
   };
 
-  // Загрузка сохранения SEGA: перезапуск ядра с применением состояния через
-  // документированный EJS_loadStateURL — гарантированно работает. Ядро при этом
+  // Загрузка сохранения: перезапуск ядра с применением состояния через
+  // документированный EJS_loadStateURL (NES и SEGA — единый путь). Ядро при этом
   // берётся из кэша браузера, поэтому перезапуск быстрый и без повторного скачивания.
   const loadSave = (s: SaveDef) => {
-    if (rom && rom.ext !== 'nes' && running && segaApiRef.current) {
-      segaApiRef.current.loadSaveReliable(s.state as string);
+    if (rom && running && ejsApiRef.current) {
+      ejsApiRef.current.loadSaveReliable(s.state as string);
       setRunState(s.state);
       sfx.coin();
       toast(`Загружаю сохранение (слот ${s.slot})…`, 'ok');
@@ -88,10 +88,10 @@ export default function EmulatorLauncher() {
     void launch(s.state);
   };
 
-  // Сброс: для запущенной SEGA — перезапуск ядра с начала (без состояния).
+  // Сброс: перезапуск ядра с начала (без состояния).
   const resetEmu = () => {
-    if (rom && rom.ext !== 'nes' && running && segaApiRef.current) {
-      segaApiRef.current.loadSaveReliable(null);
+    if (rom && running && ejsApiRef.current) {
+      ejsApiRef.current.loadSaveReliable(null);
       setRunState(undefined);
       sfx.click();
       return;
@@ -101,7 +101,7 @@ export default function EmulatorLauncher() {
 
   const createSave = async () => {
     if (!rom) return;
-    const st = isNes ? apiRef.current?.snapshot() ?? null : await (segaApiRef.current?.snapshot() ?? Promise.resolve(null));
+    const st = (await ejsApiRef.current?.snapshot()) ?? null;
     if (!st) { toast('Эмулятор ещё не готов — дайте игре запуститься и попробуйте снова', 'err'); return; }
     const slot = romSaves.length ? Math.max(...romSaves.map((s) => s.slot)) + 1 : 1;
     const sv: SaveDef = { id: uid('save'), romId: rom.id, slot, name: `Уровень ~${slot}`, state: st, createdAt: Date.now() };
@@ -189,29 +189,16 @@ export default function EmulatorLauncher() {
                       <span className="font-pixel text-[9px] text-faint relative z-10">ВЫБЕРИТЕ ИЛИ ЗАГРУЗИТЕ РОМ</span>
                     )}
                   </div>
-                ) : isNes ? (
-                  <div className="max-w-[560px] mx-auto">
-                    <NesBox
-                      key={runKey}
-                      romData={romBuf}
-                      initialState={runState}
-                      enabled
-                      onApi={(a) => { apiRef.current = a; }}
-                    />
-                    <div className="flex gap-2 mt-3 flex-wrap">
-                      <PxBtn color="gold" onClick={() => void createSave()}>{Ic.save(14)} Сохранить состояние</PxBtn>
-                      <GhostBtn onClick={() => resetEmu()}>{Ic.rotate(13)} Сброс (с начала)</GhostBtn>
-                      <GhostBtn onClick={() => { setRunning(false); launchedRomRef.current = null; }}>{Ic.pause(13)} Выключить</GhostBtn>
-                    </div>
-                  </div>
                 ) : (
                   <div className="max-w-[640px] mx-auto">
                     <SegaBox
                       key={runKey}
                       romData={romBuf}
-                      ext={segExt(rom?.fileName ?? '')}
+                      ext={isNes ? 'nes' : segExt(rom?.fileName ?? '')}
+                      core={isNes ? 'nes' : undefined}
+                      controlMap={isNes ? nesEjsMap(prefs.keys) : segaEjsMap(prefs.segaKeys)}
                       initialState={(runState as string | null) ?? null}
-                      onApi={(a) => { segaApiRef.current = a; }}
+                      onApi={(a: SegaApi) => { ejsApiRef.current = a; }}
                     />
                     <div className="flex gap-2 mt-3 flex-wrap">
                       <PxBtn color="gold" onClick={() => void createSave()}>{Ic.save(14)} Сохранить состояние</PxBtn>
@@ -219,8 +206,8 @@ export default function EmulatorLauncher() {
                       <GhostBtn onClick={() => { setRunning(false); launchedRomRef.current = null; }}>{Ic.pause(13)} Выключить</GhostBtn>
                     </div>
                     <p className="text-[11px] text-dim mt-2 leading-relaxed">
-                      Сохранения работают как у NES: дойдите до нужного места и жмите «Сохранить состояние» — слот появится в списке
-                      ниже и будет доступен в редакторе заданий. Громкость — в общих опциях игры.
+                      Дойдите до нужного места и жмите «Сохранить состояние» — слот появится в списке ниже и будет доступен
+                      в редакторе заданий. Раскладка клавиш — «Опции → Эмулятор». Громкость — в общих опциях.
                     </p>
                   </div>
                 )}
