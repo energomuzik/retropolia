@@ -61,6 +61,45 @@ export function segaEjsMap(keys: Record<SegaAction, string>): Record<number, str
   return out;
 }
 
+/* Индексы RetroPad для ядра nes (fceumm):
+   NES A→A(8), B→B(0), Select→2, Start→3, крест→4..7 */
+export const NES_TO_RETRO: Partial<Record<PadAction, number>> = {
+  UP: 4, DOWN: 5, LEFT: 6, RIGHT: 7,
+  B: 0, A: 8, SELECT: 2, START: 3,
+};
+
+/* e.code («KeyX», «ArrowUp», «Enter», «ShiftLeft») → e.key в нижнем регистре,
+   именно в таком виде клавиши читает ядро EmulatorJS. */
+export function codeToEjsKey(code: string): string {
+  if (code.startsWith('Key')) return code.slice(3).toLowerCase();
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code.startsWith('Numpad')) return code.slice(6);
+  switch (code) {
+    case 'ArrowUp': return 'arrowup';
+    case 'ArrowDown': return 'arrowdown';
+    case 'ArrowLeft': return 'arrowleft';
+    case 'ArrowRight': return 'arrowright';
+    case 'Enter': return 'enter';
+    case 'Space': return 'space';
+    case 'ShiftLeft':
+    case 'ShiftRight': return 'shift';
+    case 'ControlLeft':
+    case 'ControlRight': return 'control';
+    case 'AltLeft':
+    case 'AltRight': return 'alt';
+    default: return code.toLowerCase();
+  }
+}
+
+export function nesEjsMap(keys: Record<PadAction, string>): Record<number, string> {
+  const out: Record<number, string> = {};
+  for (const a of PAD_ACTIONS) {
+    const idx = NES_TO_RETRO[a];
+    if (idx !== undefined && keys[a]) out[idx] = codeToEjsKey(keys[a]);
+  }
+  return out;
+}
+
 export const DEFAULT_GPAD: Record<PadAction, number> = {
   UP: 12, DOWN: 13, LEFT: 14, RIGHT: 15,
   A: 0, B: 1, SELECT: 8, START: 9,
