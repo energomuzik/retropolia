@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApp, getRomData } from '../store';
 import { Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
-import NesBox, { type NesApi } from '../NesBox';
 import SegaBox, { type SegaApi } from '../SegaBox';
 import { idbDel, idbPut, uid } from '../db';
 import type { RomDef, SaveDef } from '../types';
-import { keyLabel, loadEmuPrefs, PREFS_EVENT, listGamepads } from '../input';
+import { keyLabel, loadEmuPrefs, nesEjsMap, segaEjsMap, PREFS_EVENT, listGamepads } from '../input';
 import { sfx } from '../sound';
 
 const fmtSize = (b: number) => (b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} МБ` : `${Math.max(1, Math.round(b / 1024))} КБ`);
@@ -18,8 +17,8 @@ export default function EmulatorLauncher() {
   const [runState, setRunState] = useState<unknown>(undefined);
   const [running, setRunning] = useState(false);
   const [, forceUi] = useState(0);
-  const apiRef = useRef<NesApi | null>(null);
-  const segaApiRef = useRef<SegaApi | null>(null);
+  // единый API эмулятора EmulatorJS (и NES, и SEGA)
+  const ejsApiRef = useRef<SegaApi | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   // какой ром сейчас реально крутится в эмуляторе (для загрузки сохранений без перезапуска)
   const launchedRomRef = useRef<string | null>(null);

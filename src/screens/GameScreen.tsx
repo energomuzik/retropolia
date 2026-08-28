@@ -5,8 +5,8 @@ import { CELL, cellCenter, drawBoard, fitView } from '../render';
 import { cellTaskOf, fmtClock, spentInfo } from '../engine';
 import { effectLabel } from './TaskEditor';
 import { cardArt, cartridgeArt } from '../assets';
-import NesBox, { type NesApi } from '../NesBox';
 import SegaBox, { type SegaApi } from '../SegaBox';
+import { loadEmuPrefs, nesEjsMap, segaEjsMap } from '../input';
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import KeyBinder from '../KeyBinder';
@@ -20,9 +20,8 @@ export default function GameScreen() {
   const st = useApp();
   const { session: s, sessionMap: map, selfId: me, options, room } = st;
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const emuCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const nesApiRef = useRef<NesApi | null>(null);
-  const segaApiRef = useRef<SegaApi | null>(null);
+  // единый API эмулятора EmulatorJS (и NES, и SEGA)
+  const ejsApiRef = useRef<SegaApi | null>(null);
 
   const [viewMode, setViewMode] = useState<'follow' | 'world'>('follow');
   const [peekMap, setPeekMap] = useState(false);
@@ -113,6 +112,12 @@ export default function GameScreen() {
   const task = s && map && ch ? cellTaskOf(s, map, ch.cellIdx) : null;
   const taskRom = task ? st.roms.find((r) => r.id === task.romId) : undefined;
   const isSega = !!taskRom && taskRom.ext !== 'nes';
+  // Раскладка клавиатуры для EmulatorJS (индекс RetroPad → клавиша).
+  // Применяется при старте ядра и обновляется «на лету» по событию PREFS_EVENT.
+  const controlMap = useMemo(() => {
+    const p = loadEmuPrefs();
+    return isSega ? segaEjsMap(p.segaKeys) : nesEjsMap(p.keys);
+  }, [isSega, emuKey]);
   const segExt = (taskRom?.fileName.split('.').pop() ?? 'md').toLowerCase();
   const romName = taskRom?.name ?? 'ROM';
   const taskImg = useBlobImage(task?.imageId);
@@ -177,15 +182,8 @@ export default function GameScreen() {
       busy = true;
       let data: string | null = null;
       try {
-        if (isSega) {
-          data = (await segaApiRef.current?.captureFrame()) ?? null;
-        } else {
-          const c = emuCanvasRef.current;
-          if (c) {
-            const q = streamMs <= 50 ? 0.34 : 0.42;
-            data = c.toDataURL('image/jpeg', q);
-          }
-        }
+        // и NES, и SEGA теперь в EmulatorJS (iframe) — кадр берётся одинаково
+        data = (await ejsApiRef.current?.captureFrame()) ?? null;
       } catch { data = null; }
       busy = false;
       if (data) {
@@ -193,7 +191,7 @@ export default function GameScreen() {
       }
     }, streamMs);
     return () => clearInterval(t);
-  }, [streaming, streamMs, room, me, mePlayer?.name, isSega]);
+  }, [streaming, streamMs, room, me, mePlayer?.name]);
 
   useEffect(() => {
     return streamBus.on((p) => {
@@ -979,27 +977,17 @@ export default function GameScreen() {
                           <div ref={emuWrapRef} className={isFs ? 'bg-[#05070f] h-full w-full flex items-center justify-center p-4' : ''}>
                             <div style={isFs ? { width: isSega ? 'min(92vw, calc(88vh * 1.3333))' : 'min(92vw, calc(88vh * 1.0667))' } : undefined}>
                         {romBuf ? (
-                          isSega ? (
-                            <SegaBox
-                              key={emuKey}
-                              romData={romBuf}
-                              ext={segExt}
-                              initialState={(saveState as string | null) ?? null}
-                              paused={ch.status === 'ready' || ch.status === 'voting' || ch.paused}
-                              pausedHint={ch.status === 'ready' ? 'Нажмите «Запуск задания»' : undefined}
-                              onApi={(a) => { segaApiRef.current = a; }}
-                            />
-                          ) : (
-                            <NesBox
-                              key={emuKey}
-                              romData={romBuf}
-                              initialState={saveState ?? undefined}
-                              enabled={ch.status === 'playing' && !ch.paused}
-                              paused={ch.status === 'ready' || ch.status === 'voting' || ch.paused}
-                              onApi={(a) => { nesApiRef.current = a; }}
-                              registerCanvas={(c) => { emuCanvasRef.current = c; }}
-                            />
-                          )
+                          <SegaBox
+                            key={emuKey}
+                            romData={romBuf}
+                            ext={segExt}
+                            core={isSega ? undefined : 'nes'}
+                            controlMap={controlMap}
+                            initialState={(saveState as string | null) ?? null}
+                            paused={ch.status === 'ready' || ch.status === 'voting' || ch.paused}
+                            pausedHint={ch.status === 'ready' ? 'Нажмите «Запуск задания»' : undefined}
+                            onApi={(a) => { ejsApiRef.current = a; }}
+                          />
                         ) : (
                           <div className="aspect-[256/240] bg-black border-[3px] border-edge flex items-center justify-center">
                             <span className="font-pixel text-[8px] text-faint blink-hard">ЗАГРУЗКА РОМА…</span>
@@ -1032,7 +1020,7 @@ export default function GameScreen() {
                         <div className="mt-1.5 tick-label text-faint">
                           {isSega
                             ? 'SEGA · Стрелки · Z=A · X=B · C=C · A=X · S=Y · D=Z · Enter=Start'
-                            : 'NES · Стрелки · X=A · Z=B · Enter=Start · Shift=Select'}
+                            : 'NES · Стрелки · Z=B · X=A · Enter=Start · Shift=Select'}
                         </div>
                       )}
                     </div>
