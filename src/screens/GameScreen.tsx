@@ -9,7 +9,7 @@ import SegaBox, { type SegaApi } from '../SegaBox';
 import KeyBinder from '../KeyBinder';
 import {
   loadEmuPrefs, PREFS_EVENT, codeToEjsKey,
-  NES_TO_RETRO, SEGA_TO_RETRO, PAD_ACTIONS, SEGA_ACTIONS,
+  PAD_ACTIONS, SEGA_ACTIONS, DEFAULT_KEYS, DEFAULT_SEGA_KEYS,
 } from '../input';
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
@@ -126,16 +126,18 @@ export default function GameScreen() {
   }, []);
   const remapSpec = useMemo(() => {
     const p = loadEmuPrefs();
-    const spec: { idx: number; key: string }[] = [];
+    const spec: { from: string; to: string }[] = [];
     if (isSega) {
       for (const a of SEGA_ACTIONS) {
-        const idx = SEGA_TO_RETRO[a];
-        if (idx !== undefined && p.segaKeys[a]) spec.push({ idx, key: p.segaKeys[a].toLowerCase() });
+        const from = (p.segaKeys[a] || '').toLowerCase();
+        const to = (DEFAULT_SEGA_KEYS[a] || '').toLowerCase();
+        if (from && to && from !== to) spec.push({ from, to });
       }
     } else {
       for (const a of PAD_ACTIONS) {
-        const idx = NES_TO_RETRO[a];
-        if (idx !== undefined && p.keys[a]) spec.push({ idx, key: codeToEjsKey(p.keys[a]) });
+        const from = codeToEjsKey(p.keys[a] || '');
+        const to = codeToEjsKey(DEFAULT_KEYS[a] || '');
+        if (from && to && from !== to) spec.push({ from, to });
       }
     }
     return spec;
