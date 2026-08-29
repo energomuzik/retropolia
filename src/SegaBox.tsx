@@ -103,9 +103,15 @@ export default function SegaBox({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedCore, romData, bootTick]);
 
-  // живое обновление раскладки — без перезапуска ядра
+  // живое обновление раскладки — без перезапуска ядра.
+  // Первая отправка (при старте) — молча; последующие — по сохранению в редакторе,
+  // поэтому по их результату показываем уведомление.
+  const remapSentRef = useRef(false);
+  const announceRef = useRef(false);
   useEffect(() => {
     if (status !== 'ready') return;
+    if (remapSentRef.current) announceRef.current = true;
+    remapSentRef.current = true;
     try { frameRef.current?.contentWindow?.postMessage({ type: 'set-remap-spec', spec: remapSpec ?? [] }, '*'); } catch { /* noop */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [remapJson, status]);
@@ -135,6 +141,16 @@ export default function SegaBox({
       } else if (d.type === 'ejs-retrying') {
         // ядро не скачалось с первого раза — идёт автоповтор
         setLoadAttempt((d as { attempt?: number }).attempt ?? 0);
+      } else if (d.type === 'ejs-remap-status') {
+        const rs = d as { direct?: number; rewrite?: number };
+        const applied = (rs.direct ?? 0) + (rs.rewrite ?? 0);
+        if (announceRef.current) {
+          announceRef.current = false;
+          useApp.getState().toast(
+            applied > 0 ? `Раскладка применена (${applied} кнопок)` : 'Не удалось применить раскладку — попробуйте другие клавиши',
+            applied > 0 ? 'ok' : 'err',
+          );
+        }
       } else if (d.type === 'ejs-controls-live') {
         const ok = !!(d as { ok?: boolean }).ok;
         useApp.getState().toast(
@@ -295,11 +311,115 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     // EJS_emulator.controls при готовности — не трогаем внутренние настройки,
     // поэтому загрузка ядра не может сломаться).
     `var remapSpec=${remapJson};`,
-    'var remap={};',
-    'function buildRemap(){remap={};try{var e=window.EJS_emulator;var c=e&&e.controls&&(e.controls["0"]||e.controls[0]);if(!c)return;for(var i=0;i<remapSpec.length;i++){var it=remapSpec[i];var b=c[it.idx];var ck=b&&(b.value||b.value2);if(ck&&it.key){var uk=String(it.key).toLowerCase();var cv=String(ck).toLowerCase();if(uk!==cv){remap[uk]=cv;}}}}catch(err){}}',
-    'function remapEvt(ev){try{var k=(ev.key||"").toLowerCase();var to=remap[k];if(to){Object.defineProperty(ev,"key",{value:to,configurable:true});}}catch(err){}}',
+    'var remapByKey={};',
+    'var remapByCode={};',
+    // e.key (нижний регистр) -> e.code
+    'function codeOf(k){',
+    '  if(!k){return "";}',
+    '  k=String(k).toLowerCase();',
+    '  if(k==="arrowup"){return "ArrowUp";}',
+    '  if(k==="arrowdown"){return "ArrowDown";}',
+    '  if(k==="arrowleft"){return "ArrowLeft";}',
+    '  if(k==="arrowright"){return "ArrowRight";}',
+    '  if(k==="enter"){return "Enter";}',
+    '  if(k===" "||k==="space"){return "Space";}',
+    '  if(k==="shift"){return "ShiftLeft";}',
+    '  if(k==="control"){return "ControlLeft";}',
+    '  if(k==="alt"){return "AltLeft";}',
+    '  if(k==="backspace"){return "Backspace";}',
+    '  if(k==="tab"){return "Tab";}',
+    '  if(k.length===1){',
+    '    var cc=k.charCodeAt(0);',
+    '    if(cc>=97&&cc<=122){return "Key"+k.toUpperCase();}',
+    '    if(cc>=48&&cc<=57){return "Digit"+k;}',
+    '  }',
+    '  return "";',
+    '}',
+    'function keyCodeOf(k){',
+    '  var c=codeOf(k);',
+    '  if(c==="ArrowLeft"){return 37;} if(c==="ArrowUp"){return 38;}',
+    '  if(c==="ArrowRight"){return 39;} if(c==="ArrowDown"){return 40;}',
+    '  if(c==="Enter"){return 13;} if(c==="Space"){return 32;}',
+    '  if(c==="ShiftLeft"){return 16;} if(c==="ControlLeft"){return 17;}',
+    '  if(c==="AltLeft"){return 18;} if(c==="Backspace"){return 8;} if(c==="Tab"){return 9;}',
+    '  if(c.indexOf("Key")===0){return c.charCodeAt(3);}',
+    '  if(c.indexOf("Digit")===0){return Number(c.slice(5));}',
+    '  return 0;',
+    '}',
+    // Ищем живой объект раскладок игрока 0 во всех возможных местах
+    'function findControls(){',
+    '  try{',
+    '    var e=window.EJS_emulator;',
+    '    if(!e){return null;}',
+    '    var list=[e.controls,e.settings&&e.settings.controls,e.gameManager&&e.gameManager.controls];',
+    '    for(var i=0;i<list.length;i++){',
+    '      var c=list[i];',
+    '      if(!c){continue;}',
+    '      var p=c[0]||c["0"];',
+    '      if(p&&(p[0]||p["0"]||p[3]||p["3"]||p[4]||p["4"]||p[8]||p["8"])){return p;}',
+    '    }',
+    '  }catch(err){}',
+    '  return null;',
+    '}',
+    // Применение раскладки: стратегия 1 — прямая правка объекта ядра;',
+    // стратегия 2 (для непокрытых кнопок) — перехват событий.
+    'function applyRemap(){',
+    '  remapByKey={};remapByCode={};',
+    '  var direct=0;var rewrite=0;var coreKeys=[];',
+    '  var c=findControls();',
+    '  for(var i=0;i<remapSpec.length;i++){',
+    '    var it=remapSpec[i];',
+    '    var uk=String(it.key||"").toLowerCase();',
+    '    if(!uk){continue;}',
+    '    var coreKey="";',
+    '    var b=c?c[it.idx]||c[String(it.idx)]:null;',
+    '    if(b){',
+    '      coreKey=String(b.value||b.value2||"").toLowerCase();',
+    '      if(coreKey){coreKeys.push(it.idx+":"+coreKey);}',
+    '      if(coreKey&&coreKey!==uk){',
+    '        try{b.value=uk;b.value2=uk;direct++;continue;}catch(err2){}',
+    '      }else if(!coreKey){',
+    '        try{b.value=uk;b.value2=uk;direct++;continue;}catch(err3){}',
+    '      }',
+    '    }',
+    '    if(coreKey&&coreKey!==uk){',
+    '      remapByKey[uk]=coreKey;rewrite++;',
+    '      var uc=codeOf(uk);',
+    '      if(uc){remapByCode[uc.toLowerCase()]=coreKey;}',
+    '    }',
+    '  }',
+    '  try{parent.postMessage({type:"ejs-remap-status",direct:direct,rewrite:rewrite,coreKeys:coreKeys.join(",")},"*");}catch(err4){}',
+    '  return direct+rewrite;',
+    '}',
+    'function remapEvt(ev){',
+    '  try{',
+    '    var k=(ev.key||"").toLowerCase();',
+    '    var to=remapByKey[k];',
+    '    if(!to){',
+    '      var c2=(ev.code||"").toLowerCase();',
+    '      to=remapByCode[c2];',
+    '    }',
+    '    if(to){',
+    '      Object.defineProperty(ev,"key",{value:to,configurable:true});',
+    '      var tc=codeOf(to);',
+    '      if(tc){Object.defineProperty(ev,"code",{value:tc,configurable:true});}',
+    '      var kc=keyCodeOf(to);',
+    '      if(kc){',
+    '        Object.defineProperty(ev,"keyCode",{value:kc,configurable:true});',
+    '        Object.defineProperty(ev,"which",{value:kc,configurable:true});',
+    '      }',
+    '    }',
+    '  }catch(err){}',
+    '}',
     'window.addEventListener("keydown",remapEvt,true);',
     'window.addEventListener("keyup",remapEvt,true);',
+    // повторные попытки, пока объект раскладок не появится (он создаётся лениво)
+    'var remapTries=0;',
+    'function remapPump(){',
+    '  remapTries++;',
+    '  var applied=applyRemap();',
+    '  if(applied<remapSpec.length&&remapTries<12){setTimeout(remapPump,500);}',
+    '}',
     `window.EJS_pathtodata=${JSON.stringify(base)};`,
     'window.EJS_language="ru";',
     'window.EJS_backgroundText="";',
@@ -370,11 +490,11 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '  if(gm()){doPause(wantPaused);}',
     '},450);',
 
-    'window.EJS_ready=function(){readyAt=Date.now();buildRemap();try{parent.postMessage({type:"ejs-ready"},"*");}catch(e){}};',
+    'window.EJS_ready=function(){readyAt=Date.now();remapTries=0;remapPump();try{parent.postMessage({type:"ejs-ready"},"*");}catch(e){}};',
 
     'window.addEventListener("message",function(e){',
     '  var d=e.data||{};',
-    '  if(d.type==="set-remap-spec"){remapSpec=d.spec||[];buildRemap();return;}',
+    '  if(d.type==="set-remap-spec"){remapSpec=d.spec||[];remapTries=0;remapPump();return;}',
     '  if(d.type==="boot"&&!booted){',
     '    booted=true;',
     '    try{',
