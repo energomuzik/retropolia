@@ -11,6 +11,8 @@ export interface SegaApi {
   pause: (p: boolean) => void; // живая пауза (без перезапуска)
   /** Снимок текущего кадра (dataURL jpeg) для трансляции соперникам. */
   captureFrame: () => Promise<string | null>;
+  /** Открыть встроенное меню настроек EmulatorJS (клавиатура + геймпад). */
+  openSettings: () => void;
 }
 
 function coreFor(ext: string): string {
@@ -35,7 +37,6 @@ export default function SegaBox({
   romData,
   ext,
   core,
-  controlMap,
   initialState,
   paused,
   pausedHint,
@@ -45,8 +46,6 @@ export default function SegaBox({
   ext: string;
   /** Ядро EmulatorJS напрямую ('nes', 'segaMD'…). Если не задано — выбирается по расширению файла. */
   core?: string;
-  /** Раскладка клавиатуры: индекс RetroPad → клавиша (e.key, нижний регистр). Применяется при старте и «на лету». */
-  controlMap?: Record<number, string>;
   initialState?: string | null;
   paused?: boolean;
   pausedHint?: string;
@@ -86,7 +85,7 @@ export default function SegaBox({
     const opts = useApp.getState().options;
     const volume = opts.emuSound ? Math.max(0, Math.min(1, opts.emuVolume ?? 1)) : 0;
     const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    return buildHtml(resolvedCore, volume, CDN_DATA, bootStateRef.current, nonce, JSON.stringify(controlMap ?? {}));
+    return buildHtml(resolvedCore, volume, CDN_DATA, bootStateRef.current, nonce);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedCore, romData, bootTick]);
 
@@ -159,6 +158,9 @@ export default function SegaBox({
       },
       pause: (p) => {
         try { frameRef.current?.contentWindow?.postMessage({ type: 'pause', paused: !!p }, '*'); } catch { /* noop */ }
+      },
+      openSettings: () => {
+        try { frameRef.current?.contentWindow?.postMessage({ type: 'open-settings' }, '*'); } catch { /* noop */ }
       },
       captureFrame: () =>
         new Promise<string | null>((resolve) => {
@@ -255,7 +257,7 @@ export default function SegaBox({
   );
 }
 
-function buildHtml(core: string, volume: number, base: string, bootStateB64: string | null, nonce: string, controlMapJson: string): string {
+function buildHtml(core: string, volume: number, base: string, bootStateB64: string | null, nonce: string): string {
   // Внутренний документ: чистое окно без тулбара, общается с хостом через postMessage.
   // Ром приходит сообщением 'boot' как ArrayBuffer; blob-URL создаётся ВНУТРИ iframe —
   // с именем и расширением файла (иначе ядро стартует «пустым» и показывает меню RetroArch).
@@ -273,28 +275,9 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     'return _gc.call(this,t,a);};})();',
     'window.EJS_player="#game";',
     `window.EJS_core=${JSON.stringify(core)};`,
-    // Раскладка клавиатуры: индекс RetroPad → клавиша. Запекается при старте и
-    // может быть заменена «на лету» сообщением set-controls (без перезапуска ядра).
-    `var controlMap=${controlMapJson};`,
-    // Раскладку НЕ задаём до загрузки ядра: неверный формат EJS_defaultControls
-    // ломает загрузчик изнутри (эмулятор зависает на экране загрузки). Ядро стартует
-    // со встроенными настройками, а своя раскладка применяется после готовности
-    // через applyControls (живой API, обёрнуто в try/catch — загрузку не сломает).
-    'function toBindings(m){var o={};for(var k in m){o[k]={value:m[k],value2:m[k]};}return o;}',
-    'function applyControls(m){',
-    '  controlMap=m;',
-    '  var live=false;',
-    '  try{',
-    '    window.EJS_defaultControls=toBindings(m);',
-    '    var emu=window.EJS_emulator;',
-    '    if(emu&&emu.controls&&typeof emu.controls==="object"){',
-    '      var nb=toBindings(m);',
-    '      for(var pk in nb){emu.controls[pk]=nb[pk];}',
-    '      live=true;',
-    '    }',
-    '  }catch(e){}',
-    '  try{parent.postMessage({type:"ejs-controls-live",ok:live},"*");}catch(e){}',
-    '}',
+    // Управление настраивается через ВСТРОЕННОЕ меню настроек EmulatorJS (шестерёнка).
+    // Оно штатно поддерживает и клавиатуру, и геймпад для всех ядер. Самописное
+    // переназначение отключено — оно ломало встроенный маппинг (NES не реагировал).
     `window.EJS_pathtodata=${JSON.stringify(base)};`,
     'window.EJS_language="ru";',
     'window.EJS_backgroundText="";',
@@ -303,11 +286,17 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     `window.EJS_volume=${volume};`,
     'window.EJS_startOnLoaded=true;',
     'window.EJS_askBeforeExit=false;',
-    'window.EJS_Buttons={playPause:false,restart:false,mute:false,settings:false,fullscreen:false,saveState:false,loadState:false,screenRecord:false,gamepad:false,cheat:false,volume:false,saveSavFiles:false,loadSavFiles:false,quickSave:false,quickLoad:false,screenshot:false,cacheManager:false,exitEmulation:false};',
+    'window.EJS_Buttons={playPause:false,restart:false,mute:false,settings:true,fullscreen:false,saveState:false,loadState:false,screenRecord:false,gamepad:false,cheat:false,volume:false,saveSavFiles:false,loadSavFiles:false,quickSave:false,quickLoad:false,screenshot:false,cacheManager:false,exitEmulation:false};',
     'var booted=false;',
     'var wantPaused=false;',
     'var readyAt=0;',
     'function gm(){return window.EJS_emulator&&window.EJS_emulator.gameManager;}',
+    // Открыть встроенное меню настроек EmulatorJS (клавиатура + геймпад).
+    'function openSettings(){try{',
+    '  var e=window.EJS_emulator;if(!e)return;',
+    '  if(e.gameManager&&typeof e.gameManager.openSettings==="function"){e.gameManager.openSettings();return;}',
+    '  if(e.settingsBtn){e.settingsBtn.click();return;}',
+    '}catch(err){}}',
     'function b64(u8){var bin="";for(var i=0;i<u8.length;i+=32768){bin+=String.fromCharCode.apply(null,u8.subarray(i,i+32768));}return btoa(bin);}',
     'function b64ToU8(b){var bin=atob(b);var u8=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++){u8[i]=bin.charCodeAt(i);}return u8;}',
     'function showErr(t){var el=document.getElementById("err");el.textContent=t;el.style.display="block";try{parent.postMessage({type:"ejs-error"},"*");}catch(e){}}',
@@ -328,7 +317,7 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '  if(gm()){doPause(wantPaused);}',
     '},450);',
 
-    'window.EJS_ready=function(){readyAt=Date.now();applyControls(controlMap);try{parent.postMessage({type:"ejs-ready"},"*");}catch(e){}};',
+    'window.EJS_ready=function(){readyAt=Date.now();try{parent.postMessage({type:"ejs-ready"},"*");}catch(e){}};',
 
     'window.addEventListener("message",function(e){',
     '  var d=e.data||{};',
@@ -371,7 +360,7 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '    if(gm()){doPause(wantPaused);}',
     '    return;',
     '  }',
-    '  if(d.type==="set-controls"&&d.map){applyControls(d.map);return;}',
+    '  if(d.type==="open-settings"){openSettings();return;}',
     // кадр для трансляции: отвечаем даже если ядро ещё не готово (иначе запрос повиснет)
     '  if(d.type==="get-frame"){',
     '    var send2=function(out){try{parent.postMessage({type:"ejs-frame",state:out,reqId:d.reqId},"*");}catch(e){}};',
