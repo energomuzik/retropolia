@@ -1077,7 +1077,7 @@ export default function GameScreen() {
                             {ch.paused ? Ic.play(13) : Ic.pause(13)} {ch.paused ? 'Продолжить' : 'Пауза'}
                           </GhostBtn>
                           {ch.paused && ch.status === 'playing' && (
-                            <GhostBtn className="w-full border-magma/60 text-magma" onClick={() => ejsApiRef.current?.openSettings()}>
+                            <GhostBtn className="w-full border-magma/60 text-magma" onClick={() => setControlsOpen(true)}>
                               {Ic.gear(13)} Сменить управление
                             </GhostBtn>
                           )}
@@ -1141,6 +1141,24 @@ export default function GameScreen() {
             <PxBtn small className="ml-auto" onClick={() => setPeekMap(false)}>{Ic.cross(12)} Вернуться</PxBtn>
           </div>
           <div className="text-center text-faint tick-label pt-2">Эмулятор поставлен на паузу — вернитесь и нажмите «Продолжить»</div>
+        </div>
+      )}
+
+      {/* ---------- наш редактор управления (клавиатура + геймпад) ---------- */}
+      {controlsOpen && (
+        <div className="fixed inset-0 z-[95] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-[rgba(4,6,14,0.88)]" onClick={() => setControlsOpen(false)} />
+          <div className="relative pixel-panel pixel-corners pop-in w-full max-w-2xl p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-magma">{Ic.gear(18)}</span>
+              <span className="font-display uppercase tracking-wider text-paper text-sm">
+                Управление · {isSega ? 'SEGA Genesis' : 'NES'}
+              </span>
+              <span className="tick-label text-gold ml-2">применяется сразу</span>
+              <GhostBtn small className="ml-auto" onClick={() => setControlsOpen(false)}>{Ic.cross(12)} Закрыть</GhostBtn>
+            </div>
+            <KeyBinder compact mode={isSega ? 'sega' : 'nes'} />
+          </div>
         </div>
       )}
 

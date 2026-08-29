@@ -1,10 +1,15 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp, getRomData } from '../store';
 import { Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
 import SegaBox, { type SegaApi } from '../SegaBox';
+import KeyBinder from '../KeyBinder';
 import { idbDel, idbPut, uid } from '../db';
 import type { RomDef, SaveDef } from '../types';
-import { keyLabel, loadEmuPrefs, nesEjsMap, segaEjsMap, PREFS_EVENT, listGamepads } from '../input';
+import {
+  keyLabel, loadEmuPrefs, PREFS_EVENT, listGamepads,
+  PAD_ACTIONS, NES_TO_RETRO, codeToEjsKey,
+  SEGA_ACTIONS, SEGA_TO_RETRO,
+} from '../input';
 import { sfx } from '../sound';
 
 const fmtSize = (b: number) => (b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} МБ` : `${Math.max(1, Math.round(b / 1024))} КБ`);
@@ -22,10 +27,39 @@ export default function EmulatorLauncher() {
   const fileRef = useRef<HTMLInputElement>(null);
   // какой ром сейчас реально крутится в эмуляторе (для загрузки сохранений без перезапуска)
   const launchedRomRef = useRef<string | null>(null);
+  // наш редактор управления (открывается кнопкой «Управление» рядом с эмулятором)
+  const [controlsOpen, setControlsOpen] = useState(false);
 
   const rom = roms.find((r) => r.id === romId) ?? null;
   const isNes = rom?.ext === 'nes';
   const romSaves = saves.filter((s) => s.romId === romId).sort((a, b) => a.slot - b.slot);
+
+  /* Раскладка пользователя → «мост»: клавиша пользователя → клавиша ядра.
+     Клавиши ядра читаются из самого EmulatorJS при старте — переназначение не
+     трогает внутренние настройки ядра и не может их сломать. */
+  const [prefsTick, setPrefsTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setPrefsTick((x) => x + 1);
+    window.addEventListener(PREFS_EVENT, bump);
+    return () => window.removeEventListener(PREFS_EVENT, bump);
+  }, []);
+  const remapSpec = useMemo(() => {
+    const p = loadEmuPrefs();
+    const spec: { idx: number; key: string }[] = [];
+    if (isNes) {
+      for (const a of PAD_ACTIONS) {
+        const idx = NES_TO_RETRO[a];
+        if (idx !== undefined && p.keys[a]) spec.push({ idx, key: codeToEjsKey(p.keys[a]) });
+      }
+    } else {
+      for (const a of SEGA_ACTIONS) {
+        const idx = SEGA_TO_RETRO[a];
+        if (idx !== undefined && p.segaKeys[a]) spec.push({ idx, key: p.segaKeys[a].toLowerCase() });
+      }
+    }
+    return spec;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isNes, prefsTick, runKey]);
 
   useEffect(() => {
     const bump = () => forceUi((x) => x + 1);
@@ -196,13 +230,13 @@ export default function EmulatorLauncher() {
                       romData={romBuf}
                       ext={isNes ? 'nes' : segExt(rom?.fileName ?? '')}
                       core={isNes ? 'nes' : undefined}
+                      remapSpec={remapSpec}
                       initialState={(runState as string | null) ?? null}
                       onApi={(a: SegaApi) => { ejsApiRef.current = a; }}
-                      onSettingsFail={() => toast('Меню не открылось само — наведите курсор на экран эмулятора и нажмите шестерёнку на панели внизу', 'err')}
                     />
                     <div className="flex gap-2 mt-3 flex-wrap">
                       <PxBtn color="gold" onClick={() => void createSave()}>{Ic.save(14)} Сохранить состояние</PxBtn>
-                      <GhostBtn onClick={() => ejsApiRef.current?.openSettings()}>{Ic.gear(13)} Управление</GhostBtn>
+                      <GhostBtn onClick={() => { setControlsOpen(true); sfx.click(); }}>{Ic.gear(13)} Управление</GhostBtn>
                       <GhostBtn onClick={() => resetEmu()}>{Ic.rotate(13)} Сброс (с начала)</GhostBtn>
                       <GhostBtn onClick={() => { setRunning(false); launchedRomRef.current = null; }}>{Ic.pause(13)} Выключить</GhostBtn>
                     </div>
@@ -259,6 +293,24 @@ export default function EmulatorLauncher() {
           </div>
         </div>
       </div>
+
+      {/* наш редактор управления (клавиатура + геймпад) */}
+      {controlsOpen && (
+        <div className="fixed inset-0 z-[95] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-[rgba(4,6,14,0.88)]" onClick={() => setControlsOpen(false)} />
+          <div className="relative pixel-panel pixel-corners pop-in w-full max-w-2xl p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-magma">{Ic.gear(18)}</span>
+              <span className="font-display uppercase tracking-wider text-paper text-sm">
+                Управление · {isNes ? 'NES' : 'SEGA Genesis'}
+              </span>
+              <span className="tick-label text-gold ml-2">применяется сразу</span>
+              <GhostBtn small className="ml-auto" onClick={() => setControlsOpen(false)}>{Ic.cross(12)} Закрыть</GhostBtn>
+            </div>
+            <KeyBinder compact mode={isNes ? 'nes' : 'sega'} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
