@@ -6,6 +6,11 @@ import { cellTaskOf, fmtClock, spentInfo } from '../engine';
 import { effectLabel } from './TaskEditor';
 import { cardArt, cartridgeArt } from '../assets';
 import SegaBox, { type SegaApi } from '../SegaBox';
+import KeyBinder from '../KeyBinder';
+import {
+  loadEmuPrefs, PREFS_EVENT, codeToEjsKey,
+  NES_TO_RETRO, SEGA_TO_RETRO, PAD_ACTIONS, SEGA_ACTIONS,
+} from '../input';
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { Field, GhostBtn, Ic, Modal, PxBtn } from '../ui';
@@ -40,6 +45,7 @@ export default function GameScreen() {
      показывают одни и те же числа — никаких расхождений из-за пинга. */
   const [rolling, setRolling] = useState(false);
   const lastRollRef = useRef(0);
+  const [controlsOpen, setControlsOpen] = useState(false);
 
   /* ---------- жеребьёвка: тряска кубика и автозапуск ---------- */
   const [roShake, setRoShake] = useState(false);
@@ -109,6 +115,32 @@ export default function GameScreen() {
   const task = s && map && ch ? cellTaskOf(s, map, ch.cellIdx) : null;
   const taskRom = task ? st.roms.find((r) => r.id === task.romId) : undefined;
   const isSega = !!taskRom && taskRom.ext !== 'nes';
+
+  /* раскладка клавиш для слоя переназначения эмулятора; пересчитывается при
+     сохранении в редакторе «Управление» (событие PREFS_EVENT) */
+  const [prefsTick, setPrefsTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setPrefsTick((x) => x + 1);
+    window.addEventListener(PREFS_EVENT, bump);
+    return () => window.removeEventListener(PREFS_EVENT, bump);
+  }, []);
+  const remapSpec = useMemo(() => {
+    const p = loadEmuPrefs();
+    const spec: { idx: number; key: string }[] = [];
+    if (isSega) {
+      for (const a of SEGA_ACTIONS) {
+        const idx = SEGA_TO_RETRO[a];
+        if (idx !== undefined && p.segaKeys[a]) spec.push({ idx, key: p.segaKeys[a].toLowerCase() });
+      }
+    } else {
+      for (const a of PAD_ACTIONS) {
+        const idx = NES_TO_RETRO[a];
+        if (idx !== undefined && p.keys[a]) spec.push({ idx, key: codeToEjsKey(p.keys[a]) });
+      }
+    }
+    return spec;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSega, emuKey, prefsTick]);
   const segExt = (taskRom?.fileName.split('.').pop() ?? 'md').toLowerCase();
   const romName = taskRom?.name ?? 'ROM';
   const taskImg = useBlobImage(task?.imageId);
@@ -880,7 +912,7 @@ export default function GameScreen() {
               )}
               <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
               {myTurn && ch.status !== 'choose' && (
-                <GhostBtn small onClick={() => ejsApiRef.current?.openSettings()}>{Ic.gear(12)} Управление</GhostBtn>
+                <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
               )}
             </div>
 
@@ -972,6 +1004,7 @@ export default function GameScreen() {
                             romData={romBuf}
                             ext={segExt}
                             core={isSega ? undefined : 'nes'}
+                            remapSpec={remapSpec}
                             initialState={(saveState as string | null) ?? null}
                             paused={ch.status === 'ready' || ch.status === 'voting' || ch.paused}
                             pausedHint={ch.status === 'ready' ? 'Нажмите «Запуск задания»' : undefined}

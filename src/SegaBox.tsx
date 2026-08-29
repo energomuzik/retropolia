@@ -42,6 +42,7 @@ export default function SegaBox({
   pausedHint,
   onApi,
   onSettingsFail,
+  remapSpec,
 }: {
   romData: ArrayBuffer;
   ext: string;
@@ -53,6 +54,10 @@ export default function SegaBox({
   onApi?: (api: SegaApi) => void;
   /** Вызывается, если встроенное меню настроек не удалось открыть программно. */
   onSettingsFail?: () => void;
+  /** Пользовательская раскладка: для каждой кнопки — индекс RetroPad и выбранная
+   *  клавиша (e.key, нижний регистр). Применяется слоем переназначения, не трогая
+   *  внутренние настройки ядра. */
+  remapSpec?: { idx: number; key: string }[];
 }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const onSettingsFailRef = useRef(onSettingsFail);
@@ -86,13 +91,24 @@ export default function SegaBox({
   // Документ iframe строится СИНХРОННО — iframe получает srcDoc уже при первом
   // рендере (нет состояния «html ещё null»). nonce гарантирует уникальность строки
   // при каждом rebuild, bootStateRef «впекается» как EJS_loadStateURL.
+  const remapJson = JSON.stringify(remapSpec ?? []);
+  const remapJsonRef = useRef(remapJson);
+  remapJsonRef.current = remapJson;
+
   const html = useMemo(() => {
     const opts = useApp.getState().options;
     const volume = opts.emuSound ? Math.max(0, Math.min(1, opts.emuVolume ?? 1)) : 0;
     const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    return buildHtml(resolvedCore, volume, CDN_DATA, bootStateRef.current, nonce);
+    return buildHtml(resolvedCore, volume, CDN_DATA, bootStateRef.current, nonce, remapJsonRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedCore, romData, bootTick]);
+
+  // живое обновление раскладки — без перезапуска ядра
+  useEffect(() => {
+    if (status !== 'ready') return;
+    try { frameRef.current?.contentWindow?.postMessage({ type: 'set-remap-spec', spec: remapSpec ?? [] }, '*'); } catch { /* noop */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remapJson, status]);
 
   // Слушатель сообщений — один на всё время жизни компонента (работает через ref'ы,
   // поэтому не зависит от пересоздания iframe при смене bootTick).
@@ -256,7 +272,7 @@ export default function SegaBox({
   );
 }
 
-function buildHtml(core: string, volume: number, base: string, bootStateB64: string | null, nonce: string): string {
+function buildHtml(core: string, volume: number, base: string, bootStateB64: string | null, nonce: string, remapJson: string): string {
   // Внутренний документ: чистое окно без тулбара, общается с хостом через postMessage.
   // Ром приходит сообщением 'boot' как ArrayBuffer; blob-URL создаётся ВНУТРИ iframe —
   // с именем и расширением файла (иначе ядро стартует «пустым» и показывает меню RetroArch).
@@ -274,9 +290,16 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     'return _gc.call(this,t,a);};})();',
     'window.EJS_player="#game";',
     `window.EJS_core=${JSON.stringify(core)};`,
-    // Управление настраивается через ВСТРОЕННОЕ меню настроек EmulatorJS (шестерёнка).
-    // Оно штатно поддерживает и клавиатуру, и геймпад для всех ядер. Самописное
-    // переназначение отключено — оно ломало встроенный маппинг (NES не реагировал).
+    // Слой переназначения клавиш: перехватывает нажатия ДО обработчика ядра и
+    // подменяет клавишу игрока на ту, которую ожидает ядро (её ключи читаются из
+    // EJS_emulator.controls при готовности — не трогаем внутренние настройки,
+    // поэтому загрузка ядра не может сломаться).
+    `var remapSpec=${remapJson};`,
+    'var remap={};',
+    'function buildRemap(){remap={};try{var e=window.EJS_emulator;var c=e&&e.controls&&(e.controls["0"]||e.controls[0]);if(!c)return;for(var i=0;i<remapSpec.length;i++){var it=remapSpec[i];var b=c[it.idx];var ck=b&&(b.value||b.value2);if(ck&&it.key){var uk=String(it.key).toLowerCase();var cv=String(ck).toLowerCase();if(uk!==cv){remap[uk]=cv;}}}}catch(err){}}',
+    'function remapEvt(ev){try{var k=(ev.key||"").toLowerCase();var to=remap[k];if(to){Object.defineProperty(ev,"key",{value:to,configurable:true});}}catch(err){}}',
+    'window.addEventListener("keydown",remapEvt,true);',
+    'window.addEventListener("keyup",remapEvt,true);',
     `window.EJS_pathtodata=${JSON.stringify(base)};`,
     'window.EJS_language="ru";',
     'window.EJS_backgroundText="";',
@@ -347,10 +370,11 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '  if(gm()){doPause(wantPaused);}',
     '},450);',
 
-    'window.EJS_ready=function(){readyAt=Date.now();try{parent.postMessage({type:"ejs-ready"},"*");}catch(e){}};',
+    'window.EJS_ready=function(){readyAt=Date.now();buildRemap();try{parent.postMessage({type:"ejs-ready"},"*");}catch(e){}};',
 
     'window.addEventListener("message",function(e){',
     '  var d=e.data||{};',
+    '  if(d.type==="set-remap-spec"){remapSpec=d.spec||[];buildRemap();return;}',
     '  if(d.type==="boot"&&!booted){',
     '    booted=true;',
     '    try{',
