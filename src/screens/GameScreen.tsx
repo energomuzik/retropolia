@@ -6,10 +6,8 @@ import { cellTaskOf, fmtClock, spentInfo } from '../engine';
 import { effectLabel } from './TaskEditor';
 import { cardArt, cartridgeArt } from '../assets';
 import SegaBox, { type SegaApi } from '../SegaBox';
-import { loadEmuPrefs, nesEjsMap, segaEjsMap, PREFS_EVENT } from '../input';
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
-import KeyBinder from '../KeyBinder';
 import { Field, GhostBtn, Ic, Modal, PxBtn } from '../ui';
 import { PLAYER_COLORS, SKIP_COST } from '../types';
 import type { TaskDef } from '../types';
@@ -33,7 +31,6 @@ export default function GameScreen() {
   const lookPanRef = useRef({ x: 0, y: 0 });
   const lookZoomRef = useRef(1);
   const lookDragRef = useRef<{ sx: number; sy: number; px: number; py: number } | null>(null);
-  const [controlsOpen, setControlsOpen] = useState(false);
   const [isFs, setIsFs] = useState(false);
   const emuWrapRef = useRef<HTMLDivElement>(null);
   const prevPeekRef = useRef(false);
@@ -227,11 +224,10 @@ export default function GameScreen() {
     prevPeekRef.current = peekMap;
   }, [peekMap]);
 
-  /* ---------- сброс модалок при смене челленджа ---------- */
+  /* ---------- сброс полноэкранного режима при смене челленджа ---------- */
   useEffect(() => {
     const c = s?.challenge;
     if (!c || c.status === 'choose') {
-      setControlsOpen(false);
       if (document.fullscreenElement) document.exitFullscreen().catch(() => undefined);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
