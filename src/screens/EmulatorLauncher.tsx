@@ -198,6 +198,7 @@ export default function EmulatorLauncher() {
                       core={isNes ? 'nes' : undefined}
                       initialState={(runState as string | null) ?? null}
                       onApi={(a: SegaApi) => { ejsApiRef.current = a; }}
+                      onSettingsFail={() => toast('Меню не открылось само — наведите курсор на экран эмулятора и нажмите шестерёнку на панели внизу', 'err')}
                     />
                     <div className="flex gap-2 mt-3 flex-wrap">
                       <PxBtn color="gold" onClick={() => void createSave()}>{Ic.save(14)} Сохранить состояние</PxBtn>

@@ -41,6 +41,7 @@ export default function SegaBox({
   paused,
   pausedHint,
   onApi,
+  onSettingsFail,
 }: {
   romData: ArrayBuffer;
   ext: string;
@@ -50,8 +51,12 @@ export default function SegaBox({
   paused?: boolean;
   pausedHint?: string;
   onApi?: (api: SegaApi) => void;
+  /** Вызывается, если встроенное меню настроек не удалось открыть программно. */
+  onSettingsFail?: () => void;
 }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
+  const onSettingsFailRef = useRef(onSettingsFail);
+  onSettingsFailRef.current = onSettingsFail;
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   // номер текущей попытки загрузки ядра (виден в оверлее «ЗАГРУЗКА ЯДРА SEGA…»)
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -120,6 +125,8 @@ export default function SegaBox({
           ok ? 'Раскладка применена' : 'Раскладка сохранена — полностью применится при следующем запуске эмулятора',
           ok ? 'ok' : 'info',
         );
+      } else if (d.type === 'ejs-settings-failed') {
+        onSettingsFailRef.current?.();
       } else if (d.type === 'ejs-error') {
         setStatus((prev) => (prev === 'ready' ? prev : 'error'));
       } else if ((d.type === 'ejs-state' || d.type === 'ejs-frame') && d.reqId) {
@@ -284,11 +291,39 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     'var readyAt=0;',
     'function gm(){return window.EJS_emulator&&window.EJS_emulator.gameManager;}',
     // Открыть встроенное меню настроек EmulatorJS (клавиатура + геймпад).
-    'function openSettings(){try{',
-    '  var e=window.EJS_emulator;if(!e)return;',
-    '  if(e.gameManager&&typeof e.gameManager.openSettings==="function"){e.gameManager.openSettings();return;}',
-    '  if(e.settingsBtn){e.settingsBtn.click();return;}',
-    '}catch(err){}}',
+    // Имя метода differs по версиям — перебираем кандидаты, затем кликаем по
+    // шестерёнке тулбара в DOM; если ничего не помогло — сообщаем хосту.
+    'function openSettings(){',
+    '  var ok=false;',
+    '  try{',
+    '    var e=window.EJS_emulator;',
+    '    if(e){',
+    '      var names=["openSettings","showSettings","openControlSettings","openControlsMenu","openMenu"];',
+    '      for(var i=0;i<names.length&&!ok;i++){',
+    '        var m=e[names[i]];',
+    '        if(typeof m==="function"){m.call(e);ok=true;}',
+    '        else if(m&&typeof m==="object"&&typeof m.open==="function"){m.open();ok=true;}',
+    '      }',
+    '      if(!ok&&e.gameManager){',
+    '        for(var j=0;j<names.length&&!ok;j++){',
+    '          var g2=e.gameManager[names[j]];',
+    '          if(typeof g2==="function"){g2.call(e.gameManager);ok=true;}',
+    '          else if(g2&&typeof g2==="object"&&typeof g2.open==="function"){g2.open();ok=true;}',
+    '        }',
+    '      }',
+    '      if(!ok){var sb=e.settingsBtn||e.settingsButton;if(sb&&typeof sb.click==="function"){sb.click();ok=true;}}',
+    '    }',
+    '    if(!ok){',
+    '      var all=document.querySelectorAll("button,div,span,a");',
+    '      for(var k=0;k<all.length;k++){',
+    '        var el=all[k];var cn=el.className;',
+    '        if(cn&&cn.baseVal!==undefined){cn=cn.baseVal;}',
+    '        if(typeof cn==="string"&&cn.toLowerCase().indexOf("setting")!==-1){el.click();ok=true;break;}',
+    '      }',
+    '    }',
+    '  }catch(err){}',
+    '  try{parent.postMessage({type:ok?"ejs-settings-opened":"ejs-settings-failed"},"*");}catch(err2){}',
+    '},',
     'function b64(u8){var bin="";for(var i=0;i<u8.length;i+=32768){bin+=String.fromCharCode.apply(null,u8.subarray(i,i+32768));}return btoa(bin);}',
     'function b64ToU8(b){var bin=atob(b);var u8=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++){u8[i]=bin.charCodeAt(i);}return u8;}',
     'function showErr(t){var el=document.getElementById("err");el.textContent=t;el.style.display="block";try{parent.postMessage({type:"ejs-error"},"*");}catch(e){}}',

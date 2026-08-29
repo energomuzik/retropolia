@@ -976,6 +976,9 @@ export default function GameScreen() {
                             paused={ch.status === 'ready' || ch.status === 'voting' || ch.paused}
                             pausedHint={ch.status === 'ready' ? 'Нажмите «Запуск задания»' : undefined}
                             onApi={(a) => { ejsApiRef.current = a; }}
+                            onSettingsFail={() =>
+                              useApp.getState().toast('Меню не открылось само — наведите курсор на экран эмулятора и нажмите шестерёнку на панели внизу', 'err')
+                            }
                           />
                         ) : (
                           <div className="aspect-[256/240] bg-black border-[3px] border-edge flex items-center justify-center">
