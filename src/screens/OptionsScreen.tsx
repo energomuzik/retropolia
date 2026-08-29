@@ -4,7 +4,6 @@ import { Field, GhostBtn, Ic, Modal, Panel, PxBtn, Toggle } from '../ui';
 import { idbDel, idbAll, exportLibrary, importLibrary } from '../db';
 import { STORES } from '../db';
 import { sfx } from '../sound';
-import KeyBinder from '../KeyBinder';
 import { downloadHostBat } from '../host/hostPackage';
 
 export default function OptionsScreen() {
@@ -162,12 +161,11 @@ export default function OptionsScreen() {
 
           <Panel title="Управление эмулятором" icon={Ic.chip(16)} accent="var(--color-magma)" className="slide-up md:col-span-2">
             <div className="p-4">
-              <KeyBinder />
-              <p className="text-[11px] text-dim mt-3 leading-relaxed">
-                Раскладка действует в тестовом эмуляторе и в NES-заданиях во время партии.
-                Во время задания её можно поменять прямо на паузе. Геймпады (PS5 / Xbox / PC) — два первых
-                джойстика: первый управляет игроком 1, второй — игроком 2. У SEGA-ядра своя встроенная
-                поддержка стандартных геймпадов.
+              <p className="text-[12px] text-dim leading-relaxed">
+                Раскладка клавиш и геймпад настраиваются <span className="text-paper">рядом с эмулятором</span> —
+                кнопка <span className="text-gold font-display uppercase">«Управление»</span> в «Запуске эмулятора»
+                и во время выполнения задания (откроется встроенное меню настроек). Настройки сохраняются в браузере
+                и действуют для NES и SEGA. Геймпады (PS5 / Xbox / PC) поддерживаются автоматически.
               </p>
             </div>
           </Panel>

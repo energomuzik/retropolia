@@ -196,18 +196,18 @@ export default function EmulatorLauncher() {
                       romData={romBuf}
                       ext={isNes ? 'nes' : segExt(rom?.fileName ?? '')}
                       core={isNes ? 'nes' : undefined}
-                      controlMap={isNes ? nesEjsMap(prefs.keys) : segaEjsMap(prefs.segaKeys)}
                       initialState={(runState as string | null) ?? null}
                       onApi={(a: SegaApi) => { ejsApiRef.current = a; }}
                     />
                     <div className="flex gap-2 mt-3 flex-wrap">
                       <PxBtn color="gold" onClick={() => void createSave()}>{Ic.save(14)} Сохранить состояние</PxBtn>
+                      <GhostBtn onClick={() => ejsApiRef.current?.openSettings()}>{Ic.gear(13)} Управление</GhostBtn>
                       <GhostBtn onClick={() => resetEmu()}>{Ic.rotate(13)} Сброс (с начала)</GhostBtn>
                       <GhostBtn onClick={() => { setRunning(false); launchedRomRef.current = null; }}>{Ic.pause(13)} Выключить</GhostBtn>
                     </div>
                     <p className="text-[11px] text-dim mt-2 leading-relaxed">
                       Дойдите до нужного места и жмите «Сохранить состояние» — слот появится в списке ниже и будет доступен
-                      в редакторе заданий. Раскладка клавиш — «Опции → Эмулятор». Громкость — в общих опциях.
+                      в редакторе заданий. Раскладка клавиш и геймпад — кнопка «Управление». Громкость — в общих опциях.
                     </p>
                   </div>
                 )}

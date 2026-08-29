@@ -112,20 +112,6 @@ export default function GameScreen() {
   const task = s && map && ch ? cellTaskOf(s, map, ch.cellIdx) : null;
   const taskRom = task ? st.roms.find((r) => r.id === task.romId) : undefined;
   const isSega = !!taskRom && taskRom.ext !== 'nes';
-  // Раскладка клавиатуры для EmulatorJS (индекс RetroPad → клавиша).
-  // Применяется при старте ядра и обновляется «на лету» по событию PREFS_EVENT.
-  // пересчёт при смене раскладки в окне «Управление» (событие PREFS_EVENT)
-  const [prefsTick, setPrefsTick] = useState(0);
-  useEffect(() => {
-    const bump = () => setPrefsTick((x) => x + 1);
-    window.addEventListener(PREFS_EVENT, bump);
-    return () => window.removeEventListener(PREFS_EVENT, bump);
-  }, []);
-  const controlMap = useMemo(() => {
-    const p = loadEmuPrefs();
-    return isSega ? segaEjsMap(p.segaKeys) : nesEjsMap(p.keys);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSega, emuKey, prefsTick]);
   const segExt = (taskRom?.fileName.split('.').pop() ?? 'md').toLowerCase();
   const romName = taskRom?.name ?? 'ROM';
   const taskImg = useBlobImage(task?.imageId);
@@ -898,7 +884,7 @@ export default function GameScreen() {
               )}
               <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
               {myTurn && ch.status !== 'choose' && (
-                <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
+                <GhostBtn small onClick={() => ejsApiRef.current?.openSettings()}>{Ic.gear(12)} Управление</GhostBtn>
               )}
             </div>
 
@@ -990,7 +976,6 @@ export default function GameScreen() {
                             romData={romBuf}
                             ext={segExt}
                             core={isSega ? undefined : 'nes'}
-                            controlMap={controlMap}
                             initialState={(saveState as string | null) ?? null}
                             paused={ch.status === 'ready' || ch.status === 'voting' || ch.paused}
                             pausedHint={ch.status === 'ready' ? 'Нажмите «Запуск задания»' : undefined}
@@ -1060,7 +1045,7 @@ export default function GameScreen() {
                             {ch.paused ? Ic.play(13) : Ic.pause(13)} {ch.paused ? 'Продолжить' : 'Пауза'}
                           </GhostBtn>
                           {ch.paused && ch.status === 'playing' && (
-                            <GhostBtn className="w-full border-magma/60 text-magma" onClick={() => setControlsOpen(true)}>
+                            <GhostBtn className="w-full border-magma/60 text-magma" onClick={() => ejsApiRef.current?.openSettings()}>
                               {Ic.gear(13)} Сменить управление
                             </GhostBtn>
                           )}
@@ -1124,24 +1109,6 @@ export default function GameScreen() {
             <PxBtn small className="ml-auto" onClick={() => setPeekMap(false)}>{Ic.cross(12)} Вернуться</PxBtn>
           </div>
           <div className="text-center text-faint tick-label pt-2">Эмулятор поставлен на паузу — вернитесь и нажмите «Продолжить»</div>
-        </div>
-      )}
-
-      {/* ---------- смена управления (клавиатура + джойстик) во время задания ---------- */}
-      {controlsOpen && (
-        <div className="fixed inset-0 z-[95] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-[rgba(4,6,14,0.88)]" onClick={() => setControlsOpen(false)} />
-          <div className="relative pixel-panel pixel-corners pop-in w-full max-w-xl p-5">
-            <div className="flex items-center gap-2 mb-3">
-              <span className="text-magma">{Ic.gear(18)}</span>
-              <span className="font-display uppercase tracking-wider text-paper text-sm">
-                Управление · {isSega ? 'SEGA Genesis' : 'NES'}
-              </span>
-              <span className="tick-label text-gold ml-2">применяется сразу</span>
-              <GhostBtn small className="ml-auto" onClick={() => setControlsOpen(false)}>{Ic.cross(12)} Закрыть</GhostBtn>
-            </div>
-            <KeyBinder compact mode={isSega ? 'sega' : 'nes'} />
-          </div>
         </div>
       )}
 

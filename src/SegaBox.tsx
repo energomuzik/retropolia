@@ -200,14 +200,6 @@ export default function SegaBox({
     try { frameRef.current?.contentWindow?.postMessage({ type: 'pause', paused: !!paused }, '*'); } catch { /* noop */ }
   }, [paused, status]);
 
-  // смена раскладки «на лету» — без перезапуска ядра (при старте она уже запечена в html)
-  const controlMapKey = JSON.stringify(controlMap ?? {});
-  useEffect(() => {
-    if (status !== 'ready' || !controlMap) return;
-    try { frameRef.current?.contentWindow?.postMessage({ type: 'set-controls', map: controlMap }, '*'); } catch { /* noop */ }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controlMapKey, status, bootTick]);
-
   return (
     <div className="relative w-full aspect-[4/3] bg-black border-[3px] border-edge shadow-[0_0_40px_rgba(255,139,63,0.12)] overflow-hidden">
       <iframe
