@@ -276,10 +276,11 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     // Раскладка клавиатуры: индекс RetroPad → клавиша. Запекается при старте и
     // может быть заменена «на лету» сообщением set-controls (без перезапуска ядра).
     `var controlMap=${controlMapJson};`,
-    // Плоский формат {индекс:{value:клавиша}} — проверенно работает с EmulatorJS.
-    // (Формат «по игрокам» ломает инициализацию ядра — эмулятор зависает на загрузке.)
+    // Раскладку НЕ задаём до загрузки ядра: неверный формат EJS_defaultControls
+    // ломает загрузчик изнутри (эмулятор зависает на экране загрузки). Ядро стартует
+    // со встроенными настройками, а своя раскладка применяется после готовности
+    // через applyControls (живой API, обёрнуто в try/catch — загрузку не сломает).
     'function toBindings(m){var o={};for(var k in m){o[k]={value:m[k],value2:m[k]};}return o;}',
-    'try{window.EJS_defaultControls=toBindings(controlMap);}catch(e){}',
     'function applyControls(m){',
     '  controlMap=m;',
     '  var live=false;',
