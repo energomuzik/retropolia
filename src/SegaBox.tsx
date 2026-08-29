@@ -323,10 +323,13 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '    }',
     '  }catch(err){}',
     '  try{parent.postMessage({type:ok?"ejs-settings-opened":"ejs-settings-failed"},"*");}catch(err2){}',
-    '},',
+    '}',
     'function b64(u8){var bin="";for(var i=0;i<u8.length;i+=32768){bin+=String.fromCharCode.apply(null,u8.subarray(i,i+32768));}return btoa(bin);}',
     'function b64ToU8(b){var bin=atob(b);var u8=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++){u8[i]=bin.charCodeAt(i);}return u8;}',
     'function showErr(t){var el=document.getElementById("err");el.textContent=t;el.style.display="block";try{parent.postMessage({type:"ejs-error"},"*");}catch(e){}}',
+    // страховка: любые ошибки исполнения внутри эмулятора показываем на экране,
+    // чтобы поломка не выглядела как бесконечная загрузка
+    'window.onerror=function(m){try{showErr("Ошибка эмулятора: "+m);}catch(e){}};',
 
     // -------- пауза: каскад методов + повторы, пока ядро поднимается --------
     'function doPause(p){',
