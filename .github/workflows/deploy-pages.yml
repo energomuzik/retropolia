@@ -1,0 +1,48 @@
+# Автопубликация RETROPOLIA на GitHub Pages.
+#
+# Один раз включить:
+#   Settings → Pages → Build and deployment → Source: выбрать «GitHub Actions».
+#   Settings → Environments → github-pages → Deployment branches and tags: «All branches».
+#
+# Дальше каждый push в любую ветку автоматически собирает игру
+# и публикует её на https://ВАШ_ЛОГИН.github.io/ИМЯ_РЕПОЗИТОРИЯ
+# (запустить вручную можно: вкладка Actions → deploy-pages → Run workflow).
+name: deploy-pages
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build -- --base=./
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
