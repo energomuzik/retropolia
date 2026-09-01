@@ -68,7 +68,7 @@ export default function MenuScreen() {
         {/* нижняя строка */}
         <div className="mt-6 mb-2 text-center space-y-2">
           <div className="font-pixel text-[9px] text-faint blink-hard">INSERT SKILL TO CONTINUE</div>
-          <div className="text-[10px] text-faint">© ENERGO MUZHIK STUDIOS</div>
+          <div className="text-[10px] text-faint">© ENERGO MUZHIK STUDIOS · v1.0.0</div>
         </div>
       </div>
     </div>
