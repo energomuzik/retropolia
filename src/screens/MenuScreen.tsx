@@ -3,6 +3,7 @@ import { useApp } from '../store';
 import type { Screen } from '../store';
 import { Ic } from '../ui';
 import { sfx } from '../sound';
+import { VERSION } from '../version';
 
 const MENU: { key: string; label: string; screen: Screen; desc: string; color: string; icon: (s?: number) => React.ReactNode }[] = [
   { key: 'create', label: 'Создать игру', screen: 'create', desc: 'выбрать карту · открыть комнату', color: '#ffcf3f', icon: Ic.dice },
@@ -68,7 +69,7 @@ export default function MenuScreen() {
         {/* нижняя строка */}
         <div className="mt-6 mb-2 text-center space-y-2">
           <div className="font-pixel text-[9px] text-faint blink-hard">INSERT SKILL TO CONTINUE</div>
-          <div className="text-[10px] text-faint">© ENERGO MUZHIK STUDIOS · v1.0.0</div>
+          <div className="text-[10px] text-faint">© ENERGO MUZHIK STUDIOS · v{VERSION}</div>
         </div>
       </div>
     </div>
