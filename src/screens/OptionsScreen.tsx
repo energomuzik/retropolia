@@ -218,6 +218,24 @@ export default function OptionsScreen() {
                   <span className="text-paper">IP:9000</span>.
                 </p>
                 </div>
+                <div className="border-t-2 border-edge pt-3 mt-3">
+                <Field label="TURN для жёсткого NAT (необязательно — только если P2P не пробивается)">
+                  <input
+                    className="field-in w-full px-3 py-2 font-display text-sm tracking-wide"
+                    placeholder="user:pass@turn.example.com:3478 · несколько — через запятую"
+                    value={options.turn}
+                    onChange={(e) => setOptions({ turn: e.target.value.trim() })}
+                  />
+                </Field>
+                <p className="text-[11px] text-faint mt-2 leading-relaxed">
+                  P2P-соединение напрямую пробивается без TURN в большинстве домашних сетей (через STUN).
+                  Если у обоих игроков мобильный интернет или корпоративный файрвол, нужен TURN-релеер:
+                  бесплатный — в <span className="text-sky font-display">Cloudflare Calls TURN</span> (1 ТБ/мес, у вас уже есть
+                  аккаунт Cloudflare) или свой <span className="text-sky font-display">coturn</span> на любом VPS. Формат:{' '}
+                  <span className="text-paper">логин:пароль@адрес:порт</span>. Карта и ромы при P2P идут
+                  напрямую между игроками кусочками — сервер только «знакомит».
+                </p>
+                </div>
               </div>
             </div>
           </Panel>

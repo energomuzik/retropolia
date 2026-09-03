@@ -24,6 +24,13 @@ var GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 /* room -> Map(playerId -> connection) */
 var rooms = new Map();
 
+/* Heartbeat: раз в 25 с пингуем всех. Браузеры отвечают pong'ом на уровне
+   протокола автоматически; любой трафик обновляет lastSeen. Мёртвые соединения
+   (полуоткрытый TCP через туннель/прокси) вычищаем через 70 с тишины —
+   иначе «призраки» висят в комнате и ломают presence. */
+var PING_MS = 25000;
+var DEAD_MS = 70000;
+
 function acceptKey(key) {
   return crypto.createHash('sha1').update(key + GUID).digest('base64');
 }
@@ -155,15 +162,18 @@ server.on('upgrade', function (req, socket) {
   var old = conns.get(id);
   if (old) { try { old.socket.destroy(); } catch (e) { /* ignore */ } }
 
-  var conn = { socket: socket, alive: true };
+  var conn = { socket: socket, alive: true, lastSeen: Date.now() };
   conns.set(id, conn);
   broadcast(room, presence(room));
+
+  socket.on('data', markSeen);
 
   var buffer = Buffer.alloc(0);
   var fragments = [];      /* накопление фрагментированных сообщений */
   var fragmentOpcode = 0;
 
   socket.on('data', function (chunk) {
+    markSeen(chunk);
     buffer = Buffer.concat([buffer, chunk]);
     while (true) {
       var frame = decodeFrame(buffer);
@@ -196,6 +206,8 @@ server.on('upgrade', function (req, socket) {
     broadcast(room, text, id);
   }
 
+  function markSeen() { conn.lastSeen = Date.now(); }
+
   function cleanup() {
     if (!conn.alive) return;
     conn.alive = false;
@@ -210,6 +222,25 @@ server.on('upgrade', function (req, socket) {
   socket.on('close', cleanup);
   socket.on('error', cleanup);
 });
+
+/* ---------- heartbeat / чистка мёртвых соединений ---------- */
+setInterval(function () {
+  var now = Date.now();
+  var ping = encodeControl(0x9, Buffer.from(String(now))); /* ping-кадр */
+  rooms.forEach(function (conns, room) {
+    conns.forEach(function (conn, id) {
+      if (now - conn.lastSeen > DEAD_MS) {
+        /* тишина дольше DEAD_MS — считаем мёртвым и рвём: сработает cleanup */
+        try { conn.socket.destroy(); } catch (e) { /* ignore */ }
+        conns.delete(id);
+        return;
+      }
+      try { conn.socket.write(ping); } catch (e) { /* ignore */ }
+    });
+    if (conns.size === 0) rooms.delete(room);
+    else broadcast(room, presence(room)); /* presence после чистки */
+  });
+}, PING_MS).unref();
 
 server.listen(PORT, function () {
   console.log('RETROPOLIA hub is running on :' + PORT);

@@ -74,6 +74,7 @@ export const useApp = create<AppState>()((set, get) => ({
     hideUnrevealed: false,
     relay: '',
     relayHub: '',
+    turn: '',
   },
   setOptions: (p) => {
     const options = { ...get().options, ...p };

@@ -25,23 +25,39 @@ export interface Room {
 const prefix = (code: string) => `retropolia-v${APP_VERSION}-${code.toUpperCase()}`;
 
 /**
- * Живые бесплатные STUN/TURN. (metered.ca закрыт — не использовать.)
- * TURN повышает шанс P2P за строгими NAT после «знакомства».
+ * STUN-серверы (проверены живыми 2026-09). TURN больше НЕ хардкодим: бесплатные
+ * публичные креды протухают (expressturn/openrelay умерли — проверено), из-за них
+ * P2P между городами молча ломался. TURN подключается опционально через
+ * Опции → «TURN для жёсткого NAT» (Cloudflare Calls — 1 ТБ/мес бесплатно, или свой coturn на VPS).
+ * iceCandidatePoolSize — заранее согретые кандидаты: соединение устанавливается быстрее.
  */
-const ICE = {
-  iceServers: [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] },
-    { urls: 'turn:relay1.expressturn.com:443', username: 'efQKXKFWYQ0P1M5J0P', credential: 'v6tVXn0f7m4V4m8d' },
-    { urls: 'turn:relay1.expressturn.com:443?transport=tcp', username: 'efQKXKFWYQ0P1M5J0P', credential: 'v6tVXn0f7m4V4m8d' },
-  ],
-};
+function buildIce(turnSpec?: string): RTCConfiguration {
+  const iceServers: RTCIceServer[] = [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+  ];
+  const spec = (turnSpec ?? '').trim();
+  if (spec) {
+    for (const raw of spec.split(',')) {
+      const m = raw.trim().match(/^(.+?):(.+?)@(.+)$/);
+      if (!m) continue;
+      const [, user, cred, hostport] = m;
+      iceServers.push({
+        urls: [`turn:${hostport}`, `turn:${hostport}?transport=tcp`],
+        username: user,
+        credential: cred,
+      });
+    }
+  }
+  return { iceServers, iceCandidatePoolSize: 4 };
+}
 
 // Пустая строка = облако PeerJS (0.peerjs.com). Иначе — свой сервер:
 //   «https://имя.glitch.me» / «имя.glitch.me»  → защищённый, порт 443 (Glitch/Render/свой домен)
 //   «192.168.1.10:9000» / «localhost:9000»     → локальный PeerServer (npx peer)
-function relayOpts(custom: string | undefined): { host: string; port: number; secure: boolean; path: string; config: typeof ICE } {
+function relayOpts(custom: string | undefined, turnSpec?: string): { host: string; port: number; secure: boolean; path: string; config: RTCConfiguration } {
   const c = (custom ?? '').trim().replace(/\/+$/, '');
-  if (!c) return { host: '0.peerjs.com', port: 443, secure: true, path: '/', config: ICE };
+  if (!c) return { host: '0.peerjs.com', port: 443, secure: true, path: '/', config: buildIce(turnSpec) };
   let secure = false;
   let rest = c;
   if (/^https:\/\//i.test(c)) { secure = true; rest = c.replace(/^https:\/\//i, ''); }
@@ -52,7 +68,7 @@ function relayOpts(custom: string | undefined): { host: string; port: number; se
   else if (secure) port = 443;
   else if (/\./.test(h) && !/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) { port = 443; secure = true; } // голый домен → https
   else port = 9000; // IP или localhost → локальный PeerServer
-  return { host: h, port, secure, path: '/', config: ICE };
+  return { host: h, port, secure, path: '/', config: buildIce(turnSpec) };
 }
 
 const errText: Record<string, string> = {
@@ -81,6 +97,7 @@ export function createRoom(
   onMsg: (m: NetMsg) => void,
   onNet: (info: NetInfo) => void,
   customRelay?: string,
+  turnSpec?: string,
 ): Room {
   const chanName = prefix(code);
   const bc = 'BroadcastChannel' in window ? new BroadcastChannel(chanName) : null;
@@ -191,7 +208,7 @@ export function createRoom(
     attempts++;
     markSignal('connecting');
 
-    const opts = relayOpts(customRelay);
+    const opts = relayOpts(customRelay, turnSpec);
     try {
       if (isHost) {
         // ВАЖНО: id = chanName, чтобы переподключение не теряло комнату

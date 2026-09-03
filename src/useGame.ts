@@ -28,6 +28,75 @@ function reportSync(room: Room, pct: number) {
   room.send('action', { t: 'syncProgress', id: room.selfId, pct });
 }
 
+/* ---------- чанковая передача больших данных (карта, библиотека ромов) ----------
+   Карта с пиксель-артом и библиотека ромов — это мегабайты. Одним куском они
+   ломаются на любом «узком» пути (туннель, прокси, чужой провайдер между
+   городами) — и всё молча замирает на 0%. режем на кусочки ~48 КБ: они проходят
+   по любому каналу, полоска загрузки двигается по-настоящему, а повреждённый/
+   недокачанный набор можно перезапросить («needResend») — как в торрентах. */
+const CHUNK_SIZE = 48 * 1024;
+const CHUNK_TTL = 120_000; // собранный набор живёт 2 мин, потом чистим
+
+const rxChunks = new Map<string, { parts: string[]; got: number; n: number; timer: number }>();
+/* последние отправленные наборы — чтобы ответить на needResend без пересборки */
+const txCache = new Map<string, { t: string; json: string }>();
+
+function sendBig(room: Room, t: string, p: unknown) {
+  const json = JSON.stringify(p);
+  const n = Math.max(1, Math.ceil(json.length / CHUNK_SIZE));
+  const key = `${room.selfId}-${t}-${Date.now().toString(36)}`;
+  txCache.set(key, { t, json });
+  if (txCache.size > 6) {
+    const oldest = txCache.keys().next().value as string;
+    txCache.delete(oldest);
+  }
+  for (let i = 0; i < n; i++) {
+    room.send('chunk', { key, t, i, n, part: json.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE) });
+  }
+}
+
+function resendChunks(room: Room, key: string) {
+  const e = txCache.get(key);
+  if (!e) return; // набор уже выдавлен из кэша — гость перезайдёт и получит заново через hello
+  const n = Math.max(1, Math.ceil(e.json.length / CHUNK_SIZE));
+  for (let i = 0; i < n; i++) {
+    room.send('chunk', { key, t: e.t, i, n, part: e.json.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE) });
+  }
+}
+
+/* приём кусочков; по завершении возвращает собранный payload или null */
+function takeChunk(room: Room, c: { key: string; t: string; i: number; n: number; part: string }): unknown | null {
+  if (!c || typeof c.key !== 'string' || typeof c.part !== 'string' || !Number.isInteger(c.i) || !Number.isInteger(c.n)) return null;
+  let st = rxChunks.get(c.key);
+  if (!st) {
+    st = { parts: new Array<string>(c.n), got: 0, n: c.n, timer: 0 };
+    st.timer = window.setTimeout(() => rxChunks.delete(c.key), CHUNK_TTL);
+    rxChunks.set(c.key, st);
+  }
+  if (c.i < 0 || c.i >= st.n) return null;
+  if (st.parts[c.i] === undefined) {
+    st.parts[c.i] = c.part;
+    st.got++;
+  }
+  const pct = Math.round((st.got / st.n) * 100);
+  if (!room.isHost) {
+    /* реальный прогресс: карта — 0..59, библиотека — 60..99 (100 — в обработчике library) */
+    if (c.t === 'map') reportSync(room, Math.min(59, Math.round(pct * 0.6)));
+    else if (c.t === 'library') reportSync(room, 60 + Math.min(39, Math.round(pct * 0.4)));
+  }
+  if (st.got >= st.n) {
+    clearTimeout(st.timer);
+    rxChunks.delete(c.key);
+    try {
+      return JSON.parse(st.parts.join(''));
+    } catch {
+      if (!room.isHost) room.send('action', { t: 'needResend', key: c.key });
+      return null;
+    }
+  }
+  return null;
+}
+
 /* Автосейв партии хостом: чтобы при зависании/перезагрузке сессию можно было
    восстановить из «Загрузить игру». Пишем не чаще раза в 8 с и при смене хода. */
 /* Автосейв: 5 циклических слотов на комнату, перезаписываются по кругу на каждом
@@ -78,7 +147,7 @@ async function sendLibrary(room: Room, map: GameMap): Promise<void> {
     const buf = await getRomData(r.id);
     if (buf) blobs[r.id] = bufToB64(buf);
   }
-  room.send('library', { roms, saves, blobs });
+  sendBig(room, 'library', { roms, saves, blobs });
 }
 
 /* мини-шина для кадров трансляции */
@@ -101,7 +170,7 @@ export function dispatch(a: Action) {
     /* при восстановлении партии сначала рассылаем карту и библиотеку ромов,
        и только потом новое состояние — чтобы гости встретили фазу игры уже с картой */
     if (a.t === 'resume' && next.phase !== 'lobby') {
-      room.send('map', st.sessionMap);
+      sendBig(room, 'map', st.sessionMap);
       void sendLibrary(room, st.sessionMap);
     }
     room.send('state', next);
@@ -122,7 +191,29 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
     switch (m.t) {
       case 'map': {
         useApp.setState({ sessionMap: m.p as GameMap });
-        if (!room.isHost) reportSync(room, 40);
+        if (!room.isHost) reportSync(room, 60);
+        break;
+      }
+      /* кусочек большого пакета (карта/библиотека/ром) — собираем до полного */
+      case 'chunk': {
+        if (room.isHost) break; // хост и так автор — свои кусочки не применяем
+        const c = m.p as { key: string; t: string; i: number; n: number; part: string };
+        const payload = takeChunk(room, c);
+        if (payload === null) break;
+        if (c.t === 'map') {
+          onMsg({ mid: m.mid, from: m.from, t: 'map', p: payload });
+        } else if (c.t === 'library') {
+          onMsg({ mid: m.mid, from: m.from, t: 'library', p: payload });
+        } else if (c.t === 'romData') {
+          onMsg({ mid: m.mid, from: m.from, t: 'romData', p: payload });
+        }
+        break;
+      }
+      /* гость докачал набор с дыркой/битым куском — просим хоста перелить */
+      case 'needResend': {
+        if (!room.isHost) break;
+        const { key } = (m.p ?? {}) as { key?: string };
+        if (key) resendChunks(room, key);
         break;
       }
       /* синхронное перемешивание кубиков: все видят грани бросающего */
@@ -189,7 +280,7 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
           if (h.screen === 'lobby' && next.phase !== 'lobby') h.setScreen('game');
           // карту рассылаем только когда она реально нужна/меняется: новому игроку (hello)
           // или при создании задания на лету (setCellTask). Это резко снижает трафик.
-          if (act.t === 'hello' || act.t === 'setCellTask') room.send('map', h.sessionMap);
+          if (act.t === 'hello' || act.t === 'setCellTask') sendBig(room, 'map', h.sessionMap);
           // при подключении игрока хост заранее раздаёт ромы и сохранения карты,
           // чтобы в игре задания открывались у всех мгновенно
           if (act.t === 'hello') void sendLibrary(room, h.sessionMap);
@@ -233,7 +324,7 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
             const sv = await idbGet<unknown>('saves', saveId);
             saveState = (sv as { state?: unknown } | undefined)?.state ?? null;
           }
-          room.send('romData', {
+          sendBig(room, 'romData', {
             romId,
             saveId: saveId ?? null,
             romB64: buf ? bufToB64(buf) : null,
@@ -269,12 +360,12 @@ export function openRoom(code: string, isHost: boolean, initial: { session: Game
   const hubBase = useApp.getState().options.relayHub?.trim();
   room = hubBase
     ? createHubRoom(hubBase, code, isHost, app.selfId, onMsg, (info) => useApp.getState().setNetInfo(info))
-    : createRoom(code, isHost, app.selfId, onMsg, (info) => useApp.getState().setNetInfo(info), useApp.getState().options.relay);
+    : createRoom(code, isHost, app.selfId, onMsg, (info) => useApp.getState().setNetInfo(info), useApp.getState().options.relay, useApp.getState().options.turn);
 
   app.boot(room, isHost, initial.session, initial.map);
   if (initial.session && initial.session.phase !== 'lobby') useApp.getState().setScreen('game');
   if (isHost && initial.session && initial.map) {
-    room.send('map', initial.map);
+    sendBig(room, 'map', initial.map);
     room.send('state', initial.session);
   }
   return room;

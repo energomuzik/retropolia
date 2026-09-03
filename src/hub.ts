@@ -133,9 +133,10 @@ export function createHubRoom(
         outQueue.push(payload);
       }
     } else {
-      // сокет ещё не открыт (или переподключается) — сохраним, отправим при open
+      // сокет ещё не открыт (или переподключается) — сохраним, отправим при open.
+      // Лимит поднят под чанковые передачи: карта+библиотека — это сотни кусочков.
       outQueue.push(payload);
-      if (outQueue.length > 200) outQueue.splice(0, outQueue.length - 200);
+      if (outQueue.length > 3000) outQueue.splice(0, outQueue.length - 3000);
     }
     // хост — авторитет: применяет собственные действия локально
     if (isHost) onMsg(m);

@@ -231,6 +231,7 @@ export interface GameOptions {
   hideUnrevealed: boolean; // скрывать непосещённые ячейки (иконки бонусов/ловушек и картинки заданий)
   relay: string; // свой сигнальный сервер «IP:порт» (пусто = облако 0.peerjs.com)
   relayHub: string; // игровой хаб (WebSocket): весь трафик через сервер; приоритетнее PeerJS
+  turn: string; // TURN для жёсткого NAT: «user:pass@host:port», несколько — через запятую (пусто = только STUN)
 }
 
 export interface NetMsg {
@@ -240,7 +241,7 @@ export interface NetMsg {
   p?: unknown;
 }
 
-export const APP_VERSION = 3;
+export const APP_VERSION = 4; // 4: чанковая передача карты/ромов (старые клиенты отвергаются с внятной ошибкой)
 export const START_SEC = 60 * 60;
 export const START_TRIES = 60;
 export const SKIP_COST = 5;
