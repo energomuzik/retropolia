@@ -234,7 +234,7 @@ export default function QuizEditor() {
                     checked={!!draft.continueOnCorrect}
                     onChange={(v) => setDraft({ ...draft, continueOnCorrect: v })}
                     label="Верный ответ не завершает квиз"
-                    hint="Каждый ответивший верно сразу получает +5, квиз идёт, пока не ответят все"
+                    hint="Вкл: каждый верно ответивший получает +5, квиз идёт, пока не ответят все. Выкл: первый верный ответ сразу завершает квиз (+5 ему)"
                   />
                   <Toggle
                     checked={!!draft.noPenalty}

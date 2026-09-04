@@ -46,11 +46,15 @@ export const DEFAULT_SEGA_KEYS: Record<SegaAction, string> = {
   A: 'z', B: 'x', C: 'c', X: 'a', Y: 's', Z: 'd', START: 'enter',
 };
 
-/* Индексы RetroPad для ядра genesis_plus_gx:
-   Genesis A→B(0), B→Y(1), C→A(8), X→X(9), Y→L(10), Z→R(11), Start→3, крест→4..7 */
+/* Индексы RetroPad для ядра genesis_plus_gx. Дефолтная раскладка ЯДРА такова:
+   RetroPad B(0)=Genesis B, Y(1)=Genesis A, A(8)=Genesis C,
+   X(9)=Genesis Y, L(10)=Genesis X, R(11)=Genesis Z.
+   Поэтому чтобы в игре нажалась Genesis-кнопка A — шлём индекс 1 (Y),
+   Genesis B — индекс 0 (B), Genesis C — 8 (A), X — 10 (L), Y — 9 (X), Z — 11 (R).
+   Start→START(3), крест→4..7. Проверено на Road Rash 3 (газ B, тормоз A). */
 export const SEGA_TO_RETRO: Partial<Record<SegaAction, number>> = {
   UP: 4, DOWN: 5, LEFT: 6, RIGHT: 7,
-  A: 0, B: 1, C: 8, X: 9, Y: 10, Z: 11, START: 3,
+  A: 1, B: 0, C: 8, X: 10, Y: 9, Z: 11, START: 3,
 };
 
 export function segaEjsMap(keys: Record<SegaAction, string>): Record<number, string> {

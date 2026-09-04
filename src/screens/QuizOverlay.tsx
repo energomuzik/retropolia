@@ -234,22 +234,6 @@ export default function QuizOverlay() {
                           })}
                         </div>
                       )}
-                      {!isMystery && pendingList.length > 0 && (
-                        <div className="flex items-center justify-center gap-2 flex-wrap">
-                          <span className="tick-label text-faint">Ответили верно (ждём окно):</span>
-                          {pendingList.map((w) => (
-                            <span key={w.id} className="hud-chip pixel-corners px-2 py-0.5 font-pixel text-[8px] text-teal">
-                              ✔ {w.name}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      {!isMystery && pendingList.length > 0 && !q.resolved && (
-                        <p className="text-center text-[10.5px] text-sky leading-snug">
-                          Идёт окно сбора: бонус получит самый быстрый верный ответ, когда окно закроется
-                          (ответят все или выйдет время).
-                        </p>
-                      )}
                       {quiz.type === 'choice' ? (
                         <div className="grid sm:grid-cols-2 gap-2.5">
                           {(quiz.options ?? []).map((opt, i) => (
@@ -313,7 +297,7 @@ export default function QuizOverlay() {
 
               {q.result.correct ? (
                 <p className="text-[13px] text-paper mt-3">
-                  {q.result.targetName} — самый быстрый верный ответ:{' '}
+                  {q.result.targetName} — верный ответ:{' '}
                   <span className="text-teal">
                     {q.result.deltaMin !== 0 ? `+${q.result.deltaMin} минут` : `+${q.result.deltaTries} попыток`}
                   </span>

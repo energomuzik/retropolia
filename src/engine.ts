@@ -196,9 +196,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     nextTurn();
   };
 
-  // «Окно сбора ответов»: бонус отдаётся самому БЫСТРОМУ верному ответу по часам
-  // САМОГО игрока (sentAt), а не тому, чьё сообщение первым долетело до хоста.
-  // Это убирает нечестное преимущество хоста по пингу в гоночных квизах.
+  // Завершение квиза верным ответом: в обычном режиме и «коте в мешке»
+  // в pending ровно один ответ — его автор и получает бонус. sentAt оставлен
+  // как запасной критерий на случай нескольких ответов (старые сессии).
   const settleQuiz = (
     q: NonNullable<GameSession['quiz']>,
     pending: { id: string; name: string; sentAt: number }[],
@@ -220,7 +220,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         targetName: winner.name,
         reason: 'correct',
       };
-      log(`✔ ${winner.name}: самый быстрый верный ответ! +5 ${kind === 'time' ? 'мин' : 'попыток'}`);
+      log(`✔ ${winner.name}: верный ответ! +5 ${kind === 'time' ? 'мин' : 'попыток'}`);
     } else {
       q.resolved = true;
       q.result = { correct: false, deltaMin: 0, deltaTries: 0, targetName: '', reason: 'allWrong' };
@@ -778,12 +778,12 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         break;
       }
 
-      // ВЕРНЫЙ ОТВЕТ (обычный): бонус пока НЕ выдаём — фиксируем в окне и ждём остальных.
-      // Когда окно закроется, бонус получит самый быстрый по sentAt.
+      // ВЕРНЫЙ ОТВЕТ (обычный и «кот в мешке»): первый же верный ответ
+      // СРАЗУ завершает квиз — бонус получает ответивший. Остальные
+      // ответить уже не успевают (галочка «верный ответ не завершает квиз»
+      // выключена = обычный режим).
       if (!pending.some((x) => x.id === answerer.id)) pending.push({ id: answerer.id, name: answerer.name, sentAt });
-      log(`✔ ${answerer.name}: ответ принят — окно сбора открыто`);
-      if (qd.type === 'mystery') settleQuiz(q, pending);
-      else tryCloseWindow();
+      settleQuiz(q, pending);
       break;
     }
     case 'quizTimeout': {
