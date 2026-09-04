@@ -1,1 +1,1 @@
-export const VERSION = '0.9.0';
+export const VERSION = '0.9.1'; // 0.9.1: фикс SEGA-геймпада (одно нажатие = одна кнопка)

@@ -241,7 +241,7 @@ export interface NetMsg {
   p?: unknown;
 }
 
-export const APP_VERSION = 4; // 4: чанковая передача карты/ромов (старые клиенты отвергаются с внятной ошибкой)
+export const APP_VERSION = 5; // 5: SEGA-геймпад — глушение родных привязок ядра, один физ. индекс = одно действие, анти-залипание
 export const START_SEC = 60 * 60;
 export const START_TRIES = 60;
 export const SKIP_COST = 5;

@@ -118,6 +118,24 @@ export const DEFAULT_SEGA_GPAD: Record<SegaAction, number> = {
 const PREFS_KEY = 'retropolia-emu-prefs';
 export const PREFS_EVENT = 'retropolia-prefs-changed';
 
+/* Самовосстановление раскладки: ОДИН физический индекс = ОДНО действие.
+   Если в сохранённых настройках несколько действий висят на одной кнопке
+   (сбой/старые версии/случайный захват) — первое по порядку оставляет её
+   себе, остальные возвращаются на дефолт (если он свободен). Насос в
+   SegaBox дополнительно игнорирует дубликаты — двойная страховка. */
+function dedupePad<T extends string>(order: T[], pad: Record<T, number>, def: Record<T, number>): Record<T, number> {
+  const out = { ...pad };
+  const used = new Set<number>();
+  for (const a of order) {
+    let v = out[a];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) v = def[a];
+    if (used.has(v) && !used.has(def[a])) v = def[a];
+    out[a] = v;
+    used.add(v);
+  }
+  return out;
+}
+
 export function loadEmuPrefs(): EmuPrefs {
   const base: EmuPrefs = { keys: { ...DEFAULT_KEYS }, gpad: { ...DEFAULT_GPAD }, segaKeys: { ...DEFAULT_SEGA_KEYS }, segaPad: { ...DEFAULT_SEGA_GPAD }, gamepad: true, smoothing: false };
   try {
@@ -126,9 +144,9 @@ export function loadEmuPrefs(): EmuPrefs {
     const p = JSON.parse(raw) as Partial<EmuPrefs>;
     return {
       keys: { ...base.keys, ...(p.keys ?? {}) },
-      gpad: { ...base.gpad, ...(p.gpad ?? {}) },
+      gpad: dedupePad(PAD_ACTIONS, { ...base.gpad, ...(p.gpad ?? {}) }, DEFAULT_GPAD),
       segaKeys: { ...base.segaKeys, ...(p.segaKeys ?? {}) },
-      segaPad: { ...base.segaPad, ...(p.segaPad ?? {}) },
+      segaPad: dedupePad(SEGA_ACTIONS, { ...base.segaPad, ...(p.segaPad ?? {}) }, DEFAULT_SEGA_GPAD),
       gamepad: p.gamepad !== false,
       smoothing: !!p.smoothing,
     };
