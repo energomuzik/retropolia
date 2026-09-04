@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ACTION_LABELS, PAD_ACTIONS, keyLabel, listGamepads, loadEmuPrefs,
-  saveEmuPrefs, DEFAULT_KEYS, DEFAULT_GPAD, DEFAULT_SEGA_KEYS,
+  saveEmuPrefs, DEFAULT_KEYS, DEFAULT_GPAD, DEFAULT_SEGA_KEYS, DEFAULT_SEGA_GPAD,
   SEGA_ACTIONS, SEGA_ACTION_LABELS,
   type PadAction, type SegaAction, type EmuPrefs,
 } from './input';
@@ -49,17 +49,35 @@ export default function KeyBinder({ compact = false, mode = 'nes' }: { compact?:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capture, prefs, isSega]);
 
-  /* захват кнопки геймпада + список подключённых (только NES) */
+  /* захват кнопки геймпада (NES и SEGA) + список подключённых падов.
+     Ждём только НОВОЕ нажатие: на старте захвата запоминаем уже зажатые кнопки
+     (baseline) и держим паузу ~300 мс — иначе «будящая» кнопка падка (браузер
+     видит пад только после первого нажатия) или ещё не отпущенная кнопка
+     предыдущего назначения вписывались сами. Порог — value>0.5, чтобы
+     полузажатые триггеры не ловились. */
+  const gpCapRef = useRef<{ baseline: boolean[]; since: number } | null>(null);
+  useEffect(() => {
+    if (!capture || capture.kind !== 'gpad') { gpCapRef.current = null; return; }
+    const baseline: boolean[] = [];
+    for (const gp of listGamepads()) {
+      gp.buttons.forEach((b, i) => { if (b.pressed || b.value > 0.5) baseline[i] = true; });
+    }
+    gpCapRef.current = { baseline, since: Date.now() };
+  }, [capture]);
   useEffect(() => {
     const t = setInterval(() => {
       setPads(listGamepads());
       const c = captureRef.current;
-      if (!c || c.kind !== 'gpad') return;
+      const st = gpCapRef.current;
+      if (!c || c.kind !== 'gpad' || !st) return;
+      if (Date.now() - st.since < 300) return;
       for (const gp of listGamepads()) {
-        const bi = gp.buttons.findIndex((b) => b.pressed);
+        const bi = gp.buttons.findIndex((b, i) => !st.baseline[i] && (b.pressed || b.value > 0.5));
         if (bi >= 0) {
           setPrefs((prev) => {
-            const next = { ...prev, gpad: { ...prev.gpad, [c.action as PadAction]: bi } };
+            const next = isSega
+              ? { ...prev, segaPad: { ...prev.segaPad, [c.action as SegaAction]: bi } }
+              : { ...prev, gpad: { ...prev.gpad, [c.action as PadAction]: bi } };
             saveEmuPrefs(next);
             return next;
           });
@@ -70,10 +88,10 @@ export default function KeyBinder({ compact = false, mode = 'nes' }: { compact?:
       }
     }, 80);
     return () => clearInterval(t);
-  }, []);
+  }, [isSega]);
 
   const reset = () => {
-    update({ ...prefs, keys: { ...DEFAULT_KEYS }, gpad: { ...DEFAULT_GPAD }, segaKeys: { ...DEFAULT_SEGA_KEYS } });
+    update({ ...prefs, keys: { ...DEFAULT_KEYS }, gpad: { ...DEFAULT_GPAD }, segaKeys: { ...DEFAULT_SEGA_KEYS }, segaPad: { ...DEFAULT_SEGA_GPAD } });
     sfx.fail();
   };
 
@@ -91,20 +109,30 @@ export default function KeyBinder({ compact = false, mode = 'nes' }: { compact?:
           {SEGA_ACTIONS.map((a) => (
             <div key={a} className="border-2 border-edge bg-[rgba(0,0,0,0.25)] px-2.5 py-2">
               <div className="tick-label text-faint mb-1.5">{SEGA_ACTION_LABELS[a]}</div>
-              <button
-                onClick={() => { setCapture({ kind: 'key', action: a }); sfx.hover(); }}
-                className={btnCls(capture?.kind === 'key' && capture.action === a)}
-                title="Назначить клавишу"
-              >
-                {capture?.kind === 'key' && capture.action === a ? 'НАЖМИТЕ…' : label(prefs.segaKeys[a])}
-              </button>
+              <div className="flex flex-col gap-1.5">
+                <button
+                  onClick={() => { setCapture({ kind: 'key', action: a }); sfx.hover(); }}
+                  className={btnCls(capture?.kind === 'key' && capture.action === a)}
+                  title="Назначить клавишу"
+                >
+                  {capture?.kind === 'key' && capture.action === a ? 'НАЖМИТЕ…' : label(prefs.segaKeys[a])}
+                </button>
+                <button
+                  onClick={() => { setCapture({ kind: 'gpad', action: a }); sfx.hover(); }}
+                  className={btnCls(capture?.kind === 'gpad' && capture.action === a)}
+                  title="Назначить кнопку геймпада"
+                >
+                  {capture?.kind === 'gpad' && capture.action === a ? 'КНОПКУ…' : `ДЖОЙ ${prefs.segaPad[a]}`}
+                </button>
+              </div>
             </div>
           ))}
         </div>
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <p className="text-[11px] text-dim max-w-md leading-relaxed">
             Sega Genesis: нижний ряд <span className="text-paper">A B C</span>, верхний <span className="text-paper">X Y Z</span>, крестовина и Start.
-            Раскладка применяется сразу — ядро подхватывает её без перезапуска. Геймпад настраивается самим ядром (стандартная раскладка).
+            Верхняя кнопка — клавиатура, нижняя (ДЖОЙ) — геймпад. Крестовина падка дублируется левым стиком.
+            Раскладка применяется сразу — ядро подхватывает её без перезапуска.
           </p>
           <button
             onClick={reset}
@@ -145,7 +173,7 @@ export default function KeyBinder({ compact = false, mode = 'nes' }: { compact?:
       </div>
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <p className="text-[11px] text-dim max-w-md leading-relaxed">
-          Верхняя кнопка — клавиатура, нижняя — геймпад. {compact ? 'Раскладка применяется сразу, прямо во время задания.' : ''}
+          Верхняя кнопка — клавиатура, нижняя — геймпад. Крестовина падка дублируется левым стиком. {compact ? 'Раскладка применяется сразу, прямо во время задания.' : ''}
           {pads.length === 0
             ? ' Геймпад не обнаружен — подключите и нажмите на нём кнопку.'
             : ` Геймпадов подключено: ${pads.length}.`}

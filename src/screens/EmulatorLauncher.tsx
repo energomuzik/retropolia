@@ -256,8 +256,8 @@ export default function EmulatorLauncher() {
                     </>
                   ) : (
                     <>
-                      <div className="hud-chip pixel-corners px-2 py-1.5 sm:col-span-2">Управление — встроенное в ядро (клавиатура и геймпады)</div>
-                      <div className="hud-chip pixel-corners px-2 py-1.5 sm:col-span-2">Геймпад: крест/стик — движение, A/B — кнопки</div>
+                      <div className="hud-chip pixel-corners px-2 py-1.5 sm:col-span-2">Клавиатура и джойстик — кнопка «Управление»</div>
+                      <div className="hud-chip pixel-corners px-2 py-1.5 sm:col-span-2">Геймпад: крестовина/левый стик — движение</div>
                     </>
                   )}
                 </div>
