@@ -4,7 +4,8 @@ import { Field, GhostBtn, Ic, Panel, PxBtn, Stepper } from '../ui';
 import { CELL, drawBoard, fitView } from '../render';
 import { idbPut, uid } from '../db';
 import { cartridgeArt, cardArt, fileToDataUrl } from '../assets';
-import type { CardDef, CardEffect, EffectType, GameMap, TaskDef } from '../types';
+import type { CardDef, CardEffect, ChaosKind, EffectType, GameMap, TaskDef } from '../types';
+import { CHAOS_LIST, chaosLabel, mkChaosCard } from '../types';
 import { sfx } from '../sound';
 
 const EFFECTS: { key: EffectType; label: string; hasValue?: boolean; hasTarget?: boolean; unit?: string; def: number }[] = [
@@ -20,6 +21,7 @@ const EFFECTS: { key: EffectType; label: string; hasValue?: boolean; hasTarget?:
   { key: 'subMin', label: 'Минус N минут времени', hasValue: true, unit: 'мин', def: 5 },
   { key: 'addTries', label: 'Плюс N попыток', hasValue: true, unit: 'поп.', def: 5 },
   { key: 'subTries', label: 'Минус N попыток', hasValue: true, unit: 'поп.', def: 5 },
+  { key: 'toInventory', label: 'В инвентарь: игрок забирает карточку себе (применит или продаст позже)', def: 0 },
 ];
 
 export const effectLabel = (e: CardEffect): string => {
@@ -47,6 +49,7 @@ export default function TaskEditor() {
   const [fTitle, setFTitle] = useState('');
   const [fDesc, setFDesc] = useState('');
   const [fImg, setFImg] = useState('');
+  const [fChaos, setFChaos] = useState('');
   // форма карточки
   const [cName, setCName] = useState('');
   const [cDesc, setCDesc] = useState('');
@@ -80,6 +83,7 @@ export default function TaskEditor() {
     setFTitle(cell.task?.title ?? '');
     setFDesc(cell.task?.desc ?? '');
     setFImg(cell.task?.imageId ?? '');
+    setFChaos(cell.task?.chaos ?? '');
     setVLabel(cell.label ?? '');
     setVColor(cell.color ?? '');
     setVImg(cell.imageId ?? '');
@@ -171,6 +175,7 @@ export default function TaskEditor() {
       title: fTitle.trim() || romName(fRom),
       desc: fDesc.trim() || 'Пройдите фрагмент игры, как договорились игроки.',
       imageId,
+      chaos: (fChaos || undefined) as TaskDef['chaos'],
     };
     nextMap.cells[selCell].task = task;
     setMap(nextMap);
@@ -196,6 +201,17 @@ export default function TaskEditor() {
     setCName(''); setCDesc(''); setCImg('');
     sfx.card();
     toast(`Карточка «${card.name}» добавлена в колоду`, 'ok');
+  };
+
+  const toggleChaosCard = async (k: ChaosKind) => {
+    if (!map) return;
+    const nextMap = JSON.parse(JSON.stringify(map)) as GameMap;
+    const has = nextMap.bonusCards.some((c) => c.chaos === k);
+    if (has) nextMap.bonusCards = nextMap.bonusCards.filter((c) => c.chaos !== k);
+    else nextMap.bonusCards.push(mkChaosCard(k));
+    setMap(nextMap);
+    await persist(nextMap);
+    sfx.click();
   };
 
   const delCard = async (id: string) => {
@@ -466,6 +482,15 @@ export default function TaskEditor() {
                         {fImg && <img src={fImg} alt="" className="h-10 w-16 object-cover border-2 border-edge" />}
                       </div>
                     </Field>
+                    <Field label="Пакость для играющего (необязательно)">
+                      <select className="field-in w-full px-2 py-2 text-sm" value={fChaos} onChange={(e) => setFChaos(e.target.value)}>
+                        <option value="">— без пакости —</option>
+                        {CHAOS_LIST.map((c) => <option key={c.kind} value={c.kind}>{c.name}</option>)}
+                      </select>
+                    </Field>
+                    {fChaos && (
+                      <p className="text-[10.5px] text-magma leading-tight">😈 {chaosLabel(fChaos as ChaosKind)}: {CHAOS_LIST.find((c) => c.kind === fChaos)?.desc}</p>
+                    )}
                     <PxBtn className="w-full" onClick={() => void saveTask()}>{Ic.check(14)} Сохранить задание</PxBtn>
                     {cell.task && (
                       <div className="text-[11px] text-teal">Сейчас: «{cell.task.title}» · {romName(cell.task.romId)}</div>
@@ -493,6 +518,27 @@ export default function TaskEditor() {
                     ))}
                     {deck.length === 0 && (
                       <p className="text-[11px] text-dim">Колода пуста. Пока в ней нет карточек, ячейка «{cell.type === 'bonus' ? 'Бонус' : 'Ловушка'}» не сработает — а завершить карту с пустой колодой нельзя.</p>
+                    )}
+                    {cell.type === 'bonus' && (
+                      <div className="border-t-2 border-edge pt-3 space-y-2">
+                        <div className="tick-label text-magma">😈 Пакости — выпадают как бонус и кладутся в инвентарь игрока</div>
+                        <p className="text-[10.5px] text-dim leading-tight">Отметьте нужные — они попадут в колоду шансов. Выпавшую пакость игрок потратит на своё задание (усложнит его для следующего) или продаст.</p>
+                        <div className="grid gap-1 max-h-[240px] overflow-y-auto pr-1">
+                          {CHAOS_LIST.map((c) => {
+                            const inDeck = deck.some((x) => x.chaos === c.kind);
+                            return (
+                              <button
+                                key={c.kind}
+                                onClick={() => void toggleChaosCard(c.kind)}
+                                className={`text-left px-2.5 py-1.5 border-2 transition-colors cursor-pointer text-[11px] ${inDeck ? 'border-magma bg-magma/10 text-paper' : 'border-edge bg-panel text-dim hover:border-edge2'}`}
+                                title={c.desc}
+                              >
+                                <span className={inDeck ? 'text-magma' : 'text-faint'}>{inDeck ? '✔' : '＋'}</span> {c.name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
                     )}
                     <div className="border-t-2 border-edge pt-3 space-y-2.5">
                       <div className="tick-label text-gold">Новая карточка</div>

@@ -14,9 +14,9 @@ import {
 } from '../input';
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
-import { Field, GhostBtn, Ic, Modal, PxBtn } from '../ui';
-import { PLAYER_COLORS, SKIP_COST } from '../types';
-import type { TaskDef } from '../types';
+import { Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
+import { PLAYER_COLORS, SKIP_COST, CHAOS_LIST, chaosLabel } from '../types';
+import type { CardDef, ChaosKind, TaskDef } from '../types';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
 
@@ -47,6 +47,7 @@ export default function GameScreen() {
   const [rolling, setRolling] = useState(false);
   const lastRollRef = useRef(0);
   const [controlsOpen, setControlsOpen] = useState(false);
+  const [invOpen, setInvOpen] = useState(false);
 
   /* ---------- жеребьёвка: тряска кубика и автозапуск ---------- */
   const [roShake, setRoShake] = useState(false);
@@ -114,6 +115,9 @@ export default function GameScreen() {
   const myTurn = !!active && active.id === me;
   const ch = s?.challenge ?? null;
   const task = s && map && ch ? cellTaskOf(s, map, ch.cellIdx) : null;
+  const activeChaos = task?.chaos ? [task.chaos] : [];
+  const invCount = mePlayer?.inventory?.length ?? 0;
+  const incomingTrades = (s?.trades ?? []).filter((o) => o.to === me && (o.status === 'pending' || o.status === 'countered'));
   const taskRom = task ? st.roms.find((r) => r.id === task.romId) : undefined;
   const isSega = !!taskRom && taskRom.ext !== 'nes';
 
@@ -570,6 +574,9 @@ export default function GameScreen() {
         </div>
         <div className="flex items-center gap-1.5 ml-auto">
           {myTurn && streaming && <span className="font-pixel text-[7px] text-coral blink-hard">LIVE</span>}
+          <GhostBtn small onClick={() => { setInvOpen(true); sfx.click(); }}>
+            {Ic.grid(12)} Инвентарь{invCount > 0 ? ` · ${invCount}` : ''}{incomingTrades.length > 0 ? ' 💼' : ''}
+          </GhostBtn>
           <GhostBtn small onClick={() => { setPeekMap(false); setWorldZoom(1); worldPanRef.current = { x: 0, y: 0 }; setViewMode((m) => (m === 'world' ? 'follow' : 'world')); }}>
             {Ic.map(12)} {viewMode === 'world' ? 'К игроку' : 'Карта мира'}
           </GhostBtn>
@@ -985,6 +992,14 @@ export default function GameScreen() {
                         ГОЛОСА: {ch.approvals.length}/{votesNeed}
                       </span>
                     )}
+                    {task?.chaos && (
+                      <span
+                        className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[9px] text-magma"
+                        title={CHAOS_LIST.find((c) => c.kind === task.chaos)?.desc}
+                      >
+                        😈 {chaosLabel(task.chaos)}
+                      </span>
+                    )}
                   </div>
 
                   <div className="grid lg:grid-cols-[1fr_190px] gap-3 items-start">
@@ -1008,6 +1023,7 @@ export default function GameScreen() {
                             ext={segExt}
                             core={isSega ? undefined : 'nes'}
                             remapSpec={remapSpec}
+                            chaos={activeChaos}
                             initialState={(saveState as string | null) ?? null}
                             paused={ch.status === 'ready' || ch.status === 'voting' || ch.paused}
                             pausedHint={ch.status === 'ready' ? 'Нажмите «Запуск задания»' : undefined}
@@ -1105,6 +1121,9 @@ export default function GameScreen() {
                       )}
                       {!myTurn && others.some((p) => p.id === me) && (
                         <>
+                          <GhostBtn className="w-full" onClick={() => { setInvOpen(true); sfx.click(); }}>
+                            {Ic.grid(13)} Инвентарь{invCount > 0 ? ` · ${invCount}` : ''}{incomingTrades.length > 0 ? ' 💼' : ''}
+                          </GhostBtn>
                           {ch.status === 'voting' ? (
                             <>
                               {!ch.approvals.includes(me) && (
@@ -1146,6 +1165,9 @@ export default function GameScreen() {
           <div className="text-center text-faint tick-label pt-2">Эмулятор поставлен на паузу — вернитесь и нажмите «Продолжить»</div>
         </div>
       )}
+
+      {/* ---------- инвентарь карточек (виден и зрителям) ---------- */}
+      {invOpen && <InventoryModal onClose={() => setInvOpen(false)} />}
 
       {/* ---------- наш редактор управления (клавиатура + геймпад) ---------- */}
       {controlsOpen && (
@@ -1235,12 +1257,15 @@ function DieFace({ v, dropping, delay, rolling, blank, frame }: { v: number; dro
 /* ---------- шаблон нового задания ---------- */
 
 function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => void }) {
-  const { roms, saves } = useApp();
+  const { roms, saves, session, selfId } = useApp();
   const [romId, setRomId] = useState('');
   const [saveId, setSaveId] = useState('');
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
+  const [chaosCardId, setChaosCardId] = useState('');
   const romSaves = saves.filter((x) => x.romId === romId);
+  const mePlayer = session?.players.find((p) => p.id === selfId);
+  const chaosCards = (mePlayer?.inventory ?? []).filter((c) => !!c.chaos);
 
   const apply = () => {
     const romIsNes = roms.find((r) => r.id === romId)?.ext === 'nes';
@@ -1253,7 +1278,7 @@ function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => v
       title: title.trim() || (roms.find((r) => r.id === romId)?.name ?? 'Задание'),
       desc: desc.trim() || 'Задание, придуманное игроком на этой сессии.',
     };
-    dispatch({ t: 'setCellTask', id: useApp.getState().selfId, cellIdx, task });
+    dispatch({ t: 'setCellTask', id: useApp.getState().selfId, cellIdx, task, cardId: chaosCardId || undefined });
     sfx.success();
     onClose();
   };
@@ -1285,6 +1310,31 @@ function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => v
           <Field label="Описание">
             <textarea className="field-in w-full px-3 py-2 text-sm h-16 resize-none" value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Пройти босса с одной полоской здоровья…" />
           </Field>
+          <Field label="Пакость из инвентаря (необязательно, максимум одна)">
+            {chaosCards.length === 0 ? (
+              <p className="text-[11px] text-dim">В инвентаре нет пакостных карточек — они выпадают на ячейках-шансах.</p>
+            ) : (
+              <div className="grid gap-1 max-h-[150px] overflow-y-auto pr-1">
+                <button
+                  onClick={() => setChaosCardId('')}
+                  className={`text-left px-2.5 py-1.5 border-2 text-[11px] cursor-pointer transition-colors ${chaosCardId === '' ? 'border-edge2 text-paper' : 'border-edge text-dim hover:border-edge2'}`}
+                >
+                  {chaosCardId === '' ? '●' : '○'} Без пакости
+                </button>
+                {chaosCards.map((c) => (
+                  <button
+                    key={c.id}
+                    onClick={() => { setChaosCardId(c.id); sfx.hover(); }}
+                    className={`text-left px-2.5 py-1.5 border-2 text-[11px] cursor-pointer transition-colors ${chaosCardId === c.id ? 'border-magma bg-magma/10 text-paper' : 'border-edge text-dim hover:border-edge2'}`}
+                    title={c.desc}
+                  >
+                    {chaosCardId === c.id ? '●' : '○'} 😈 {c.name}
+                  </button>
+                ))}
+              </div>
+            )}
+            {chaosCardId && <p className="text-[10.5px] text-magma mt-1">Карточка будет потрачена — следующий играющий здесь получит пакость.</p>}
+          </Field>
           <div className="flex justify-end gap-2 pt-1">
             <GhostBtn onClick={onClose}>Отмена</GhostBtn>
             <PxBtn color="magma" onClick={apply}>{Ic.check(14)} Заменить задание</PxBtn>
@@ -1296,3 +1346,234 @@ function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => v
 }
 
 void idbGet;
+
+/* ---------- инвентарь карточек: просмотр, применение, продажа/покупка ---------- */
+
+const fmtPrice = (m: number, t: number): string =>
+  m > 0 && t > 0 ? `${m} мин + ${t} поп.` : m > 0 ? `${m} мин` : `${t} поп.`;
+
+function InventoryModal({ onClose }: { onClose: () => void }) {
+  const st = useApp();
+  const s = st.session;
+  const me = st.selfId;
+  const [sellCardId, setSellCardId] = useState('');
+  const [sellTo, setSellTo] = useState('');
+  const [sellMin, setSellMin] = useState(5);
+  const [sellTries, setSellTries] = useState(0);
+  const [counterOfferId, setCounterOfferId] = useState('');
+  const [cMin, setCMin] = useState(3);
+  const [cTries, setCTries] = useState(3);
+  if (!s) return null;
+  const mePlayer = s.players.find((p) => p.id === me);
+  const active = s.players[s.turn % s.players.length];
+  const myTurn = !!active && active.id === me;
+  const inv = mePlayer?.inventory ?? [];
+  const trades = s.trades ?? [];
+  const isOpen = (o: { status: string }) => o.status === 'pending' || o.status === 'countered';
+  const reservedIds = new Set(trades.filter(isOpen).map((o) => o.cardId));
+  const busy = !!(s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost);
+  const findCard = (id: string): { card: CardDef; ownerName: string } | null => {
+    for (const p of s.players) {
+      const c = (p.inventory ?? []).find((x) => x.id === id);
+      if (c) return { card: c, ownerName: p.name };
+    }
+    return null;
+  };
+  const sellTargets = s.players.filter((p) => p.alive && p.id !== me && p.id !== active?.id);
+  const incoming = trades.filter((o) => o.to === me && isOpen(o));
+  const outgoing = trades.filter((o) => o.from === me && isOpen(o));
+  const sellCard = inv.find((c) => c.id === sellCardId);
+
+  return (
+    <div className="fixed inset-0 z-[96] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-[rgba(4,6,14,0.88)]" onClick={onClose} />
+      <div className="relative pixel-panel pixel-corners pop-in w-full max-w-2xl max-h-[92vh] overflow-y-auto p-5">
+        <div className="flex items-center gap-2 mb-3 flex-wrap">
+          <span className="text-teal">{Ic.grid(18)}</span>
+          <span className="font-display uppercase tracking-wider text-paper text-sm">Инвентарь</span>
+          <span className="tick-label text-gold">{fmtClock(mePlayer?.secLeft ?? 0)} · {mePlayer?.triesLeft ?? 0} поп.</span>
+          <GhostBtn small className="ml-auto" onClick={onClose}>{Ic.cross(12)} Закрыть</GhostBtn>
+        </div>
+
+        {/* входящие предложения */}
+        {incoming.length > 0 && (
+          <div className="space-y-2 mb-4">
+            <div className="tick-label text-gold">💼 Предложения вам</div>
+            {incoming.map((o) => {
+              const info = findCard(o.cardId);
+              const afford = (mePlayer?.secLeft ?? 0) >= o.priceMin * 60 && (mePlayer?.triesLeft ?? 0) >= o.priceTries;
+              const counterSent = o.status === 'countered';
+              return (
+                <div key={o.id} className="border-2 border-gold bg-gold/10 px-3 py-2.5 space-y-2">
+                  <div className="text-[12px] text-paper">
+                    <span className="font-display uppercase">{info?.ownerName ?? 'Игрок'}</span> предлагает «{info?.card.name ?? '—'}» за {fmtPrice(o.priceMin, o.priceTries)}
+                  </div>
+                  {counterSent ? (
+                    <>
+                      <div className="text-[11px] text-dim">Вы предложили встречную цену: {fmtPrice(o.counterMin ?? 0, o.counterTries ?? 0)} — ждём ответа владельца…</div>
+                      <GhostBtn small onClick={() => dispatch({ t: 'tradeReply', id: me, offerId: o.id, kind: 'decline' })}>Отменить встречное</GhostBtn>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex gap-2 flex-wrap">
+                        <PxBtn
+                          small
+                          color="teal"
+                          disabled={!afford}
+                          title={!afford ? 'Не хватает минут/попыток на оплату' : undefined}
+                          onClick={() => dispatch({ t: 'tradeReply', id: me, offerId: o.id, kind: 'accept' })}
+                        >
+                          {Ic.check(12)} Купить
+                        </PxBtn>
+                        <GhostBtn small onClick={() => { setCounterOfferId(counterOfferId === o.id ? '' : o.id); setCMin(Math.max(1, o.priceMin)); setCTries(o.priceTries); sfx.click(); }}>
+                          Своя цена
+                        </GhostBtn>
+                        <GhostBtn small onClick={() => dispatch({ t: 'tradeReply', id: me, offerId: o.id, kind: 'decline' })}>Отказаться</GhostBtn>
+                      </div>
+                      {counterOfferId === o.id && (
+                        <div className="border-2 border-edge p-2 space-y-2 bg-[rgba(0,0,0,0.25)]">
+                          <div className="flex items-center justify-between gap-3 flex-wrap">
+                            <span className="text-[11px] text-dim">Минуты</span>
+                            <Stepper value={cMin} onChange={setCMin} min={0} max={90} suffix=" мин" />
+                          </div>
+                          <div className="flex items-center justify-between gap-3 flex-wrap">
+                            <span className="text-[11px] text-dim">Попытки</span>
+                            <Stepper value={cTries} onChange={setCTries} min={0} max={90} suffix=" поп." />
+                          </div>
+                          <PxBtn
+                            small
+                            color="gold"
+                            disabled={cMin + cTries <= 0}
+                            onClick={() => { dispatch({ t: 'tradeReply', id: me, offerId: o.id, kind: 'counter', counterMin: cMin, counterTries: cTries }); setCounterOfferId(''); }}
+                          >
+                            Отправить встречное предложение
+                          </PxBtn>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* исходящие предложения */}
+        {outgoing.length > 0 && (
+          <div className="space-y-2 mb-4">
+            <div className="tick-label text-sky">📤 Ваши предложения</div>
+            {outgoing.map((o) => {
+              const buyer = s.players.find((p) => p.id === o.to);
+              return (
+                <div key={o.id} className="border-2 border-edge bg-panel px-3 py-2.5 space-y-1.5">
+                  {o.status === 'pending' ? (
+                    <div className="text-[12px] text-paper">«{findCard(o.cardId)?.card.name ?? '—'}» → {buyer?.name ?? '—'}: ждём ответа…</div>
+                  ) : (
+                    <div className="text-[12px] text-paper">
+                      {buyer?.name ?? '—'} предлагает встречную цену: {fmtPrice(o.counterMin ?? 0, o.counterTries ?? 0)}
+                    </div>
+                  )}
+                  <div className="flex gap-2 flex-wrap">
+                    {o.status === 'countered' && (
+                      <PxBtn small color="teal" onClick={() => dispatch({ t: 'tradeResolve', id: me, offerId: o.id, accept: true })}>
+                        {Ic.check(12)} Согласиться на встречную
+                      </PxBtn>
+                    )}
+                    <GhostBtn small onClick={() => dispatch({ t: 'tradeResolve', id: me, offerId: o.id, accept: false })}>
+                      {o.status === 'countered' ? 'Отказаться' : 'Отменить предложение'}
+                    </GhostBtn>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* форма продажи */}
+        {sellCard && (
+          <div className="border-2 border-gold/60 bg-gold/5 p-3 mb-4 space-y-2">
+            <div className="font-display text-[12px] uppercase text-gold">Продажа: {sellCard.name}</div>
+            <Field label="Покупатель (играющего сейчас предложить нельзя)">
+              <select className="field-in w-full px-2 py-2 text-sm" value={sellTo} onChange={(e) => setSellTo(e.target.value)}>
+                <option value="">— выбрать игрока —</option>
+                {sellTargets.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name} · {fmtClock(p.secLeft)} · {p.triesLeft} поп.</option>
+                ))}
+              </select>
+            </Field>
+            {sellTargets.length === 0 && <p className="text-[10.5px] text-magma">Живых покупателей нет (или все, кроме играющего, выбыли).</p>}
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <span className="text-[11px] text-dim">Цена: минуты</span>
+              <Stepper value={sellMin} onChange={setSellMin} min={0} max={90} suffix=" мин" />
+            </div>
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <span className="text-[11px] text-dim">Цена: попытки</span>
+              <Stepper value={sellTries} onChange={setSellTries} min={0} max={90} suffix=" поп." />
+            </div>
+            <div className="flex gap-2">
+              <PxBtn
+                color="gold"
+                disabled={!sellTo || sellMin + sellTries <= 0}
+                onClick={() => {
+                  dispatch({ t: 'tradeOffer', id: me, cardId: sellCard.id, to: sellTo, priceMin: sellMin, priceTries: sellTries });
+                  setSellCardId('');
+                  setSellTo('');
+                }}
+              >
+                {Ic.check(14)} Предложить за {fmtPrice(sellMin, sellTries)}
+              </PxBtn>
+              <GhostBtn onClick={() => setSellCardId('')}>Отмена</GhostBtn>
+            </div>
+          </div>
+        )}
+
+        {/* мои карточки */}
+        <div className="space-y-2">
+          <div className="tick-label text-faint">Мои карточки · {inv.length}</div>
+          {inv.map((c) => (
+            <div key={c.id} className={`border-2 px-3 py-2.5 ${c.chaos ? 'border-magma/50 bg-magma/5' : 'border-edge bg-panel'}`}>
+              <div className="flex items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="font-display text-[12px] uppercase text-paper truncate">{c.name}</div>
+                  <div className="text-[10.5px] text-dim leading-tight mt-0.5">{c.desc}</div>
+                  {c.chaos ? (
+                    <span className="inline-block mt-1 font-pixel text-[8px] px-1.5 py-0.5 bg-magma/20 text-magma">😈 ПАКОСТЬ · клеится к своему заданию</span>
+                  ) : (
+                    <span className="inline-block mt-1 font-pixel text-[8px] px-1.5 py-0.5 bg-teal/15 text-teal">ЭФФЕКТ · {effectLabel(c.effect)}</span>
+                  )}
+                </div>
+                <div className="flex flex-col gap-1.5 shrink-0">
+                  {!c.chaos && (
+                    <PxBtn
+                      small
+                      color="teal"
+                      disabled={!myTurn || busy || reservedIds.has(c.id)}
+                      title={!myTurn || busy ? 'Применять — только в свой ход до броска, когда стол пуст' : undefined}
+                      onClick={() => { dispatch({ t: 'useCard', id: me, cardId: c.id }); sfx.card(); }}
+                    >
+                      {Ic.play(12)} Применить
+                    </PxBtn>
+                  )}
+                  <GhostBtn
+                    small
+                    disabled={reservedIds.has(c.id)}
+                    title={reservedIds.has(c.id) ? 'Карточка уже участвует в сделке' : undefined}
+                    onClick={() => { setSellCardId(c.id); setSellTo(''); setSellMin(5); setSellTries(0); sfx.click(); }}
+                  >
+                    Продать
+                  </GhostBtn>
+                </div>
+              </div>
+            </div>
+          ))}
+          {inv.length === 0 && (
+            <div className="text-center py-6 text-dim text-[12px]">
+              Инвентарь пуст. Пакости выпадают на ячейках-шансах (бонусах) — если создатель карты их добавил,
+              а обычные карточки «в инвентарь» — на бонусах и ловушках. Карточку можно применить или продать сопернику.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

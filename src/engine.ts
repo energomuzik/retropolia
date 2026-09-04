@@ -1,4 +1,4 @@
-import type { CardDef, GameMap, GameOptions, GameSession, PlayerState, TaskDef } from './types';
+import type { CardDef, GameMap, GameOptions, GameSession, PlayerState, TaskDef, TradeOffer } from './types';
 import { APP_VERSION, SKIP_COST, START_SEC, START_TRIES } from './types';
 
 export type Action =
@@ -21,7 +21,11 @@ export type Action =
   | { t: 'violate'; id: string }
   | { t: 'skip'; id: string; instant: boolean; spentMs: number; loads: number; resource?: 'time' | 'tries' }
   | { t: 'postChoice'; id: string; choice: 'continue' | 'end' }
-  | { t: 'setCellTask'; id: string; cellIdx: number; task: TaskDef }
+  | { t: 'setCellTask'; id: string; cellIdx: number; task: TaskDef; cardId?: string }
+  | { t: 'useCard'; id: string; cardId: string }
+  | { t: 'tradeOffer'; id: string; cardId: string; to: string; priceMin: number; priceTries: number }
+  | { t: 'tradeReply'; id: string; offerId: string; kind: 'accept' | 'counter' | 'decline'; counterMin?: number; counterTries?: number }
+  | { t: 'tradeResolve'; id: string; offerId: string; accept: boolean }
   | { t: 'quizAnswer'; id: string; answer: number | string | null; sentAt?: number }
   | { t: 'quizTarget'; id: string; target: string }
   | { t: 'quizTimeout' }
@@ -35,6 +39,7 @@ function mkPlayer(id: string, name: string, color: number, isHost: boolean): Pla
   return {
     id, name: name.slice(0, 14).toUpperCase() || 'ИГРОК', color, ready: isHost, isHost,
     secLeft: START_SEC, triesLeft: START_TRIES, pos: 0, alive: true, skipTurns: 0, extraTurn: false,
+    inventory: [],
   };
 }
 
@@ -44,7 +49,7 @@ export function newSession(code: string, mapId: string, hostId: string, hostName
     players: [mkPlayer(hostId, hostName, 0, true)],
     rollOffIdx: 0, rollOffValues: {}, rollOffReady: [], turn: 0,
     dice: null, moving: null, challenge: null, pendingCard: null, quiz: null, notice: null,
-    captured: {}, sessionTasks: {}, awaitPost: false, revealed: [],
+    captured: {}, sessionTasks: {}, trades: [], awaitPost: false, revealed: [],
     winner: null, log: [`Комната ${code} открыта. Ждём игроков…`], startedAt: Date.now(),
   };
 }
@@ -117,6 +122,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     base.rollOffWinner = base.rollOffWinner ?? null;
     base.turnNo = base.turnNo ?? 1;
     base.winner = base.winner ?? null;
+    base.trades = Array.isArray(base.trades) ? base.trades : [];
+    for (const pl of base.players) if (!Array.isArray(pl.inventory)) pl.inventory = [];
     base.log = [`♻️ Партия восстановлена из сохранения (игроков: ${base.players.length})`, ...(Array.isArray(base.log) ? base.log : [])].slice(0, 50);
     return base;
   }
@@ -134,6 +141,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   if (!s.rollOffValues) s.rollOffValues = {};
   if (s.rollOffWinner === undefined) s.rollOffWinner = null;
   if (!Array.isArray(s.log)) s.log = [];
+  if (!Array.isArray(s.trades)) s.trades = [];
+  for (const pl of s.players) if (!Array.isArray(pl.inventory)) pl.inventory = [];
   const log: Log = (t) => { s.log = [t, ...s.log].slice(0, 50); };
   const alive = () => s.players.filter((p) => p.alive);
   const aid = 'id' in a ? (a as { id: string }).id : '';
@@ -396,7 +405,43 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       case 'subMin': p.secLeft = Math.max(0, p.secLeft - e.value * 60); log(`${p.name}: −${e.value} мин`); break;
       case 'addTries': p.triesLeft += e.value; log(`${p.name}: +${e.value} попыток`); break;
       case 'subTries': p.triesLeft = Math.max(0, p.triesLeft - e.value); log(`${p.name}: −${e.value} попыток`); break;
+      case 'toInventory': {
+        // карточка не срабатывает сразу — игрок забирает её в инвентарь:
+        // пакость клеится к своему будущему заданию, обычная — применяется в удобный момент
+        (p.inventory ?? (p.inventory = [])).push(card);
+        log(`🎒 ${p.name} забирает карточку «${card.name}» в инвентарь`);
+        break;
+      }
     }
+  };
+
+  /* ---------- торги карточками ---------- */
+  const priceStr = (m: number, t: number): string =>
+    m > 0 && t > 0 ? `${m} мин + ${t} поп.` : m > 0 ? `${m} мин` : `${t} поп.`;
+  const openTradeOfCard = (cardId: string): TradeOffer | undefined =>
+    (s.trades ?? []).find((x) => (x.status === 'pending' || x.status === 'countered') && x.cardId === cardId);
+  const execTrade = (o: TradeOffer, min: number, tries: number): boolean => {
+    const seller = s.players.find((x) => x.id === o.from);
+    const buyer = s.players.find((x) => x.id === o.to);
+    if (!seller || !buyer || !seller.alive || !buyer.alive) { o.status = 'declined'; return false; }
+    if (buyer.secLeft < min * 60 || buyer.triesLeft < tries) {
+      o.status = 'declined';
+      log(`✖ Сделка сорвалась: у ${buyer.name} не хватает ресурсов на оплату`);
+      return false;
+    }
+    const inv = seller.inventory ?? (seller.inventory = []);
+    const ci = inv.findIndex((c) => c.id === o.cardId);
+    if (ci < 0) { o.status = 'declined'; return false; }
+    const [card] = inv.splice(ci, 1);
+    (buyer.inventory ?? (buyer.inventory = [])).push(card);
+    buyer.secLeft -= min * 60;
+    buyer.triesLeft -= tries;
+    seller.secLeft += min * 60;
+    seller.triesLeft += tries;
+    o.status = 'done';
+    log(`🤝 ${buyer.name} покупает «${card.name}» у ${seller.name} за ${priceStr(min, tries)}`);
+    checkElim();
+    return true;
   };
 
   switch (a.t) {
@@ -676,10 +721,99 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     case 'setCellTask': {
       const p = current();
       if (!s.awaitPost || p.id !== a.id) break;
-      s.sessionTasks[a.cellIdx] = a.task;
+      const task: TaskDef = { ...a.task };
+      // пакость из инвентаря: тратим карточку — следующий играющий на этой ячейке получит искажения
+      if (a.cardId) {
+        const inv = p.inventory ?? (p.inventory = []);
+        const ci = inv.findIndex((c) => c.id === a.cardId);
+        if (ci >= 0 && inv[ci].chaos && !(s.trades ?? []).some((x) => (x.status === 'pending' || x.status === 'countered') && x.cardId === a.cardId)) {
+          const [card] = inv.splice(ci, 1);
+          task.chaos = card.chaos;
+          log(`😈 ${p.name} добавляет пакость «${card.name}» к заданию на ячейке №${a.cellIdx + 1}`);
+        }
+      }
+      s.sessionTasks[a.cellIdx] = task;
       s.awaitPost = false;
       log(`🛠 ${p.name} создаёт новое задание на ячейке №${a.cellIdx + 1} (доп. ход сгорает)`);
       endTurnNow();
+      break;
+    }
+    case 'useCard': {
+      // применить обычную карточку из инвентаря на себя: только в свой ход,
+      // когда на столе пусто (до броска кубиков)
+      if (s.phase !== 'playing') break;
+      const p = actor();
+      if (!p || !p.alive || p.id !== current().id) break;
+      if (s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost) break;
+      const inv = p.inventory ?? (p.inventory = []);
+      const ci = inv.findIndex((c) => c.id === a.cardId);
+      if (ci < 0) break;
+      const card = inv[ci];
+      if (card.chaos) break; // пакости не «применяют» — они клеятся к своему заданию или продаются
+      if (openTradeOfCard(card.id)) { log('✖ Карточка зарезервирована сделкой'); break; }
+      inv.splice(ci, 1);
+      log(`🎴 ${p.name} применяет карточку «${card.name}»`);
+      applyCard(p, card);
+      checkElim();
+      break;
+    }
+    case 'tradeOffer': {
+      if (s.phase !== 'playing') break;
+      const p = actor();
+      if (!p || !p.alive) break;
+      const buyer = s.players.find((x) => x.id === (a as { to?: string }).to && x.alive);
+      if (!buyer || buyer.id === p.id) break;
+      if (buyer.id === current().id) { log(`✖ Нельзя предлагать сделку ${buyer.name} — он сейчас играет`); break; }
+      const inv = p.inventory ?? (p.inventory = []);
+      const card = inv.find((c) => c.id === (a as { cardId?: string }).cardId);
+      if (!card) break;
+      if (openTradeOfCard(card.id)) { log('✖ Эта карточка уже участвует в сделке'); break; }
+      const min = Math.max(0, Math.min(90, Math.floor((a as { priceMin?: number }).priceMin ?? 0)));
+      const tries = Math.max(0, Math.min(90, Math.floor((a as { priceTries?: number }).priceTries ?? 0)));
+      if (min + tries <= 0) { log('✖ Цена не может быть нулевой'); break; }
+      const offer: TradeOffer = {
+        id: 'tr' + Math.random().toString(36).slice(2, 8),
+        from: p.id, to: buyer.id, cardId: card.id,
+        priceMin: min, priceTries: tries, status: 'pending', ts: Date.now(),
+      };
+      s.trades = [...(s.trades ?? []).slice(-19), offer];
+      log(`💼 ${p.name} предлагает ${buyer.name}: «${card.name}» за ${priceStr(min, tries)}`);
+      break;
+    }
+    case 'tradeReply': {
+      if (s.phase !== 'playing') break;
+      const o = (s.trades ?? []).find((x) => x.id === (a as { offerId?: string }).offerId);
+      if (!o || o.status !== 'pending' || o.to !== aid) break;
+      const kind = (a as { kind?: string }).kind;
+      if (kind === 'decline') {
+        o.status = 'declined';
+        log(`${actor()?.name ?? 'Покупатель'} отказывается от сделки`);
+        break;
+      }
+      if (kind === 'accept') { execTrade(o, o.priceMin, o.priceTries); break; }
+      if (kind === 'counter') {
+        const cm = Math.max(0, Math.min(90, Math.floor((a as { counterMin?: number }).counterMin ?? 0)));
+        const ct = Math.max(0, Math.min(90, Math.floor((a as { counterTries?: number }).counterTries ?? 0)));
+        if (cm + ct <= 0) break;
+        o.counterMin = cm;
+        o.counterTries = ct;
+        o.status = 'countered';
+        log(`${actor()?.name ?? 'Покупатель'} предлагает встречную цену: ${priceStr(cm, ct)}`);
+      }
+      break;
+    }
+    case 'tradeResolve': {
+      if (s.phase !== 'playing') break;
+      const o = (s.trades ?? []).find((x) => x.id === (a as { offerId?: string }).offerId);
+      if (!o || o.from !== aid) break;
+      if (!(a as { accept?: boolean }).accept) {
+        if (o.status === 'pending' || o.status === 'countered') {
+          o.status = 'declined';
+          log(`${actor()?.name ?? 'Продавец'} отзывает предложение`);
+        }
+        break;
+      }
+      if (o.status === 'countered') execTrade(o, o.counterMin ?? 0, o.counterTries ?? 0);
       break;
     }
     case 'quizTarget': {

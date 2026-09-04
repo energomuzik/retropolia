@@ -13,6 +13,7 @@ export interface TaskDef {
   title: string;
   desc: string;
   imageId?: string; // ключ в blobs
+  chaos?: ChaosKind; // пакость: искажение эмулятора, пока задание активно (1 максимум)
 }
 
 export interface CellDef {
@@ -75,7 +76,8 @@ export type EffectType =
   | 'playerExtra' // доп. ход игрока target
   | 'playerSkip' // пропуск хода игрока target
   | 'addMin' | 'subMin' // минуты текущему
-  | 'addTries' | 'subTries'; // попытки текущему
+  | 'addTries' | 'subTries' // попытки текущему
+  | 'toInventory'; // карточка НЕ срабатывает сразу — ложится в инвентарь игрока
 
 export interface CardEffect {
   type: EffectType;
@@ -90,6 +92,71 @@ export interface CardDef {
   desc: string;
   imageId?: string;
   effect: CardEffect;
+  chaos?: ChaosKind; // у пакостной карточки: что именно искажать в эмуляторе
+}
+
+/* ---------- Пакости: искажения эмулятора для заданий ---------- */
+
+export type ChaosKind =
+  | 'grayscale' | 'flip' | 'mirror' | 'blur' | 'invertPad'
+  | 'curtainTop10' | 'curtainTop20' | 'curtainTop50'
+  | 'curtainBottom10' | 'curtainBottom20' | 'curtainBottom50'
+  | 'curtainLeft10' | 'curtainLeft20' | 'curtainLeft50'
+  | 'curtainRight10' | 'curtainRight20' | 'curtainRight50'
+  | 'pal50' | 'speed150' | 'speed200' | 'speed300' | 'lagButtons';
+
+export const CHAOS_LIST: { kind: ChaosKind; name: string; desc: string }[] = [
+  { kind: 'grayscale', name: 'Чёрно-белый экран', desc: 'Картинка теряет цвета — квест «а где же красная платформа?»' },
+  { kind: 'flip', name: 'Вверх ногами', desc: 'Экран переворачивается на 180° — играйте, наклонив голову' },
+  { kind: 'mirror', name: 'Зеркало', desc: 'Картинка отражается по горизонтали' },
+  { kind: 'blur', name: 'Туман', desc: 'Картинка замылена — играйте по очертаниям и памяти' },
+  { kind: 'invertPad', name: 'Реверс крестовины', desc: 'Влево едет вправо, вверх едет вниз' },
+  { kind: 'curtainTop10', name: 'Шторка сверху 10%', desc: 'Чёрная шторка закрывает верх экрана на 10%' },
+  { kind: 'curtainTop20', name: 'Шторка сверху 20%', desc: 'Чёрная шторка закрывает верх экрана на 20%' },
+  { kind: 'curtainTop50', name: 'Шторка сверху 50%', desc: 'Чёрная шторка закрывает ПОЛОВИНУ верха экрана' },
+  { kind: 'curtainBottom10', name: 'Шторка снизу 10%', desc: 'Чёрная шторка закрывает низ экрана на 10%' },
+  { kind: 'curtainBottom20', name: 'Шторка снизу 20%', desc: 'Чёрная шторка закрывает низ экрана на 20%' },
+  { kind: 'curtainBottom50', name: 'Шторка снизу 50%', desc: 'Чёрная шторка закрывает ПОЛОВИНУ низа экрана' },
+  { kind: 'curtainLeft10', name: 'Шторка слева 10%', desc: 'Чёрная шторка закрывает левый край на 10%' },
+  { kind: 'curtainLeft20', name: 'Шторка слева 20%', desc: 'Чёрная шторка закрывает левый край на 20%' },
+  { kind: 'curtainLeft50', name: 'Шторка слева 50%', desc: 'Чёрная шторка закрывает ПОЛОВИНУ слева' },
+  { kind: 'curtainRight10', name: 'Шторка справа 10%', desc: 'Чёрная шторка закрывает правый край на 10%' },
+  { kind: 'curtainRight20', name: 'Шторка справа 20%', desc: 'Чёрная шторка закрывает правый край на 20%' },
+  { kind: 'curtainRight50', name: 'Шторка справа 50%', desc: 'Чёрная шторка закрывает ПОЛОВИНУ справа' },
+  { kind: 'pal50', name: '50 Гц (PAL)', desc: 'Игра замедляется как на европейских консолях: 60 → 50 Гц' },
+  { kind: 'speed150', name: 'Ускорение ×1.5', desc: 'Игра ускоряется в полтора раза' },
+  { kind: 'speed200', name: 'Ускорение ×2', desc: 'Игра ускоряется вдвое — реакция нужна молниеносная' },
+  { kind: 'speed300', name: 'Ускорение ×3', desc: 'Игра ускоряется втрое — выживает не каждый' },
+  { kind: 'lagButtons', name: 'Задержка кнопок', desc: 'Нажатия доходят до игры с запаздыванием ~0.4 секунды' },
+];
+
+export const chaosLabel = (k: ChaosKind): string => CHAOS_LIST.find((x) => x.kind === k)?.name ?? k;
+
+export function mkChaosCard(k: ChaosKind): CardDef {
+  const meta = CHAOS_LIST.find((x) => x.kind === k)!;
+  return {
+    id: 'chaos-' + k,
+    kind: 'bonus',
+    name: meta.name,
+    desc: meta.desc,
+    effect: { type: 'toInventory', value: 0, target: 0 },
+    chaos: k,
+  };
+}
+
+/* ---------- Торги карточками ---------- */
+
+export interface TradeOffer {
+  id: string;
+  from: string; // продавец (владелец карточки)
+  to: string; // покупатель
+  cardId: string;
+  priceMin: number; // цена в минутах
+  priceTries: number; // цена в попытках
+  status: 'pending' | 'countered' | 'declined' | 'done';
+  counterMin?: number; // встречная цена покупателя
+  counterTries?: number;
+  ts: number;
 }
 
 export interface GameMap {
@@ -162,6 +229,7 @@ export interface PlayerState {
   skipTurns: number;
   extraTurn: boolean;
   tokenImg?: string | null; // dataUrl своей фишки (PNG); null = стандартный робот
+  inventory?: CardDef[]; // карточки в инвентаре (пакости и обычные «в инвентарь»)
 }
 
 export interface TokenDef {
@@ -213,6 +281,7 @@ export interface GameSession {
   notice: { text: string; ts: number } | null; // временное уведомление на игровом экране
   captured: Record<number, string>;
   sessionTasks: Record<number, TaskDef>;
+  trades: TradeOffer[]; // предложения обмена карточками (активные и последние закрытые)
   revealed: number[]; // индексы ячеек, на которые хоть раз ступали (для режима «скрытые ячейки»)
   winner: string | null;
   log: string[];
@@ -241,7 +310,7 @@ export interface NetMsg {
   p?: unknown;
 }
 
-export const APP_VERSION = 6; // 6: верные индексы Genesis (A/B, X/Y); первый верный ответ завершает квиз
+export const APP_VERSION = 7; // 7: пакости (искажения эмулятора), инвентарь карточек, торги
 export const START_SEC = 60 * 60;
 export const START_TRIES = 60;
 export const SKIP_COST = 5;

@@ -44,6 +44,7 @@ export default function SegaBox({
   onApi,
   onSettingsFail,
   remapSpec,
+  chaos,
 }: {
   romData: ArrayBuffer;
   ext: string;
@@ -59,6 +60,8 @@ export default function SegaBox({
    *  клавиша (e.key, нижний регистр). Применяется слоем переназначения, не трогая
    *  внутренние настройки ядра. */
   remapSpec?: { idx: number; key: string }[];
+  /** Активные пакости (ChaosKind): искажения картинки/скорости/ввода. */
+  chaos?: string[];
 }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const onSettingsFailRef = useRef(onSettingsFail);
@@ -95,14 +98,24 @@ export default function SegaBox({
   const remapJson = JSON.stringify(remapSpec ?? []);
   const remapJsonRef = useRef(remapJson);
   remapJsonRef.current = remapJson;
+  const chaosJson = JSON.stringify(chaos ?? []);
+  const chaosJsonRef = useRef(chaosJson);
+  chaosJsonRef.current = chaosJson;
 
   const html = useMemo(() => {
     const opts = useApp.getState().options;
     const volume = opts.emuSound ? Math.max(0, Math.min(1, opts.emuVolume ?? 1)) : 0;
     const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    return buildHtml(resolvedCore, volume, CDN_DATA, bootStateRef.current, nonce, remapJsonRef.current);
+    return buildHtml(resolvedCore, volume, CDN_DATA, bootStateRef.current, nonce, remapJsonRef.current, chaosJsonRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedCore, romData, bootTick]);
+
+  // живое применение пакостей — без перезапуска ядра
+  useEffect(() => {
+    if (status !== 'ready') return;
+    try { frameRef.current?.contentWindow?.postMessage({ type: 'set-chaos', list: chaos ?? [] }, '*'); } catch { /* noop */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chaosJson, status]);
 
   // живое обновление раскладки — без перезапуска ядра.
   // Первая отправка (при старте) — молча; последующие — по сохранению в редакторе,
@@ -289,7 +302,7 @@ export default function SegaBox({
   );
 }
 
-function buildHtml(core: string, volume: number, base: string, bootStateB64: string | null, nonce: string, remapJson: string): string {
+function buildHtml(core: string, volume: number, base: string, bootStateB64: string | null, nonce: string, remapJson: string, chaosJson: string): string {
   // Внутренний документ: чистое окно без тулбара, общается с хостом через postMessage.
   // Ром приходит сообщением 'boot' как ArrayBuffer; blob-URL создаётся ВНУТРИ iframe —
   // с именем и расширением файла (иначе ядро стартует «пустым» и показывает меню RetroArch).
@@ -322,6 +335,36 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     `var PAD_ORDER=${JSON.stringify(Object.keys(core === 'nes' ? NES_TO_RETRO : SEGA_TO_RETRO))};`,
     'var keyToIdx={};',
     'var suppressKeys={};',
+    // Пакости: активный список + единый путь ввода (инверсия крестовины + задержка кнопок)
+    `var CHAOS={list:${chaosJson},invert:0,lag:0};`,
+    'var lastSent={};',
+    'var inputQueue=[];',
+    'function invertIdx(idx){if(!CHAOS.invert)return idx;if(idx===4)return 5;if(idx===5)return 4;if(idx===6)return 7;if(idx===7)return 6;return idx;}',
+    'function rawSend(idx,pressed){try{var g=window.EJS_emulator&&window.EJS_emulator.gameManager;if(g&&typeof g.simulateInput==="function"){g.simulateInput(0,idx,pressed?1:0);return true;}}catch(e){}return false;}',
+    'function sendInput(idx,pressed){',
+    '  idx=invertIdx(idx);',
+    '  if(lastSent[idx]===pressed){return;}',
+    '  lastSent[idx]=pressed;',
+    '  if(CHAOS.lag>0){inputQueue.push({idx:idx,val:pressed?1:0,due:Date.now()+CHAOS.lag});return;}',
+    '  rawSend(idx,pressed);',
+    '}',
+    'function flushAll(){',
+    '  inputQueue.length=0;',
+    '  for(var k in lastSent){if(lastSent[k]){rawSend(Number(k),0);}}',
+    '  lastSent={};',
+    '}',
+    // отложенная доставка очереди (пакость «задержка кнопок»); недоставленное держим до 2 с
+    'setInterval(function(){',
+    '  if(!inputQueue.length){return;}',
+    '  var now=Date.now();var keep=[];',
+    '  for(var i=0;i<inputQueue.length;i++){',
+    '    var it=inputQueue[i];',
+    '    if(it.due>now){keep.push(it);continue;}',
+    '    if(rawSend(it.idx,it.val)){lastSent[it.idx]=!!it.val;}',
+    '    else if(now-it.due<2000){keep.push(it);}',
+    '  }',
+    '  inputQueue=keep;',
+    '},15);',
     'function simBtn(idx,pressed){try{var g=window.EJS_emulator&&window.EJS_emulator.gameManager;if(g&&typeof g.simulateInput==="function"){g.simulateInput(0,idx,pressed?1:0);return true;}}catch(e){}return false;}',
     // e.key (нижний регистр) -> e.code
     'function codeOf(k){',
@@ -399,6 +442,52 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '  }catch(err){}',
     '}',
     'setInterval(silenceCoreGamepad,2000);',
+    // -------- ПАКОСТИ: искажения картинки, шторки, скорость (set-chaos) --------
+    'function chaosFx(){',
+    '  var out={filter:"",flip:false,mirror:false,side:"",pct:0};',
+    '  for(var i=0;i<CHAOS.list.length;i++){',
+    '    var k=CHAOS.list[i];',
+    '    if(k==="grayscale")out.filter+=" grayscale(1)";',
+    '    else if(k==="blur")out.filter+=" blur(3px)";',
+    '    else if(k==="flip")out.flip=true;',
+    '    else if(k==="mirror")out.mirror=true;',
+    '    else{var m=/^curtain(Top|Bottom|Left|Right)(\\d+)$/.exec(k);if(m){out.side=m[1];out.pct=Number(m[2]);}}',
+    '  }',
+    '  return out;',
+    '}',
+    'function applyChaos(){',
+    '  try{',
+    '    var fx=chaosFx();',
+    '    var cv=document.querySelector("#game canvas");',
+    '    if(cv){cv.style.filter=fx.filter.trim();var tr=(fx.flip?" rotate(180deg)":"")+(fx.mirror?" scaleX(-1)":"");cv.style.transform=tr.trim();}',
+    '    var host=document.getElementById("game");',
+    '    var cur=document.getElementById("chaos-curtain");',
+    '    if(fx.side&&!cur&&host){cur=document.createElement("div");cur.id="chaos-curtain";cur.style.cssText="position:absolute;background:#000;z-index:40;pointer-events:none";host.appendChild(cur);}',
+    '    if(cur){',
+    '      if(!fx.side){cur.style.display="none";}',
+    '      else{',
+    '        cur.style.display="block";cur.style.top="0";cur.style.left="0";cur.style.right="auto";cur.style.bottom="auto";',
+    '        if(fx.side==="Top"){cur.style.width="100%";cur.style.height=fx.pct+"%";}',
+    '        else if(fx.side==="Bottom"){cur.style.width="100%";cur.style.height=fx.pct+"%";cur.style.top="auto";cur.style.bottom="0";}',
+    '        else if(fx.side==="Left"){cur.style.width=fx.pct+"%";cur.style.height="100%";}',
+    '        else{cur.style.width=fx.pct+"%";cur.style.height="100%";cur.style.left="auto";cur.style.right="0";}',
+    '      }',
+    '    }',
+    '    var g=window.EJS_emulator&&window.EJS_emulator.gameManager;',
+    '    if(g){',
+    '      var ff=0;',
+    '      if(CHAOS.list.indexOf("speed150")>=0)ff=1.5;',
+    '      else if(CHAOS.list.indexOf("speed200")>=0)ff=2;',
+    '      else if(CHAOS.list.indexOf("speed300")>=0)ff=3;',
+    '      var sl=CHAOS.list.indexOf("pal50")>=0;',
+    '      try{if(typeof g.setFastForwardRatio==="function"&&typeof g.toggleFastForward==="function"){g.setFastForwardRatio(ff);g.toggleFastForward(ff?1:0);}}catch(e){}',
+    '      try{if(typeof g.setSlowMotionRatio==="function"&&typeof g.toggleSlowMotion==="function"){g.setSlowMotionRatio(sl?1.2:1);g.toggleSlowMotion(sl?1:0);}}catch(e){}',
+    '    }',
+    '    CHAOS.invert=CHAOS.list.indexOf("invertPad")>=0?1:0;',
+    '    CHAOS.lag=CHAOS.list.indexOf("lagButtons")>=0?400:0;',
+    '  }catch(e){}',
+    '}',
+    'setInterval(applyChaos,2000);',
     // Применение раскладки: стратегия 1 — прямая правка объекта ядра;',
     // стратегия 2 (для непокрытых кнопок) — перехват событий.
     'function buildKeyMap(){',
@@ -442,7 +531,7 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '    var idx=keyToIdx[k];',
     '    if(idx===undefined){idx=keyToIdx[cl];}',
     '    if(idx===undefined){return;}',
-    '    g.simulateInput(0,idx,ev.type==="keydown"?1:0);',
+    '    sendInput(idx,ev.type==="keydown");',
     '    ev.preventDefault();',
     '    if(ev.stopImmediatePropagation){ev.stopImmediatePropagation();}',
     '  }catch(err){}',
@@ -526,11 +615,12 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '  if(gm()){doPause(wantPaused);}',
     '},450);',
 
-    'window.EJS_ready=function(){readyAt=Date.now();remapTries=0;remapPump();try{parent.postMessage({type:"ejs-ready"},"*");}catch(e){}};',
+    'window.EJS_ready=function(){readyAt=Date.now();remapTries=0;remapPump();applyChaos();try{parent.postMessage({type:"ejs-ready"},"*");}catch(e){}};',
 
     'window.addEventListener("message",function(e){',
     '  var d=e.data||{};',
     '  if(d.type==="set-remap-spec"){remapSpec=d.spec||[];remapTries=0;remapPump();return;}',
+    '  if(d.type==="set-chaos"){CHAOS.list=Array.isArray(d.list)?d.list:[];applyChaos();return;}',
     '  if(d.type==="boot"&&!booted){',
     '    booted=true;',
     '    try{',
@@ -579,7 +669,21 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '    try{',
     '      var w=cv.width||320,h=cv.height||240,k=Math.min(1,320/Math.max(1,w));',
     '      var c2=document.createElement("canvas");c2.width=Math.max(1,Math.round(w*k));c2.height=Math.max(1,Math.round(h*k));',
-    '      c2.getContext("2d").drawImage(cv,0,0,c2.width,c2.height);',
+    '      var x2=c2.getContext("2d");',
+    // пакости отражаются и в трансляции: фильтры/переворот/зеркало/шторка рисуются на кадре
+    '      var fx2=chaosFx();',
+    '      if(fx2.filter)x2.filter=fx2.filter.trim();',
+    '      if(fx2.flip||fx2.mirror){',
+    '        x2.translate(c2.width/2,c2.height/2);',
+    '        if(fx2.flip)x2.rotate(Math.PI);',
+    '        if(fx2.mirror)x2.scale(-1,1);',
+    '        x2.drawImage(cv,-c2.width/2,-c2.height/2,c2.width,c2.height);',
+    '      }else{x2.drawImage(cv,0,0,c2.width,c2.height);}',
+    '      if(fx2.side&&fx2.pct){x2.fillStyle="#000";',
+    '        if(fx2.side==="Top")x2.fillRect(0,0,c2.width,c2.height*fx2.pct/100);',
+    '        else if(fx2.side==="Bottom")x2.fillRect(0,c2.height*(1-fx2.pct/100),c2.width,c2.height*fx2.pct/100);',
+    '        else if(fx2.side==="Left")x2.fillRect(0,0,c2.width*fx2.pct/100,c2.height);',
+    '        else x2.fillRect(c2.width*(1-fx2.pct/100),0,c2.width*fx2.pct/100,c2.height);}',
     '      send2(c2.toDataURL("image/jpeg",0.5));',
     '    }catch(err){send2(null);}',
     '    return;',
@@ -612,11 +716,10 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '  return PAD_DEFAULT;',
     '}',
     'function gm(){var e=window.EJS_emulator;return e&&e.gameManager&&typeof e.gameManager.simulateInput==="function"?e.gameManager:null;}',
-    'function releaseAll(g){',
-    '  if(!g){prevPressed={};return;}',
+    'function releaseAll(){',
     '  for(var act in prevPressed){',
     '    var r=PAD_ACTION_TO_RETRO[act];',
-    '    if(prevPressed[act]&&r!==undefined&&r!==null){try{g.simulateInput(0,r,0);}catch(e){}}',
+    '    if(prevPressed[act]&&r!==undefined&&r!==null){sendInput(r,false);}',
     '  }',
     '  prevPressed={};',
     '}',
@@ -627,7 +730,7 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '  try{pads=navigator.getGamepads?navigator.getGamepads():[];}catch(e){pads=[];}',
     '  var gp=null;',
     '  for(var i=0;i<pads.length;i++){if(pads[i]&&pads[i].connected){gp=pads[i];break;}}',
-    '  if(!gp){releaseAll(g);requestAnimationFrame(pumpGamepad);return;}',
+    '  if(!gp){releaseAll();requestAnimationFrame(pumpGamepad);return;}',
     '  var prefs=getPadPrefs();',
     '  var buttons=gp.buttons||[];',
     '  var ax=gp.axes||[],sx=ax[0]||0,sy=ax[1]||0;',
@@ -655,14 +758,14 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '    if(retroIdx===undefined||retroIdx===null){continue;}',
     '    var pressed=!!pressedNow[act2];',
     '    var was=!!prevPressed[act2];',
-    '    if(pressed&&!was){g.simulateInput(0,retroIdx,1);}',
-    '    else if(!pressed&&was){g.simulateInput(0,retroIdx,0);}',
+    '    if(pressed&&!was){sendInput(retroIdx,true);}',
+    '    else if(!pressed&&was){sendInput(retroIdx,false);}',
     '  }',
     '  prevPressed=pressedNow;',
     '  requestAnimationFrame(pumpGamepad);',
     '}',
-    'try{window.addEventListener("blur",function(){releaseAll(gm());});}catch(e){}',
-    'try{document.addEventListener("visibilitychange",function(){if(document.hidden){releaseAll(gm());}});}catch(e){}',
+    'try{window.addEventListener("blur",function(){releaseAll();flushAll();});}catch(e){}',
+    'try{document.addEventListener("visibilitychange",function(){if(document.hidden){releaseAll();flushAll();}});}catch(e){}',
     'pumpGamepad();',
     '})();',
     // «hello-насос»: повторяем приветствие, пока хост не пришлёт boot —
