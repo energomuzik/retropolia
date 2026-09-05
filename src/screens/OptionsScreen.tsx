@@ -109,7 +109,7 @@ export default function OptionsScreen() {
                   />
                 </div>
                 <p className="text-[10px] text-faint leading-relaxed">
-                  Громкость NES подхватывается на лету; у SEGA применяется при следующем запуске рома.
+                  Громкость обоих эмуляторов применяется на лету — ещё и ползунком «Звук эмулятора» рядом с окном эмулятора.
                 </p>
               </div>
             </div>

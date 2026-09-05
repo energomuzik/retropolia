@@ -14,7 +14,7 @@ import {
 } from '../input';
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
-import { Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
+import { EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
 import { PLAYER_COLORS, SKIP_COST, CHAOS_LIST, chaosLabel, JOY_LIST } from '../types';
 import type { CardDef, ChaosKind, TaskDef } from '../types';
 import { idbGet } from '../db';
@@ -1039,6 +1039,8 @@ export default function GameScreen() {
               {myTurn && ch.status !== 'choose' && !controlsLocked && (
                 <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
               )}
+              {/* звук эмулятора — всегда под кнопкой «Управление»: и при запуске, и во время задания */}
+              {myTurn && ch.status !== 'choose' && <EmuVolumeChip />}
               {controlsLocked && (
                 <div className="hud-chip pixel-corners px-3 py-2 text-[10px] text-magma border-magma">
                   😈 Реверс крестовины: смена кнопок ЗАПРЕЩЕНА

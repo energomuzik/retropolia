@@ -1,5 +1,6 @@
 import { type ReactNode, type ButtonHTMLAttributes } from 'react';
 import { sfx } from './sound';
+import { useApp } from './store';
 
 /* ---------- пиксельные иконки (inline SVG) ---------- */
 
@@ -405,6 +406,20 @@ export const Ic = {
       '1........',
     ]} />
   ),
+  volume: (s = 16, c?: string) => (
+    <Pix size={s} className={c} p={[
+      '....1.....',
+      '...11.1...',
+      '..111..1..',
+      '11111..1..',
+      '11111..1.1',
+      '11111..1.1',
+      '11111..1..',
+      '..111..1..',
+      '...11.1...',
+      '....1.....',
+    ]} />
+  ),
 };
 
 /* ---------- кнопки / панели ---------- */
@@ -530,6 +545,39 @@ export function Toasts({ items }: { items: { id: number; text: string; kind: str
           {t.text}
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Полоска громкости эмулятора — постоянный элемент окна эмулятора (вместо
+ * спрятанной встроенной панели EmulatorJS). Меняет опции на лету: SegaBox
+ * доставляет их в работающее ядро сообщением set-volume (NES и SEGA).
+ */
+export function EmuVolumeChip({ className }: { className?: string }) {
+  const emuSound = useApp((s) => s.options.emuSound);
+  const emuVolume = useApp((s) => s.options.emuVolume ?? 1);
+  const setOptions = useApp((s) => s.setOptions);
+  const shown = emuSound ? emuVolume : 0;
+  return (
+    <div className={`hud-chip pixel-corners px-3 py-2 ${className ?? ''}`}>
+      <div className="flex items-center gap-2">
+        <span className={`shrink-0 ${shown > 0 ? 'text-gold' : 'text-faint'}`}>{Ic.volume(13)}</span>
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.05}
+          value={shown}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            setOptions(emuSound ? { emuVolume: v } : { emuSound: true, emuVolume: v });
+          }}
+          className="w-full"
+          aria-label="Громкость эмулятора"
+        />
+      </div>
+      <div className="tick-label text-faint mt-1">ЗВУК ЭМУЛЯТОРА · {Math.round(shown * 100)}%</div>
     </div>
   );
 }

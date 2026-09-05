@@ -117,6 +117,14 @@ export default function SegaBox({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chaosJson, status]);
 
+  // Живая громкость — без перезапуска ядра (встроенная панель со звуком спрятана).
+  // Шлём при старте и при каждом изменении опций; работает и для NES, и для SEGA.
+  const emuVol = useApp((s) => (s.options.emuSound ? Math.max(0, Math.min(1, s.options.emuVolume ?? 1)) : 0));
+  useEffect(() => {
+    if (status !== 'ready') return;
+    try { frameRef.current?.contentWindow?.postMessage({ type: 'set-volume', v: emuVol }, '*'); } catch { /* noop */ }
+  }, [emuVol, status, bootTick]);
+
   // живое обновление раскладки — без перезапуска ядра.
   // Первая отправка (при старте) — молча; последующие — по сохранению в редакторе,
   // поэтому по их результату показываем уведомление.
@@ -315,6 +323,12 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '@keyframes cscroll-h2{from{transform:scale(1.35) translate(-25.9%,0)}to{transform:scale(1.35) translate(0,0)}}',
     '@keyframes cscroll-v1{from{transform:scale(1.35) translate(0,0)}to{transform:scale(1.35) translate(0,-25.9%)}}',
     '@keyframes cscroll-v2{from{transform:scale(1.35) translate(0,-25.9%)}to{transform:scale(1.35) translate(0,0)}}',
+    // ЖЁСТКО прячем ВСЮ встроенную обвязку EmulatorJS: нижнюю панель с кнопками
+    // (play/pause, звук, ползунок громкости, шестерёнка, fullscreen) и меню правой
+    // кнопки. Панель выезжала при каждом движении мыши и пряталась через 3 c —
+    // теперь её нет вовсе. Громкость управляется приложением через set-volume.
+    '.ejs_menu_bar{display:none!important;pointer-events:none!important}',
+    '.ejs_context_menu{display:none!important}',
     '#err{display:none;position:absolute;inset:0;color:#ff5d73;font-family:monospace;font-size:12px;padding:16px;background:#05070f;white-space:pre-wrap;z-index:50}',
     '</style></head><body><div id="game"></div><div id="err"></div><script>',
     `/* boot ${nonce} */`,
@@ -674,10 +688,31 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
 
     'window.EJS_ready=function(){readyAt=Date.now();remapTries=0;remapPump();applyChaos();try{parent.postMessage({type:"ejs-ready"},"*");}catch(e){}};',
 
+    // -------- ГРОМКОСТЬ: живое управление из приложения (своё окно звука,
+    // т.к. встроенная панель с ползунком спрятана). setVolume ядра могуч, но
+    // аудиоисточники создаются ядром в любой момент — поэтому дополняем насосом,
+    // который держит громкость на всех источниках модуля. --------
+    `var wantVol=${volume};`,
+    'function rawGain(v){try{if(window.EJS_emulator&&typeof window.EJS_emulator.volume==="number"){window.EJS_emulator.volume=v;}var m=window.EJS_emulator&&window.EJS_emulator.Module;if(m&&m.AL&&m.AL.currentCtx&&m.AL.currentCtx.sources){var ss=m.AL.currentCtx.sources;for(var i=0;i<ss.length;i++){try{ss[i].gain.gain.value=v;}catch(e){}}}}catch(e){}}',
+    'function setVolNow(v){wantVol=v;try{var e=window.EJS_emulator;if(e&&typeof e.setVolume==="function"){e.setVolume(v);return;}}catch(e){}rawGain(v);}',
+    'setInterval(function(){',
+    '  if(wantVol===null){return;}',
+    '  try{',
+    '    var e=window.EJS_emulator;',
+    '    if(e&&typeof e.volume==="number"&&Math.abs(e.volume-wantVol)>0.001){e.volume=wantVol;}',
+    '    var m=e&&e.Module;',
+    '    if(m&&m.AL&&m.AL.currentCtx&&m.AL.currentCtx.sources){',
+    '      var ss=m.AL.currentCtx.sources;',
+    '      for(var i=0;i<ss.length;i++){try{var gv=ss[i].gain.gain.value||0;if(Math.abs(gv-wantVol)>0.001){ss[i].gain.gain.value=wantVol;}}catch(e){}}',
+    '    }',
+    '  }catch(e){}',
+    '},500);',
+
     'window.addEventListener("message",function(e){',
     '  var d=e.data||{};',
     '  if(d.type==="set-remap-spec"){remapSpec=d.spec||[];remapTries=0;remapPump();return;}',
     '  if(d.type==="set-chaos"){CHAOS.list=Array.isArray(d.list)?d.list:[];applyChaos();return;}',
+    '  if(d.type==="set-volume"){setVolNow(Number(d.v)||0);return;}',
     '  if(d.type==="boot"&&!booted){',
     '    booted=true;',
     '    try{',

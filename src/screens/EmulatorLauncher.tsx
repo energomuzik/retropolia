@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp, getRomData } from '../store';
-import { Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
+import { EmuVolumeChip, Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
 import SegaBox, { type SegaApi } from '../SegaBox';
 import KeyBinder from '../KeyBinder';
 import { idbDel, idbPut, uid } from '../db';
@@ -240,9 +240,13 @@ export default function EmulatorLauncher() {
                       <GhostBtn onClick={() => resetEmu()}>{Ic.rotate(13)} Сброс (с начала)</GhostBtn>
                       <GhostBtn onClick={() => { setRunning(false); launchedRomRef.current = null; }}>{Ic.pause(13)} Выключить</GhostBtn>
                     </div>
+                    {/* звук эмулятора — постоянная полоска под кнопкой «Управление» (вместо спрятанной панели EmulatorJS) */}
+                    <div className="mt-2 max-w-[300px]">
+                      <EmuVolumeChip />
+                    </div>
                     <p className="text-[11px] text-dim mt-2 leading-relaxed">
                       Дойдите до нужного места и жмите «Сохранить состояние» — слот появится в списке ниже и будет доступен
-                      в редакторе заданий. Раскладка клавиш и геймпад — кнопка «Управление». Громкость — в общих опциях.
+                      в редакторе заданий. Раскладка клавиш и геймпад — кнопка «Управление». Громкость — ползунок «Звук эмулятора» и общие опции.
                     </p>
                   </div>
                 )}
