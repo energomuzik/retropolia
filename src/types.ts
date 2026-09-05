@@ -13,7 +13,8 @@ export interface TaskDef {
   title: string;
   desc: string;
   imageId?: string; // ключ в blobs
-  chaos?: ChaosKind; // пакость: искажение эмулятора, пока задание активно (1 максимум)
+  chaos?: ChaosKind; // пакость: искажение эмулятора/правила, пока задание активно (1 максимум)
+  joy?: JoyId; // радость: награда прошедшему задание (1 максимум)
 }
 
 export interface CellDef {
@@ -77,7 +78,12 @@ export type EffectType =
   | 'playerSkip' // пропуск хода игрока target
   | 'addMin' | 'subMin' // минуты текущему
   | 'addTries' | 'subTries' // попытки текущему
-  | 'toInventory'; // карточка НЕ срабатывает сразу — ложится в инвентарь игрока
+  | 'toInventory' // карточка НЕ срабатывает сразу — ложится в инвентарь игрока
+  | 'diePlus' // радость: следующий бросок — 3 кубика
+  | 'addMinTries' // радость: +value минут И +value попыток
+  | 'freeSkip' // радость: пропуск любого задания без платы (флаг игрока)
+  | 'immuneSega' // радость: иммунитет к SEGA-заданию
+  | 'immuneNes'; // радость: иммунитет к NES-заданию
 
 export interface CardEffect {
   type: EffectType;
@@ -87,7 +93,7 @@ export interface CardEffect {
 
 export interface CardDef {
   id: string;
-  kind: 'bonus' | 'trap';
+  kind: 'bonus' | 'trap' | 'joy';
   name: string;
   desc: string;
   imageId?: string;
@@ -98,18 +104,31 @@ export interface CardDef {
 /* ---------- Пакости: искажения эмулятора для заданий ---------- */
 
 export type ChaosKind =
-  | 'grayscale' | 'flip' | 'mirror' | 'blur' | 'invertPad'
+  | 'grayscale' | 'flip' | 'mirror' | 'blur' | 'invertPad' // blur — устарела (бывшая «Туман»), оставлена для старых сохранений
   | 'curtainTop10' | 'curtainTop20' | 'curtainTop50'
   | 'curtainBottom10' | 'curtainBottom20' | 'curtainBottom50'
   | 'curtainLeft10' | 'curtainLeft20' | 'curtainLeft50'
   | 'curtainRight10' | 'curtainRight20' | 'curtainRight50'
-  | 'pal50' | 'speed150' | 'speed200' | 'speed300' | 'lagButtons';
+  | 'pal50' | 'speed150' | 'speed200' | 'speed300' | 'lagButtons'
+  | 'scrollH1' | 'scrollH2' | 'scrollV1' | 'scrollV2' // прокрутка экрана
+  | 'static' | 'vhs' // помехи / VHS-плёнка
+  | 'skipX2' | 'noReward' | 'halfWin' | 'dice0' | 'oneDie'; // пакости-правила
 
 export const CHAOS_LIST: { kind: ChaosKind; name: string; desc: string }[] = [
   { kind: 'grayscale', name: 'Чёрно-белый экран', desc: 'Картинка теряет цвета — квест «а где же красная платформа?»' },
   { kind: 'flip', name: 'Вверх ногами', desc: 'Экран переворачивается на 180° — играйте, наклонив голову' },
   { kind: 'mirror', name: 'Зеркало', desc: 'Картинка отражается по горизонтали' },
-  { kind: 'blur', name: 'Туман', desc: 'Картинка замылена — играйте по очертаниям и памяти' },
+  { kind: 'noReward', name: 'Без очков', desc: 'Прошёл задание — и ничего: ячейка НЕ захватывается, ресурсы не возвращаются' },
+  { kind: 'halfWin', name: 'Половина победы', desc: 'Задание пройдено, но ячейка НЕ захватывается — вернётся лишь половина потраченных ресурсов' },
+  { kind: 'skipX2', name: 'Штраф ×2', desc: 'Пропуск задания стоит вдвое дороже: не 5, а 10 ресурсов' },
+  { kind: 'dice0', name: 'Кубики-0', desc: 'Вставший на ячейку бросает 0 и застревает, пока не пройдёт задание. Прошедший и заменивший его снимает проклятие для остальных' },
+  { kind: 'oneDie', name: 'Один кубик', desc: 'Следующий бросок вставшего на ячейку — только ОДИН кубик; бонус «+1 кубик» применять нельзя' },
+  { kind: 'scrollH1', name: 'Прокрутка →', desc: 'Картинка непрерывно уезжает вбок и возвращается — глаз не за что зацепить' },
+  { kind: 'scrollH2', name: 'Прокрутка ←', desc: 'Прокрутка экрана по горизонтали в обратной фазе' },
+  { kind: 'scrollV1', name: 'Прокрутка ↓', desc: 'Картинка плывёт сверху вниз и обратно' },
+  { kind: 'scrollV2', name: 'Прокрутка ↑', desc: 'Картинка плывёт снизу вверх и обратно' },
+  { kind: 'static', name: 'Помехи', desc: 'Экран шипит белыми помехами и рвётся полосами — как телевизор с плохой антенной' },
+  { kind: 'vhs', name: 'VHS-плёнка', desc: 'Затёртая кассета: полосы трекинга, рябь, выцветший цвет и виньетка по краям' },
   { kind: 'invertPad', name: 'Реверс крестовины', desc: 'Влево едет вправо, вверх едет вниз' },
   { kind: 'curtainTop10', name: 'Шторка сверху 10%', desc: 'Чёрная шторка закрывает верх экрана на 10%' },
   { kind: 'curtainTop20', name: 'Шторка сверху 20%', desc: 'Чёрная шторка закрывает верх экрана на 20%' },
@@ -130,7 +149,13 @@ export const CHAOS_LIST: { kind: ChaosKind; name: string; desc: string }[] = [
   { kind: 'lagButtons', name: 'Задержка кнопок', desc: 'Нажатия доходят до игры с запаздыванием ~0.4 секунды' },
 ];
 
-export const chaosLabel = (k: ChaosKind): string => CHAOS_LIST.find((x) => x.kind === k)?.name ?? k;
+/* Устаревшие пакости, которых больше нет в выборе, но они могут лежать в старых сохранениях */
+const CHAOS_LEGACY: Partial<Record<ChaosKind, string>> = {
+  blur: 'Туман (устарела)',
+};
+
+export const chaosLabel = (k: ChaosKind): string =>
+  CHAOS_LIST.find((x) => x.kind === k)?.name ?? CHAOS_LEGACY[k] ?? k;
 
 export function mkChaosCard(k: ChaosKind): CardDef {
   const meta = CHAOS_LIST.find((x) => x.kind === k)!;
@@ -144,13 +169,43 @@ export function mkChaosCard(k: ChaosKind): CardDef {
   };
 }
 
-/* ---------- Торги карточками ---------- */
+/* ---------- Радости: награды за прохождение заданий ---------- */
+
+export type JoyId =
+  | 'joy-diePlus' | 'joy-min5' | 'joy-min10' | 'joy-min30'
+  | 'joy-immuneSega' | 'joy-immuneNes' | 'joy-joker';
+
+export const JOY_LIST: { id: JoyId; name: string; desc: string }[] = [
+  { id: 'joy-diePlus', name: '+1 кубик', desc: 'Следующий бросок — сразу ТРИ кубика. Нельзя применять при «Один кубик» и «Кубики-0»' },
+  { id: 'joy-min5', name: '+5 мин и попыток', desc: 'Плюс 5 минут И плюс 5 попыток к вашим ресурсам' },
+  { id: 'joy-min10', name: '+10 мин и попыток', desc: 'Плюс 10 минут И плюс 10 попыток к вашим ресурсам' },
+  { id: 'joy-min30', name: '+30 мин и попыток', desc: 'Плюс 30 минут И плюс 30 попыток — джекпот радости' },
+  { id: 'joy-immuneSega', name: 'Иммунитет к SEGA', desc: 'Встанете на задание с SEGA-ромом — можно пропустить его, не платя штраф. Сгорает при использовании' },
+  { id: 'joy-immuneNes', name: 'Иммунитет к NES', desc: 'Встанете на задание с NES-ромом — можно пропустить его, не платя штраф. Сгорает при использовании' },
+  { id: 'joy-joker', name: 'Джокер-пропуск', desc: 'Пропустить ЛЮБОЕ задание без платы. Сгорает при использовании' },
+];
+
+export function mkJoyCard(id: JoyId): CardDef {
+  const m = JOY_LIST.find((x) => x.id === id)!;
+  const eff: CardEffect =
+    id === 'joy-diePlus' ? { type: 'diePlus', value: 1, target: 0 }
+    : id === 'joy-min5' ? { type: 'addMinTries', value: 5, target: 0 }
+    : id === 'joy-min10' ? { type: 'addMinTries', value: 10, target: 0 }
+    : id === 'joy-min30' ? { type: 'addMinTries', value: 30, target: 0 }
+    : id === 'joy-immuneSega' ? { type: 'immuneSega', value: 0, target: 0 }
+    : id === 'joy-immuneNes' ? { type: 'immuneNes', value: 0, target: 0 }
+    : { type: 'freeSkip', value: 0, target: 0 };
+  return { id: m.id, kind: 'joy', name: m.name, desc: m.desc, effect: eff };
+}
+
+/* ---------- Торги карточками и ячейками ---------- */
 
 export interface TradeOffer {
   id: string;
-  from: string; // продавец (владелец карточки)
+  from: string; // продавец (владелец карточки или ячейки)
   to: string; // покупатель
-  cardId: string;
+  cardId?: string; // торговля карточкой…
+  cellIdx?: number; // …или ячейкой (смена хозяина, задание остаётся)
   priceMin: number; // цена в минутах
   priceTries: number; // цена в попытках
   status: 'pending' | 'countered' | 'declined' | 'done';
@@ -229,7 +284,11 @@ export interface PlayerState {
   skipTurns: number;
   extraTurn: boolean;
   tokenImg?: string | null; // dataUrl своей фишки (PNG); null = стандартный робот
-  inventory?: CardDef[]; // карточки в инвентаре (пакости и обычные «в инвентарь»)
+  inventory?: CardDef[]; // карточки в инвентаре (пакости, радости и обычные «в инвентарь»)
+  oneDie?: boolean; // пакость «Один кубик»: следующий бросок одним кубиком
+  dicePlus?: boolean; // радость «+1 кубик»: следующий бросок тремя кубиками
+  freeSkip?: boolean; // радость «Джокер»: пропуск задания без платы
+  joyTurn?: number; // turnNo, когда радость уже применена (одна радость на ход)
 }
 
 export interface TokenDef {
@@ -269,7 +328,7 @@ export interface GameSession {
   sealedRollOff?: { value: number; ts: number } | null; // «запечатанный» результат броска жеребьёвки
   turn: number;
   turnNo?: number; // номер хода партии (для именования автосейвов)
-  dice: { a: number; b: number; roll: number } | null;
+  dice: { a: number; b: number; c?: number; count?: number; zero?: boolean; roll: number } | null;
   /* «запечатанный» результат: хост предопределяет кубики в момент начала
      перемешивания, поэтому у бросающего они останавливаются без сетевой задержки */
   sealedDice?: { a: number; b: number; ts: number } | null;
@@ -310,7 +369,7 @@ export interface NetMsg {
   p?: unknown;
 }
 
-export const APP_VERSION = 7; // 7: пакости (искажения эмулятора), инвентарь карточек, торги
+export const APP_VERSION = 8; // 8: новые пакости (прокрутка/помехи/VHS/штраф×2/кубики-0/один кубик), радости, торги ячейками
 export const START_SEC = 60 * 60;
 export const START_TRIES = 60;
 export const SKIP_COST = 5;

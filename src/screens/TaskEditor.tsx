@@ -5,7 +5,7 @@ import { CELL, drawBoard, fitView } from '../render';
 import { idbPut, uid } from '../db';
 import { cartridgeArt, cardArt, fileToDataUrl } from '../assets';
 import type { CardDef, CardEffect, ChaosKind, EffectType, GameMap, TaskDef } from '../types';
-import { CHAOS_LIST, chaosLabel, mkChaosCard } from '../types';
+import { CHAOS_LIST, chaosLabel, mkChaosCard, JOY_LIST } from '../types';
 import { sfx } from '../sound';
 
 const EFFECTS: { key: EffectType; label: string; hasValue?: boolean; hasTarget?: boolean; unit?: string; def: number }[] = [
@@ -22,6 +22,11 @@ const EFFECTS: { key: EffectType; label: string; hasValue?: boolean; hasTarget?:
   { key: 'addTries', label: 'Плюс N попыток', hasValue: true, unit: 'поп.', def: 5 },
   { key: 'subTries', label: 'Минус N попыток', hasValue: true, unit: 'поп.', def: 5 },
   { key: 'toInventory', label: 'В инвентарь: игрок забирает карточку себе (применит или продаст позже)', def: 0 },
+  { key: 'diePlus', label: 'Радость: +1 кубик — следующий бросок сразу тремя', def: 0 },
+  { key: 'addMinTries', label: 'Радость: плюс N минут И N попыток', hasValue: true, unit: 'ед.', def: 5 },
+  { key: 'freeSkip', label: 'Радость: джокер — пропуск любого задания без платы', def: 0 },
+  { key: 'immuneSega', label: 'Радость: иммунитет к SEGA-заданию (в инвентарь)', def: 0 },
+  { key: 'immuneNes', label: 'Радость: иммунитет к NES-заданию (в инвентарь)', def: 0 },
 ];
 
 export const effectLabel = (e: CardEffect): string => {
@@ -50,6 +55,7 @@ export default function TaskEditor() {
   const [fDesc, setFDesc] = useState('');
   const [fImg, setFImg] = useState('');
   const [fChaos, setFChaos] = useState('');
+  const [fJoy, setFJoy] = useState('');
   // форма карточки
   const [cName, setCName] = useState('');
   const [cDesc, setCDesc] = useState('');
@@ -84,6 +90,7 @@ export default function TaskEditor() {
     setFDesc(cell.task?.desc ?? '');
     setFImg(cell.task?.imageId ?? '');
     setFChaos(cell.task?.chaos ?? '');
+    setFJoy(cell.task?.joy ?? '');
     setVLabel(cell.label ?? '');
     setVColor(cell.color ?? '');
     setVImg(cell.imageId ?? '');
@@ -176,6 +183,7 @@ export default function TaskEditor() {
       desc: fDesc.trim() || 'Пройдите фрагмент игры, как договорились игроки.',
       imageId,
       chaos: (fChaos || undefined) as TaskDef['chaos'],
+      joy: (fJoy || undefined) as TaskDef['joy'],
     };
     nextMap.cells[selCell].task = task;
     setMap(nextMap);
@@ -491,6 +499,15 @@ export default function TaskEditor() {
                     {fChaos && (
                       <p className="text-[10.5px] text-magma leading-tight">😈 {chaosLabel(fChaos as ChaosKind)}: {CHAOS_LIST.find((c) => c.kind === fChaos)?.desc}</p>
                     )}
+                    <Field label="Радость за прохождение (награда прошедшему, максимум одна)">
+                      <select className="field-in w-full px-2 py-2 text-sm" value={fJoy} onChange={(e) => setFJoy(e.target.value)}>
+                        <option value="">— без радости —</option>
+                        {JOY_LIST.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
+                      </select>
+                    </Field>
+                    {fJoy && (
+                      <p className="text-[10.5px] text-teal leading-tight">🎉 {JOY_LIST.find((j) => j.id === fJoy)?.desc}</p>
+                    )}
                     <PxBtn className="w-full" onClick={() => void saveTask()}>{Ic.check(14)} Сохранить задание</PxBtn>
                     {cell.task && (
                       <div className="text-[11px] text-teal">Сейчас: «{cell.task.title}» · {romName(cell.task.romId)}</div>
@@ -508,7 +525,7 @@ export default function TaskEditor() {
                       <div key={c.id} className="flex items-center gap-2 border-2 border-edge bg-[rgba(0,0,0,0.25)] px-2.5 py-2">
                         {c.imageId
                           ? <CardThumb id={c.imageId} />
-                          : <img src={cardArt(c.kind, c.name)} alt="" className="w-11 h-8 object-cover border border-edge" />}
+                          : <img src={cardArt(c.kind === 'joy' ? 'bonus' : c.kind, c.name)} alt="" className="w-11 h-8 object-cover border border-edge" />}
                         <div className="min-w-0 flex-1">
                           <div className="font-display text-[11px] uppercase text-paper truncate">{c.name}</div>
                           <div className="text-[10px] text-dim leading-tight">{effectLabel(c.effect)}</div>

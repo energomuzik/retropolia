@@ -1,5 +1,6 @@
 import type { CardDef, GameMap, GameOptions, GameSession, PlayerState, TaskDef, TradeOffer } from './types';
-import { APP_VERSION, SKIP_COST, START_SEC, START_TRIES } from './types';
+import { APP_VERSION, SKIP_COST, START_SEC, START_TRIES, JOY_LIST, mkJoyCard } from './types';
+import type { JoyId } from './types';
 
 export type Action =
   | { t: 'hello'; id: string; name: string }
@@ -23,7 +24,8 @@ export type Action =
   | { t: 'postChoice'; id: string; choice: 'continue' | 'end' }
   | { t: 'setCellTask'; id: string; cellIdx: number; task: TaskDef; cardId?: string }
   | { t: 'useCard'; id: string; cardId: string }
-  | { t: 'tradeOffer'; id: string; cardId: string; to: string; priceMin: number; priceTries: number }
+  | { t: 'immuneSkip'; id: string; emu: 'nes' | 'sega' | 'any' }
+  | { t: 'tradeOffer'; id: string; to: string; cardId?: string; cellIdx?: number; priceMin: number; priceTries: number }
   | { t: 'tradeReply'; id: string; offerId: string; kind: 'accept' | 'counter' | 'decline'; counterMin?: number; counterTries?: number }
   | { t: 'tradeResolve'; id: string; offerId: string; accept: boolean }
   | { t: 'quizAnswer'; id: string; answer: number | string | null; sentAt?: number }
@@ -39,8 +41,17 @@ function mkPlayer(id: string, name: string, color: number, isHost: boolean): Pla
   return {
     id, name: name.slice(0, 14).toUpperCase() || 'ИГРОК', color, ready: isHost, isHost,
     secLeft: START_SEC, triesLeft: START_TRIES, pos: 0, alive: true, skipTurns: 0, extraTurn: false,
-    inventory: [],
+    inventory: [], oneDie: false, dicePlus: false, freeSkip: false, joyTurn: -1,
   };
+}
+
+/* Нормализация новых полей игрока (сессии от старых версий их не содержат) */
+function normPlayer(p: PlayerState) {
+  if (!Array.isArray(p.inventory)) p.inventory = [];
+  if (p.oneDie === undefined) p.oneDie = false;
+  if (p.dicePlus === undefined) p.dicePlus = false;
+  if (p.freeSkip === undefined) p.freeSkip = false;
+  if (p.joyTurn === undefined) p.joyTurn = -1;
 }
 
 export function newSession(code: string, mapId: string, hostId: string, hostName: string): GameSession {
@@ -123,7 +134,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     base.turnNo = base.turnNo ?? 1;
     base.winner = base.winner ?? null;
     base.trades = Array.isArray(base.trades) ? base.trades : [];
-    for (const pl of base.players) if (!Array.isArray(pl.inventory)) pl.inventory = [];
+    for (const pl of base.players) normPlayer(pl);
     base.log = [`♻️ Партия восстановлена из сохранения (игроков: ${base.players.length})`, ...(Array.isArray(base.log) ? base.log : [])].slice(0, 50);
     return base;
   }
@@ -142,7 +153,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   if (s.rollOffWinner === undefined) s.rollOffWinner = null;
   if (!Array.isArray(s.log)) s.log = [];
   if (!Array.isArray(s.trades)) s.trades = [];
-  for (const pl of s.players) if (!Array.isArray(pl.inventory)) pl.inventory = [];
+  for (const pl of s.players) normPlayer(pl);
   const log: Log = (t) => { s.log = [t, ...s.log].slice(0, 50); };
   const alive = () => s.players.filter((p) => p.alive);
   const aid = 'id' in a ? (a as { id: string }).id : '';
@@ -251,15 +262,40 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       owner.triesLeft += spentTries;
       log(`⚡ Ресурсы (${spentSec ? `${Math.round(spentSec / 60)} мин` : ''}${spentTries ? ` ${spentTries} поп.` : ''}) ушли хозяину ${owner.name}`);
     }
+    /* пакости-правила на задании: «Без очков» и «Половина победы» */
+    const t0 = cellTaskOf(s, map, ch.cellIdx);
+    const noReward = t0?.chaos === 'noReward';
+    const halfWin = t0?.chaos === 'halfWin';
     if (success) {
-      s.captured[ch.cellIdx] = p.id;
-      log(`✅ ${p.name} захватывает ячейку №${cellNo}`);
-      s.awaitPost = true;
+      if (noReward) {
+        log(`😈 Без очков: ${p.name} прошёл задание, но ячейка не захвачена и награды нет`);
+      } else if (halfWin) {
+        const backSec = Math.floor(spentSec / 2);
+        const backTries = Math.floor(spentTries / 2);
+        if (backSec > 0) p.secLeft += backSec;
+        if (backTries > 0) p.triesLeft += backTries;
+        const parts = [backSec ? `${Math.round(backSec / 60)} мин` : '', backTries ? `${backTries} поп.` : ''].filter(Boolean).join(' + ');
+        log(`😈 Половина победы: ${p.name} прошёл задание, ячейка не захвачена, возврат ${parts || '0'}`);
+      } else {
+        s.captured[ch.cellIdx] = p.id;
+        log(`✅ ${p.name} захватывает ячейку №${cellNo}`);
+        s.awaitPost = true;
+      }
+      /* радость за прохождение задания (если назначена и не отменена «Без очков») */
+      const joyId = t0?.joy;
+      if (joyId && !noReward) {
+        const meta = JOY_LIST.find((j) => j.id === joyId);
+        if (meta) {
+          (p.inventory ?? (p.inventory = [])).push(mkJoyCard(joyId as JoyId));
+          log(`🎉 ${p.name} получает радость «${meta.name}»`);
+        }
+      }
     } else {
       log(`⏭ ${p.name} пропускает задание на ячейке №${cellNo}`);
     }
     s.challenge = null;
     if (!success) endTurnNow();
+    else if (!s.awaitPost) endTurnNow(); // «Без очков»/«Половина победы»: права продолжить ход нет
   };
 
   const othersCount = () => alive().length - 1;
@@ -341,6 +377,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     };
     const owner = s.captured[p.pos] ? s.players.find((x) => x.id === s.captured[p.pos]) : null;
     log(`🎯 ${p.name}: задание на ячейке №${cell.n}${owner ? ` (хозяин ${owner.name})` : ''}`);
+    /* пакость «Один кубик»: следующий бросок вставшего — только один кубик */
+    if (task.chaos === 'oneDie' && s.captured[p.pos] !== p.id && !p.oneDie) {
+      p.oneDie = true;
+      log(`😈 Один кубик: следующий бросок ${p.name} — только один кубик`);
+    }
   };
 
   const applyCard = (p: PlayerState, card: CardDef) => {
@@ -412,14 +453,37 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         log(`🎒 ${p.name} забирает карточку «${card.name}» в инвентарь`);
         break;
       }
+      case 'diePlus':
+        p.dicePlus = true;
+        log(`🎲 ${p.name}: следующий бросок — сразу 3 кубика!`);
+        break;
+      case 'addMinTries':
+        p.secLeft += e.value * 60;
+        p.triesLeft += e.value;
+        log(`🍀 ${p.name}: +${e.value} мин и +${e.value} попыток`);
+        break;
+      case 'freeSkip':
+        p.freeSkip = true;
+        log(`🎫 ${p.name}: пропуск любого задания без платы наготове`);
+        break;
+      case 'immuneSega':
+        (p.inventory ?? (p.inventory = [])).push(mkJoyCard('joy-immuneSega'));
+        log(`🛡 ${p.name} получает «Иммунитет к SEGA»`);
+        break;
+      case 'immuneNes':
+        (p.inventory ?? (p.inventory = [])).push(mkJoyCard('joy-immuneNes'));
+        log(`🛡 ${p.name} получает «Иммунитет к NES»`);
+        break;
     }
   };
 
-  /* ---------- торги карточками ---------- */
+  /* ---------- торги карточками и ячейками ---------- */
   const priceStr = (m: number, t: number): string =>
     m > 0 && t > 0 ? `${m} мин + ${t} поп.` : m > 0 ? `${m} мин` : `${t} поп.`;
   const openTradeOfCard = (cardId: string): TradeOffer | undefined =>
     (s.trades ?? []).find((x) => (x.status === 'pending' || x.status === 'countered') && x.cardId === cardId);
+  const openTradeOfCell = (idx: number): TradeOffer | undefined =>
+    (s.trades ?? []).find((x) => (x.status === 'pending' || x.status === 'countered') && x.cellIdx === idx);
   const execTrade = (o: TradeOffer, min: number, tries: number): boolean => {
     const seller = s.players.find((x) => x.id === o.from);
     const buyer = s.players.find((x) => x.id === o.to);
@@ -428,6 +492,20 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       o.status = 'declined';
       log(`✖ Сделка сорвалась: у ${buyer.name} не хватает ресурсов на оплату`);
       return false;
+    }
+    if (o.cellIdx !== undefined) {
+      // торги ячейкой: меняется только хозяин — задание остаётся прежним,
+      // покупать задание заново не нужно
+      if (s.captured[o.cellIdx] !== o.from) { o.status = 'declined'; return false; }
+      buyer.secLeft -= min * 60;
+      buyer.triesLeft -= tries;
+      seller.secLeft += min * 60;
+      seller.triesLeft += tries;
+      s.captured[o.cellIdx] = buyer.id;
+      o.status = 'done';
+      log(`🤝 ${buyer.name} покупает у ${seller.name} ячейку №${o.cellIdx + 1} за ${priceStr(min, tries)}`);
+      checkElim();
+      return true;
     }
     const inv = seller.inventory ?? (seller.inventory = []);
     const ci = inv.findIndex((c) => c.id === o.cardId);
@@ -509,6 +587,20 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const p = current();
       if (!p || p.id !== a.id || s.moving || s.challenge || s.pendingCard || s.awaitPost || s.quiz) break;
       s.notice = null;
+      /* пакость «Кубики-0»: кто стоит на ячейке с этой пакостью (и не является её
+         хозяином) — бросает 0 и застревает, пока задание не пройдено и не заменено */
+      const tCur = cellTaskOf(s, map, p.pos);
+      const cursed = tCur?.chaos === 'dice0' && s.captured[p.pos] !== p.id;
+      const oneDieRoll = !!p.oneDie && !cursed;
+      const threeDice = !!p.dicePlus && !oneDieRoll && !cursed;
+      p.oneDie = false;
+      p.dicePlus = false;
+      if (cursed) {
+        s.dice = { a: 0, b: 0, count: 2, zero: true, roll: (s.dice?.roll ?? 0) + 1 };
+        s.moving = { player: p.id, path: [p.pos], ts: Date.now() };
+        log(`🎲 😈 Кубики-0: ${p.name} застревает на ячейке №${p.pos + 1} — пройдите задание!`);
+        break;
+      }
       /* игрок влияет на бросок временем удержания кнопки: чем дольше перемешивал,
          тем больше «перемешиваний» (до 6). Результат вычисляется хостом, когда
          приходит действие, поэтому после отпускания есть небольшая задержка —
@@ -517,12 +609,23 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       let va = rnd6();
       for (let i = 1; i < shuffles; i++) va = rnd6();
       const vb = rnd6();
-      s.dice = { a: va, b: vb, roll: (s.dice?.roll ?? 0) + 1 };
+      if (oneDieRoll) {
+        s.dice = { a: va, b: 0, count: 1, roll: (s.dice?.roll ?? 0) + 1 };
+        const N = map.cells.length;
+        const path: number[] = [];
+        for (let i = 1; i <= va; i++) path.push((p.pos + i) % N);
+        s.moving = { player: p.id, path, ts: Date.now() };
+        log(`🎲 😈 ${p.name}: один кубик — ${va}`);
+        break;
+      }
+      const vc = threeDice ? rnd6() : 0;
+      s.dice = { a: va, b: vb, ...(threeDice ? { c: vc, count: 3 } : { count: 2 }), roll: (s.dice?.roll ?? 0) + 1 };
       const N = map.cells.length;
       const path: number[] = [];
-      for (let i = 1; i <= va + vb; i++) path.push((p.pos + i) % N);
+      const steps = va + vb + (threeDice ? vc : 0);
+      for (let i = 1; i <= steps; i++) path.push((p.pos + i) % N);
       s.moving = { player: p.id, path, ts: Date.now() };
-      log(`🎲 ${p.name}: ${va} + ${vb} = ${va + vb}`);
+      log(`🎲 ${p.name}: ${va} + ${vb}${threeDice ? ` + ${vc}` : ''} = ${steps}${threeDice ? ' (3 кубика!)' : ''}`);
       break;
     }
     case 'rollOffGo': {
@@ -569,9 +672,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (a.mode === 'time' && p.secLeft <= 0) break;
       if (a.mode === 'tries' && p.triesLeft <= 0) break;
       ch.mode = a.mode;
-      // если ресурса меньше 5 — пропуск станет доступен только на нуле
+      // пакость «Штраф ×2» удваивает цену пропуска
+      const need = SKIP_COST * (cellTaskOf(s, map, ch.cellIdx)?.chaos === 'skipX2' ? 2 : 1);
+      // если ресурса меньше цены пропуска — пропуск станет доступен только на нуле
       const remaining = a.mode === 'time' ? Math.floor(p.secLeft / 60) : p.triesLeft;
-      ch.lowStart = remaining < SKIP_COST;
+      ch.lowStart = remaining < need;
       ch.status = 'ready'; // выбран ресурс, но запуск — по команде игрока
       log(`${p.name}: ${a.mode === 'time' ? 'играет на ВРЕМЯ ⏱' : 'играет на ПОПЫТКИ 🎯'}`);
       break;
@@ -672,7 +777,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const p = current();
       if (!ch || p.id !== a.id) break;
 
-      // правило: если на старте ресурса было меньше 5 — пропуск разрешён только при нуле
+      // пакость «Штраф ×2»: цена пропуска удваивается
+      const need = SKIP_COST * (cellTaskOf(s, map, ch.cellIdx)?.chaos === 'skipX2' ? 2 : 1);
+
+      // правило: если на старте ресурса было меньше цены — пропуск разрешён только при нуле
       const nowMs = Date.now();
       const running = ch.mode === 'time' && ch.started && !ch.paused && ch.startedAt > 0;
       const ms = ch.accMs + (running ? nowMs - ch.startedAt : 0);
@@ -680,33 +788,53 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         const rem = ch.mode === 'time' ? p.secLeft : p.triesLeft;
         if (rem > 0) break;
       }
-      // обычный пропуск требует 5 потраченных ресурсов
+      // обычный пропуск требует потратить цену пропуска (5, а при «Штраф ×2» — 10)
       if (ch.mode && !a.instant) {
         const units = ch.mode === 'time' ? Math.floor(ms / 60000) : ch.loads;
-        if (!ch.lowStart && units < SKIP_COST) break;
+        if (!ch.lowStart && units < need) break;
       }
 
-      // если уже потрачено 5+ ресурсов — платить «ровно 5» нельзя (только фактическую цену)
+      // если уже потрачено нужное количество ресурсов — платить «авансом» нельзя (только фактическую цену)
       const unitsSpent = ch.mode === 'time' ? Math.floor(ms / 60000) : ch.loads;
-      if (a.instant && !ch.lowStart && unitsSpent >= SKIP_COST) break;
+      if (a.instant && !ch.lowStart && unitsSpent >= need) break;
 
       if (ch.mode === 'time' && !a.instant) {
         const cost = Math.max(1, Math.ceil(ms / 60000));
         finishChallenge(false, Math.min(cost, Math.max(1, Math.floor(p.secLeft / 60))) * 60, 0);
       } else if (ch.mode === 'tries' && !a.instant) {
-        const cost = Math.max(ch.loads, SKIP_COST);
+        const cost = Math.max(ch.loads, need);
         finishChallenge(false, 0, Math.min(cost, Math.max(1, p.triesLeft)));
       } else if (a.instant && a.resource === 'time') {
-        // мгновенный пропуск за 5 минут (или сколько осталось)
-        finishChallenge(false, Math.min(SKIP_COST, Math.floor(p.secLeft / 60)) * 60, 0);
+        // мгновенный пропуск за цену пропуска в минутах (или сколько осталось)
+        finishChallenge(false, Math.min(need, Math.floor(p.secLeft / 60)) * 60, 0);
       } else if (a.instant && a.resource === 'tries') {
-        // мгновенный пропуск за 5 попыток (или сколько осталось)
-        finishChallenge(false, 0, Math.min(SKIP_COST, Math.max(1, p.triesLeft)));
+        // мгновенный пропуск за цену пропуска в попытках (или сколько осталось)
+        finishChallenge(false, 0, Math.min(need, Math.max(1, p.triesLeft)));
       } else {
         // мгновенный пропуск в выбранном режиме
-        if (ch.mode === 'time') finishChallenge(false, Math.min(SKIP_COST, Math.floor(p.secLeft / 60)) * 60, 0);
-        else finishChallenge(false, 0, Math.min(SKIP_COST, Math.max(1, p.triesLeft)));
+        if (ch.mode === 'time') finishChallenge(false, Math.min(need, Math.floor(p.secLeft / 60)) * 60, 0);
+        else finishChallenge(false, 0, Math.min(need, Math.max(1, p.triesLeft)));
       }
+      checkElim();
+      break;
+    }
+    case 'immuneSkip': {
+      // радость-иммунитет: пропуск задания БЕЗ платы, карточка сгорает
+      const ch = s.challenge;
+      const p = actor();
+      if (!ch || s.phase !== 'playing' || !p || p.id !== a.id || p.id !== current().id) break;
+      const want: JoyId = a.emu === 'nes' ? 'joy-immuneNes' : a.emu === 'sega' ? 'joy-immuneSega' : 'joy-joker';
+      const meta = JOY_LIST.find((j) => j.id === want)!;
+      const inv = p.inventory ?? (p.inventory = []);
+      const ci = inv.findIndex((c) => c.id === want);
+      if (ci < 0) break;
+      if ((s.trades ?? []).some((x) => (x.status === 'pending' || x.status === 'countered') && x.cardId === want)) {
+        log('✖ Карточка зарезервирована сделкой');
+        break;
+      }
+      inv.splice(ci, 1);
+      log(`🛡 ${p.name} использует «${meta.name}» — задание пропущено без платы`);
+      finishChallenge(false, 0, 0);
       checkElim();
       break;
     }
@@ -739,7 +867,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       break;
     }
     case 'useCard': {
-      // применить обычную карточку из инвентаря на себя: только в свой ход,
+      // применить карточку из инвентаря на себя: только в свой ход,
       // когда на столе пусто (до броска кубиков)
       if (s.phase !== 'playing') break;
       const p = actor();
@@ -750,8 +878,23 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (ci < 0) break;
       const card = inv[ci];
       if (card.chaos) break; // пакости не «применяют» — они клеятся к своему заданию или продаются
+      if (card.effect.type === 'immuneSega' || card.effect.type === 'immuneNes') {
+        log(`🛡 «${card.name}» сработает сама — когда встанете на задание нужной консоли`);
+        break;
+      }
       if (openTradeOfCard(card.id)) { log('✖ Карточка зарезервирована сделкой'); break; }
+      // радости: не больше одной на ход
+      if (card.kind === 'joy') {
+        if ((p.joyTurn ?? -1) === (s.turnNo ?? 1)) { log('✖ Одна радость на ход — уже использована'); break; }
+        if (card.effect.type === 'diePlus') {
+          if (p.oneDie) { log('😈 Один кубик: «+1 кубик» сейчас не действует'); break; }
+          const tCur = cellTaskOf(s, map, p.pos);
+          if (tCur?.chaos === 'dice0' && s.captured[p.pos] !== p.id) { log('😈 Кубики-0: бросок всё равно будет нулевым'); break; }
+          if (p.dicePlus) { log('✖ «+1 кубик» уже активен'); break; }
+        }
+      }
       inv.splice(ci, 1);
+      if (card.kind === 'joy') p.joyTurn = s.turnNo ?? 1;
       log(`🎴 ${p.name} применяет карточку «${card.name}»`);
       applyCard(p, card);
       checkElim();
@@ -761,16 +904,35 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (s.phase !== 'playing') break;
       const p = actor();
       if (!p || !p.alive) break;
+      // торгуются только те, кто сейчас НЕ играет (и продающий, и покупающий)
+      if (p.id === current().id) { log('✖ В свой ход торговать нельзя'); break; }
       const buyer = s.players.find((x) => x.id === (a as { to?: string }).to && x.alive);
       if (!buyer || buyer.id === p.id) break;
       if (buyer.id === current().id) { log(`✖ Нельзя предлагать сделку ${buyer.name} — он сейчас играет`); break; }
+      const min = Math.max(0, Math.min(90, Math.floor((a as { priceMin?: number }).priceMin ?? 0)));
+      const tries = Math.max(0, Math.min(90, Math.floor((a as { priceTries?: number }).priceTries ?? 0)));
+      if (min + tries <= 0) { log('✖ Цена не может быть нулевой'); break; }
+      const cellIdx = (a as { cellIdx?: number }).cellIdx;
+      if (cellIdx !== undefined && cellIdx !== null) {
+        // продажа ячейки: только своя, не на ней задания сейчас, не в сделке
+        const idx = Math.floor(cellIdx);
+        if (s.captured[idx] !== p.id) { log('✖ Продаётся только своя ячейка'); break; }
+        if (s.challenge?.cellIdx === idx) { log('✖ На этой ячейке сейчас идёт задание'); break; }
+        if (openTradeOfCell(idx)) { log('✖ Эта ячейка уже участвует в сделке'); break; }
+        const offer: TradeOffer = {
+          id: 'tr' + Math.random().toString(36).slice(2, 8),
+          from: p.id, to: buyer.id, cellIdx: idx,
+          priceMin: min, priceTries: tries, status: 'pending', ts: Date.now(),
+        };
+        s.trades = [...(s.trades ?? []).slice(-19), offer];
+        const lbl = map.cells[idx]?.label ? ` «${map.cells[idx].label}»` : '';
+        log(`💼 ${p.name} предлагает ${buyer.name}: ячейку №${idx + 1}${lbl} за ${priceStr(min, tries)}`);
+        break;
+      }
       const inv = p.inventory ?? (p.inventory = []);
       const card = inv.find((c) => c.id === (a as { cardId?: string }).cardId);
       if (!card) break;
       if (openTradeOfCard(card.id)) { log('✖ Эта карточка уже участвует в сделке'); break; }
-      const min = Math.max(0, Math.min(90, Math.floor((a as { priceMin?: number }).priceMin ?? 0)));
-      const tries = Math.max(0, Math.min(90, Math.floor((a as { priceTries?: number }).priceTries ?? 0)));
-      if (min + tries <= 0) { log('✖ Цена не может быть нулевой'); break; }
       const offer: TradeOffer = {
         id: 'tr' + Math.random().toString(36).slice(2, 8),
         from: p.id, to: buyer.id, cardId: card.id,

@@ -15,7 +15,7 @@ import {
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
-import { PLAYER_COLORS, SKIP_COST, CHAOS_LIST, chaosLabel } from '../types';
+import { PLAYER_COLORS, SKIP_COST, CHAOS_LIST, chaosLabel, JOY_LIST } from '../types';
 import type { CardDef, ChaosKind, TaskDef } from '../types';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
@@ -48,6 +48,11 @@ export default function GameScreen() {
   const lastRollRef = useRef(0);
   const [controlsOpen, setControlsOpen] = useState(false);
   const [invOpen, setInvOpen] = useState(false);
+  // осмотр ячейки на карте (клик по ней) — доступен всем, включая зрителей
+  const [inspectIdx, setInspectIdx] = useState<number | null>(null);
+  // увеличенная трансляция поверх карты (зритель переключается на трансляцию целиком)
+  const [streamBig, setStreamBig] = useState(false);
+  const inspectDownRef = useRef<{ x: number; y: number } | null>(null);
 
   /* ---------- жеребьёвка: тряска кубика и автозапуск ---------- */
   const [roShake, setRoShake] = useState(false);
@@ -116,6 +121,10 @@ export default function GameScreen() {
   const ch = s?.challenge ?? null;
   const task = s && map && ch ? cellTaskOf(s, map, ch.cellIdx) : null;
   const activeChaos = task?.chaos ? [task.chaos] : [];
+  // «Реверс крестовины»: смена кнопок запрещена, пока задание с этой пакостью идёт
+  const controlsLocked = task?.chaos === 'invertPad';
+  // «Штраф ×2»: цена пропуска удваивается (10 вместо 5)
+  const skipNeed = SKIP_COST * (task?.chaos === 'skipX2' ? 2 : 1);
   const invCount = mePlayer?.inventory?.length ?? 0;
   const incomingTrades = (s?.trades ?? []).filter((o) => o.to === me && (o.status === 'pending' || o.status === 'countered'));
   const taskRom = task ? st.roms.find((r) => r.id === task.romId) : undefined;
@@ -427,11 +436,11 @@ export default function GameScreen() {
   const info = ch ? spentInfo(ch, Date.now()) : null;
   // остаток выбранного ресурса прямо сейчас
   const remainingNow = ch?.mode === 'time' ? (mePlayer?.secLeft ?? 0) : (mePlayer?.triesLeft ?? 0);
-  // пропуск: обычно после 5 потраченных; при «низком старте» — только на нуле
-  const naturalCanSkip = !!ch && !!info && (ch.lowStart ? remainingNow <= 0 : info.units >= SKIP_COST);
+  // пропуск: обычно после 5 потраченных (при «Штраф ×2» — после 10); при «низком старте» — только на нуле
+  const naturalCanSkip = !!ch && !!info && (ch.lowStart ? remainingNow <= 0 : info.units >= skipNeed);
   // «Пропустить · 5» (заплатить ровно 5 авансом) доступен, только пока потрачено МЕНЬШЕ 5.
   // Когда потрачено 5+ — игрок обязан пользоваться кнопкой «Пропустить» (спишет фактическую цену).
-  const instantSkipAllowed = !!ch && !!info && (ch.lowStart ? remainingNow <= 0 : info.units < SKIP_COST);
+  const instantSkipAllowed = !!ch && !!info && (ch.lowStart ? remainingNow <= 0 : info.units < skipNeed);
   const owner = ch ? s.captured[ch.cellIdx] : undefined;
   // свой ход, фишка стоит, кубики не брошены — можно осматривать карту перетаскиванием
   const canLookAround = !!s && !!mePlayer && myTurn && s.phase === 'playing' && !s.moving && !ch && !s.pendingCard && !s.quiz && !s.awaitPost && viewMode === 'follow' && !peekMap;
@@ -453,6 +462,29 @@ export default function GameScreen() {
   const others = s.players.filter((p) => p.alive && p.id !== active?.id);
   const aliveCount = s.players.filter((p) => p.alive).length;
   const votesNeed = aliveCount;
+
+  /* радости-иммунитеты: кнопки бесплатного пропуска в челлендже */
+  const openTradeIds = new Set((s.trades ?? []).filter((o) => o.status === 'pending' || o.status === 'countered').map((o) => o.cardId));
+  const hasJoyCard = (id: string) => !!mePlayer?.inventory?.some((c) => c.id === id) && !openTradeIds.has(id);
+  const immuneBtns = myTurn && !!ch && ch.status !== 'voting' && (
+    <>
+      {hasJoyCard('joy-joker') && (
+        <PxBtn color="teal" className="w-full" onClick={() => { sfx.card(); dispatch({ t: 'immuneSkip', id: me, emu: 'any' }); }}>
+          🎫 Джокер: пропустить бесплатно
+        </PxBtn>
+      )}
+      {isSega && hasJoyCard('joy-immuneSega') && (
+        <PxBtn color="teal" className="w-full" onClick={() => { sfx.card(); dispatch({ t: 'immuneSkip', id: me, emu: 'sega' }); }}>
+          🛡 Иммунитет к SEGA — бесплатно
+        </PxBtn>
+      )}
+      {!isSega && hasJoyCard('joy-immuneNes') && (
+        <PxBtn color="teal" className="w-full" onClick={() => { sfx.card(); dispatch({ t: 'immuneSkip', id: me, emu: 'nes' }); }}>
+          🛡 Иммунитет к NES — бесплатно
+        </PxBtn>
+      )}
+    </>
+  );
 
   /* holdingRef — надёжный флаг «кнопка нажата» (state мог запаздывать в замыканиях,
      из-за чего повторное нажатие плодило интервалы и кубики тряслись вечно). */
@@ -539,6 +571,11 @@ export default function GameScreen() {
     : !myTurn && shakeFresh ? dShake!.b
     : s.dice?.b ?? 6;
   const dieRolling = ((rolling || shake.holding) && myTurn) || (!myTurn && shakeFresh);
+  // сколько кубиков показывать: во время перемешивания — предпросмотр (по активным карточкам),
+  // после броска — столько, сколько выпало (1/2/3; при «Кубиках-0» — пустые грани)
+  const diceShown = dieRolling || (shake.holding && myTurn)
+    ? (myTurn ? (mePlayer?.oneDie ? 1 : mePlayer?.dicePlus ? 3 : 2) : 2)
+    : (s.dice?.count ?? 2);
 
   return (
     <div className="h-full crt-grid-bg flex flex-col overflow-hidden">
@@ -604,6 +641,7 @@ export default function GameScreen() {
           }}
           onPointerDown={(e) => {
             (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
+            inspectDownRef.current = { x: e.clientX, y: e.clientY };
             if (viewMode === 'world' || peekMap) {
               dragRef.current = { sx: e.clientX, sy: e.clientY, px: worldPanRef.current.x, py: worldPanRef.current.y };
             } else if (canLookAround) {
@@ -624,7 +662,23 @@ export default function GameScreen() {
               };
             }
           }}
-          onPointerUp={() => { dragRef.current = null; lookDragRef.current = null; }}
+          onPointerUp={(e) => {
+            // клик без перетаскивания — осмотр ячейки (для всех, включая зрителей)
+            const d = inspectDownRef.current;
+            inspectDownRef.current = null;
+            if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 6) {
+              const cv = e.currentTarget as HTMLCanvasElement;
+              const r = cv.getBoundingClientRect();
+              const v = viewRef.current;
+              const wx = v.x + (e.clientX - r.left - r.width / 2) / v.zoom;
+              const wy = v.y + (e.clientY - r.top - r.height / 2) / v.zoom;
+              const idx = map.cells.findIndex((c) => c.x === Math.floor(wx / CELL) && c.y === Math.floor(wy / CELL));
+              setInspectIdx(idx >= 0 ? idx : null);
+              if (idx >= 0) sfx.hover();
+            }
+            dragRef.current = null;
+            lookDragRef.current = null;
+          }}
         />
 
         {/* чей ход */}
@@ -645,7 +699,7 @@ export default function GameScreen() {
 
         {canLookAround && (
           <div className="absolute top-14 right-3 hud-chip pixel-corners px-3 py-1.5 pointer-events-none">
-            <span className="tick-label text-sky">Тяните карту мышью · колесо — зум · до броска</span>
+            <span className="tick-label text-sky">Тяните карту мышью · колесо — зум · клик по ячейке — осмотр · до броска</span>
           </div>
         )}
 
@@ -673,19 +727,49 @@ export default function GameScreen() {
           ))}
         </div>
 
-        {/* трансляция соперника (миниатюра). Скрываем, когда трансляция открыта
-            в основном окне задания (ch) — НО если зритель открыл «карту мира» поверх
-            задания (peekMap), миниатюра остаётся, чтобы трансляция не пропадала. */}
-        {streamShow && !myTurn && (!ch || peekMap) && (
-          <div className="absolute right-3 bottom-3 w-[240px] pop-in">
+        {/* трансляция соперника (миниатюра, видна и поверх инвентаря/торгов).
+            Скрываем, когда трансляция открыта в основном окне задания (ch) — НО если
+            зритель открыл «карту мира» поверх задания (peekMap) или инвентарь (торги),
+            миниатюра остаётся, чтобы трансляция не пропадала. */}
+        {streamShow && !myTurn && (!ch || peekMap || invOpen) && !streamBig && (
+          <div className="fixed right-3 bottom-3 w-[240px] pop-in z-[97]">
             <div className="hud-chip pixel-corners p-1.5">
               <div className="flex items-center gap-2 px-1 pb-1">
                 <span className={`w-2 h-2 ${streamLive ? 'bg-coral blink-hard' : 'bg-gold'}`} />
                 <span className={`font-pixel text-[7px] ${streamLive ? 'text-coral' : 'text-gold'}`}>
                   {streamLive ? 'ТРАНСЛЯЦИЯ' : 'ЖДЁМ КАДРЫ'} · {stream!.name}
                 </span>
+                <button
+                  onClick={() => setStreamBig(true)}
+                  title="Увеличить трансляцию"
+                  className="ml-auto font-pixel text-[9px] text-sky hover:text-paper cursor-pointer"
+                >⤢</button>
               </div>
-              <img src={stream!.data} alt="Трансляция" className={`w-full border-2 border-edge ${streamLive ? '' : 'opacity-60'}`} style={{ imageRendering: 'auto' }} />
+              <img
+                src={stream!.data}
+                alt="Трансляция"
+                onClick={() => setStreamBig(true)}
+                className={`w-full border-2 border-edge cursor-zoom-in ${streamLive ? '' : 'opacity-60'}`}
+                style={{ imageRendering: 'auto' }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* увеличенная трансляция: всё внимание — игре соперника */}
+        {streamBig && streamShow && !myTurn && (
+          <div className="fixed inset-0 z-[98] flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-[rgba(4,6,14,0.72)]" onClick={() => setStreamBig(false)} />
+            <div className="relative pixel-panel pixel-corners pop-in p-2 w-[600px] max-w-[94vw]">
+              <div className="flex items-center gap-2 px-1 pb-1.5">
+                <span className={`w-2 h-2 ${streamLive ? 'bg-coral blink-hard' : 'bg-gold'}`} />
+                <span className={`font-pixel text-[8px] ${streamLive ? 'text-coral' : 'text-gold'}`}>
+                  {streamLive ? 'ТРАНСЛЯЦИЯ' : 'ЖДЁМ КАДРЫ'} · {stream!.name}
+                </span>
+                <GhostBtn small className="ml-auto" onClick={() => setStreamBig(false)}>{Ic.cross(12)} Свернуть</GhostBtn>
+              </div>
+              <img src={stream!.data} alt="Трансляция" className={`w-full border-2 border-edge ${streamLive ? '' : 'opacity-60'}`} />
+              <p className="text-[10px] text-dim text-center mt-1.5">Карта и торги никуда не делись — сверните трансляцию, чтобы вернуться</p>
             </div>
           </div>
         )}
@@ -695,7 +779,12 @@ export default function GameScreen() {
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2">
             <div className="flex gap-3">
               <DieFace v={dieA} dropping={!!s.dice && !dieRolling && !s.moving} rolling={dieRolling} />
-              <DieFace v={dieB} dropping={!!s.dice && !dieRolling && !s.moving} rolling={dieRolling} delay />
+              {diceShown >= 2 && (
+                <DieFace v={dieB} dropping={!!s.dice && !dieRolling && !s.moving} rolling={dieRolling} delay />
+              )}
+              {diceShown >= 3 && (
+                <DieFace v={s.dice?.c ?? dieB} dropping={!!s.dice && !dieRolling && !s.moving} rolling={dieRolling} delay />
+              )}
             </div>
             {myTurn ? (
               !s.moving ? (
@@ -722,8 +811,34 @@ export default function GameScreen() {
               )
             )}
             {s.dice && !s.moving && !myTurn && (
-              <div className="tick-label text-teal">{s.dice.a} + {s.dice.b} = {s.dice.a + s.dice.b}</div>
+              <div className="tick-label text-teal">
+                {s.dice.zero
+                  ? '0 — застрял на ячейке (кубики-0)'
+                  : s.dice.count === 1
+                    ? `${s.dice.a} — один кубик`
+                    : s.dice.count === 3
+                      ? `${s.dice.a} + ${s.dice.b} + ${s.dice.c} = ${(s.dice.a ?? 0) + (s.dice.b ?? 0) + (s.dice.c ?? 0)}`
+                      : `${s.dice.a} + ${s.dice.b} = ${s.dice.a + s.dice.b}`}
+              </div>
             )}
+            {myTurn && !s.moving && !rolling && !shake.holding && (() => {
+              // предупреждения о пакостях, действующих на бросок
+              const myCellTask = active ? cellTaskOf(s, map, active.pos) : null;
+              if (myCellTask?.chaos === 'dice0' && s.captured[active!.pos] !== me) {
+                return (
+                  <div className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[8px] text-magma blink-hard text-center">
+                    😈 КУБИКИ-0: пройди задание — иначе бросок всегда 0!
+                  </div>
+                );
+              }
+              if (mePlayer?.oneDie) {
+                return <div className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[8px] text-magma blink-hard">😈 ОДИН КУБИК: бросишь только одним</div>;
+              }
+              if (mePlayer?.dicePlus) {
+                return <div className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[8px] text-teal">🎲 +1 КУБИК: бросаешь тремя!</div>;
+              }
+              return null;
+            })()}
           </div>
         )}
 
@@ -870,7 +985,7 @@ export default function GameScreen() {
         <Modal title={s.pendingCard.card.kind === 'bonus' ? 'Карточка бонуса' : 'Карточка ловушки'} icon={s.pendingCard.card.kind === 'bonus' ? Ic.star(16) : Ic.skull(16)} w="max-w-md" locked>
           <div className="text-center">
             <img
-              src={cardImg ?? cardArt(s.pendingCard.card.kind, s.pendingCard.card.name, s.pendingCard.card.id.length)}
+              src={cardImg ?? cardArt(s.pendingCard.card.kind === 'joy' ? 'bonus' : s.pendingCard.card.kind, s.pendingCard.card.name, s.pendingCard.card.id.length)}
               alt={s.pendingCard.card.name}
               className="mx-auto border-[3px] border-edge max-h-44 object-contain pop-in"
             />
@@ -921,8 +1036,13 @@ export default function GameScreen() {
                 </div>
               )}
               <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
-              {myTurn && ch.status !== 'choose' && (
+              {myTurn && ch.status !== 'choose' && !controlsLocked && (
                 <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
+              )}
+              {controlsLocked && (
+                <div className="hud-chip pixel-corners px-3 py-2 text-[10px] text-magma border-magma">
+                  😈 Реверс крестовины: смена кнопок ЗАПРЕЩЕНА
+                </div>
               )}
             </div>
 
@@ -956,11 +1076,14 @@ export default function GameScreen() {
                       </div>
                       <div className="mt-3 flex justify-end gap-2 flex-wrap">
                         <GhostBtn onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'time', spentMs: 0, loads: 0 })} disabled={(mePlayer?.secLeft ?? 0) < 60}>
-                          {Ic.bolt(12)} Сразу пропустить · 5 мин
+                          {Ic.bolt(12)} Сразу пропустить · {skipNeed} мин
                         </GhostBtn>
                         <GhostBtn onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'tries', spentMs: 0, loads: 0 })} disabled={(mePlayer?.triesLeft ?? 0) <= 0}>
-                          {Ic.bolt(12)} Сразу пропустить · 5 поп.
+                          {Ic.bolt(12)} Сразу пропустить · {skipNeed} поп.
                         </GhostBtn>
+                      </div>
+                      <div className="mt-2 space-y-2">
+                        {immuneBtns}
                       </div>
                     </div>
                   ) : (
@@ -1000,6 +1123,14 @@ export default function GameScreen() {
                         😈 {chaosLabel(task.chaos)}
                       </span>
                     )}
+                    {task?.joy && (() => {
+                      const jm = JOY_LIST.find((j) => j.id === task.joy);
+                      return jm ? (
+                        <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[9px] text-teal" title={jm.desc}>
+                          🎉 {jm.name}
+                        </span>
+                      ) : null;
+                    })()}
                   </div>
 
                   <div className="grid lg:grid-cols-[1fr_190px] gap-3 items-start">
@@ -1079,8 +1210,9 @@ export default function GameScreen() {
                             Эмулятор загружен и ждёт. {ch.mode === 'time' ? 'Таймер пойдёт' : 'Попытка спишется'} только после запуска — можно спокойно подготовиться.
                           </p>
                           <GhostBtn className="w-full" onClick={() => dispatch({ t: 'skip', id: me, instant: true, spentMs: 0, loads: 0 })}>
-                            {Ic.bolt(13)} Заплатить {SKIP_COST} и пропустить
+                            {Ic.bolt(13)} Заплатить {skipNeed} и пропустить
                           </GhostBtn>
+                          {immuneBtns}
                         </>
                       )}
                       {myTurn && (ch.status === 'playing' || ch.status === 'voting') && (
@@ -1095,7 +1227,7 @@ export default function GameScreen() {
                           >
                             {ch.paused ? Ic.play(13) : Ic.pause(13)} {ch.paused ? 'Продолжить' : 'Пауза'}
                           </GhostBtn>
-                          {ch.paused && ch.status === 'playing' && (
+                          {ch.paused && ch.status === 'playing' && !controlsLocked && (
                             <GhostBtn className="w-full border-magma/60 text-magma" onClick={() => setControlsOpen(true)}>
                               {Ic.gear(13)} Сменить управление
                             </GhostBtn>
@@ -1104,19 +1236,20 @@ export default function GameScreen() {
                           <GhostBtn
                             className="w-full"
                             disabled={!naturalCanSkip}
-                            title={!naturalCanSkip ? (ch.lowStart ? 'Ресурса было меньше 5 — пропуск станет доступен, когда он закончится' : 'Сначала потратьте 5 ресурсов — или платите сразу') : undefined}
+                            title={!naturalCanSkip ? (ch.lowStart ? 'Ресурса было меньше цены пропуска — пропуск станет доступен, когда он закончится' : 'Сначала потратьте ресурсы — или платите сразу') : undefined}
                             onClick={() => info && dispatch({ t: 'skip', id: me, instant: false, spentMs: info.ms, loads: info.loads })}
                           >
-                            {Ic.bolt(13)} Пропустить · потратить {ch.mode === 'time' ? `${Math.max(info?.min ?? 0, SKIP_COST)} мин` : `${Math.max(info?.loads ?? 0, SKIP_COST)} поп.`}
+                            {Ic.bolt(13)} Пропустить · потратить {ch.mode === 'time' ? `${Math.max(info?.min ?? 0, skipNeed)} мин` : `${Math.max(info?.loads ?? 0, skipNeed)} поп.`}
                           </GhostBtn>
                           <GhostBtn
                             className="w-full"
                             disabled={!instantSkipAllowed}
-                            title={!instantSkipAllowed ? (ch.lowStart ? 'Ресурса было меньше 5 — пропуск станет доступен, когда он закончится' : 'Вы уже потратили 5+ ресурсов — используйте кнопку «Пропустить», она спишет фактическую цену') : undefined}
+                            title={!instantSkipAllowed ? (ch.lowStart ? 'Ресурса было меньше цены пропуска — пропуск станет доступен, когда он закончится' : 'Вы уже потратили достаточно ресурсов — используйте кнопку «Пропустить», она спишет фактическую цену') : undefined}
                             onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: ch.mode === 'time' ? 'time' : 'tries', spentMs: 0, loads: 0 })}
                           >
-                            {Ic.bolt(13)} Заплатить {SKIP_COST} {ch.mode === 'time' ? 'мин' : 'поп.'} и пропустить
+                            {Ic.bolt(13)} Заплатить {skipNeed} {ch.mode === 'time' ? 'мин' : 'поп.'} и пропустить
                           </GhostBtn>
+                          {immuneBtns}
                         </>
                       )}
                       {!myTurn && others.some((p) => p.id === me) && (
@@ -1188,25 +1321,34 @@ export default function GameScreen() {
       )}
 
       {/* ---------- выбор после захвата ---------- */}
-      {s.awaitPost && myTurn && !ch && (
-        <Modal title="Ячейка захвачена!" icon={Ic.trophy(16)} w="max-w-lg" locked>
-          <p className="text-[13px] text-dim mb-4">
-            Теперь эта ячейка ваша: соперники, попавшие на неё, отдают потраченные ресурсы вам. Что дальше?
-          </p>
-          <div className="grid grid-cols-2 gap-3">
-            <button onClick={() => { sfx.coin(); dispatch({ t: 'postChoice', id: me, choice: 'continue' }); }} className="pixel-panel pixel-corners p-4 text-left hover:border-gold hover:-translate-y-0.5 transition-all cursor-pointer group">
-              <span className="text-gold">{Ic.dice(22)}</span>
-              <div className="font-display uppercase text-paper group-hover:text-gold mt-2 text-sm">Играть дальше</div>
-              <div className="text-[10px] text-dim mt-1">Сохраняется право броска — продолжите ход</div>
-            </button>
-            <button onClick={() => { sfx.click(); setTplOpen(true); }} className="pixel-panel pixel-corners p-4 text-left hover:border-magma hover:-translate-y-0.5 transition-all cursor-pointer group">
-              <span className="text-magma">{Ic.cart(22)}</span>
-              <div className="font-display uppercase text-paper group-hover:text-magma mt-2 text-sm">Новое задание</div>
-              <div className="text-[10px] text-dim mt-1">Заменить задание ячейки из шаблонов (доп. ход сгорит)</div>
-            </button>
-          </div>
-        </Modal>
-      )}
+      {s.awaitPost && myTurn && !ch && (() => {
+        const postTask = active ? cellTaskOf(s, map, active.pos) : null;
+        const dice0Hint = postTask?.chaos === 'dice0';
+        return (
+          <Modal title={dice0Hint ? 'Задание пройдено!' : 'Ячейка захвачена!'} icon={Ic.trophy(16)} w="max-w-lg" locked>
+            <p className="text-[13px] text-dim mb-4">
+              {dice0Hint
+                ? 'Задание с «Кубиками-0» пройдено. Пока вы не замените его, все, кто встанет на ячейку, будут бросать 0 и застревать. Вы — хозяин, вас проклятие не держит.'
+                : 'Теперь эта ячейка ваша: соперники, попавшие на неё, отдают потраченные ресурсы вам. Что дальше?'}
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <button onClick={() => { sfx.coin(); dispatch({ t: 'postChoice', id: me, choice: 'continue' }); }} className="pixel-panel pixel-corners p-4 text-left hover:border-gold hover:-translate-y-0.5 transition-all cursor-pointer group">
+                <span className="text-gold">{Ic.dice(22)}</span>
+                <div className="font-display uppercase text-paper group-hover:text-gold mt-2 text-sm">Играть дальше</div>
+                <div className="text-[10px] text-dim mt-1">Сохраняется право броска — продолжите ход</div>
+              </button>
+              <button onClick={() => { sfx.click(); setTplOpen(true); }} className="pixel-panel pixel-corners p-4 text-left hover:border-magma hover:-translate-y-0.5 transition-all cursor-pointer group">
+                <span className="text-magma">{Ic.cart(22)}</span>
+                <div className="font-display uppercase text-paper group-hover:text-magma mt-2 text-sm">Новое задание</div>
+                <div className="text-[10px] text-dim mt-1">{dice0Hint ? 'Замените задание — снимете проклятие с ячейки' : 'Заменить задание ячейки из шаблонов (доп. ход сгорит)'}</div>
+              </button>
+            </div>
+          </Modal>
+        );
+      })()}
+
+      {/* ---------- осмотр ячейки на карте ---------- */}
+      {inspectIdx !== null && <CellInspectModal idx={inspectIdx} onClose={() => setInspectIdx(null)} />}
 
       {tplOpen && <TemplateModal cellIdx={active?.pos ?? 0} onClose={() => setTplOpen(false)} />}
 
@@ -1220,6 +1362,7 @@ export default function GameScreen() {
 
 function DieFace({ v, dropping, delay, rolling, blank, frame }: { v: number; dropping?: boolean; delay?: boolean; rolling?: boolean; blank?: boolean; frame?: string }) {
   const pips: Record<number, [number, number][]> = {
+    0: [], // «Кубики-0»: пустая грань
     1: [[1, 1]],
     2: [[0, 0], [2, 2]],
     3: [[0, 0], [1, 1], [2, 2]],
@@ -1263,6 +1406,7 @@ function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => v
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
   const [chaosCardId, setChaosCardId] = useState('');
+  const [joyId, setJoyId] = useState('');
   const romSaves = saves.filter((x) => x.romId === romId);
   const mePlayer = session?.players.find((p) => p.id === selfId);
   const chaosCards = (mePlayer?.inventory ?? []).filter((c) => !!c.chaos);
@@ -1277,6 +1421,7 @@ function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => v
       romId, saveId: saveId || undefined,
       title: title.trim() || (roms.find((r) => r.id === romId)?.name ?? 'Задание'),
       desc: desc.trim() || 'Задание, придуманное игроком на этой сессии.',
+      joy: (joyId || undefined) as TaskDef['joy'],
     };
     dispatch({ t: 'setCellTask', id: useApp.getState().selfId, cellIdx, task, cardId: chaosCardId || undefined });
     sfx.success();
@@ -1335,6 +1480,15 @@ function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => v
             )}
             {chaosCardId && <p className="text-[10.5px] text-magma mt-1">Карточка будет потрачена — следующий играющий здесь получит пакость.</p>}
           </Field>
+          <Field label="Радость за прохождение (награда прошедшему, максимум одна)">
+            <select className="field-in w-full px-2 py-2 text-sm" value={joyId} onChange={(e) => { setJoyId(e.target.value); sfx.hover(); }}>
+              <option value="">— без радости —</option>
+              {JOY_LIST.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
+            </select>
+            {joyId && (
+              <p className="text-[10.5px] text-teal mt-1">🎉 {JOY_LIST.find((j) => j.id === joyId)?.desc}</p>
+            )}
+          </Field>
           <div className="flex justify-end gap-2 pt-1">
             <GhostBtn onClick={onClose}>Отмена</GhostBtn>
             <PxBtn color="magma" onClick={apply}>{Ic.check(14)} Заменить задание</PxBtn>
@@ -1347,16 +1501,34 @@ function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => v
 
 void idbGet;
 
-/* ---------- инвентарь карточек: просмотр, применение, продажа/покупка ---------- */
+/* ---------- инвентарь: монопольные карточки, торги карточками и ячейками ---------- */
 
 const fmtPrice = (m: number, t: number): string =>
   m > 0 && t > 0 ? `${m} мин + ${t} поп.` : m > 0 ? `${m} мин` : `${t} поп.`;
 
+/* Цвета карточек «как в монополии»: цветная обводка + цветная шапка с названием */
+function cardColors(c: CardDef): { band: string; ink: string } {
+  if (c.chaos) return { band: '#ff5d73', ink: '#2a0810' };
+  if (c.kind === 'joy') return { band: '#2ee6a8', ink: '#06281c' };
+  if (c.kind === 'trap') return { band: '#ff8b3f', ink: '#2b1204' };
+  return { band: '#ffcf3f', ink: '#2b2004' };
+}
+
+const cardBadge = (c: CardDef): string => {
+  if (c.chaos) return '😈 ПАКОСТЬ';
+  if (c.kind === 'joy') {
+    if (c.effect.type === 'immuneSega' || c.effect.type === 'immuneNes') return '🛡 ИММУНИТЕТ';
+    return '🎉 РАДОСТЬ';
+  }
+  return c.kind === 'trap' ? '☠ ЛОВУШКА' : '🌟 БОНУС';
+};
+
 function InventoryModal({ onClose }: { onClose: () => void }) {
   const st = useApp();
   const s = st.session;
+  const map = st.sessionMap;
   const me = st.selfId;
-  const [sellCardId, setSellCardId] = useState('');
+  const [sellSel, setSellSel] = useState<{ kind: 'card' | 'cell'; id: string; name: string } | null>(null);
   const [sellTo, setSellTo] = useState('');
   const [sellMin, setSellMin] = useState(5);
   const [sellTries, setSellTries] = useState(0);
@@ -1371,7 +1543,9 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
   const trades = s.trades ?? [];
   const isOpen = (o: { status: string }) => o.status === 'pending' || o.status === 'countered';
   const reservedIds = new Set(trades.filter(isOpen).map((o) => o.cardId));
+  const reservedCells = new Set(trades.filter(isOpen).map((o) => o.cellIdx));
   const busy = !!(s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost);
+  const joyUsedThisTurn = (mePlayer?.joyTurn ?? -1) === (s.turnNo ?? 1);
   const findCard = (id: string): { card: CardDef; ownerName: string } | null => {
     for (const p of s.players) {
       const c = (p.inventory ?? []).find((x) => x.id === id);
@@ -1379,19 +1553,32 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
     }
     return null;
   };
+  const cellTitle = (idx: number): string => {
+    const cell = map?.cells[idx];
+    if (!cell) return `Ячейка №${idx + 1}`;
+    const t = cell.task?.title ? ` · ${cell.task.title}` : '';
+    return `Ячейка №${cell.n}${cell.label ? ` «${cell.label}»` : ''}${t}`;
+  };
   const sellTargets = s.players.filter((p) => p.alive && p.id !== me && p.id !== active?.id);
   const incoming = trades.filter((o) => o.to === me && isOpen(o));
   const outgoing = trades.filter((o) => o.from === me && isOpen(o));
-  const sellCard = inv.find((c) => c.id === sellCardId);
+  const myCells = Object.entries(s.captured ?? {})
+    .map(([k, v]) => ({ idx: Number(k), owner: v as string }))
+    .filter((x) => x.owner === me && map?.cells[x.idx])
+    .sort((a, b) => a.idx - b.idx);
+  const canSell = !myTurn; // торгуются только те, кто сейчас не играет
+  const joyAppliable = (c: CardDef) =>
+    !c.chaos && c.effect.type !== 'immuneSega' && c.effect.type !== 'immuneNes';
 
   return (
     <div className="fixed inset-0 z-[96] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-[rgba(4,6,14,0.88)]" onClick={onClose} />
-      <div className="relative pixel-panel pixel-corners pop-in w-full max-w-2xl max-h-[92vh] overflow-y-auto p-5">
+      <div className="relative pixel-panel pixel-corners pop-in w-full max-w-3xl max-h-[92vh] overflow-y-auto p-5">
         <div className="flex items-center gap-2 mb-3 flex-wrap">
           <span className="text-teal">{Ic.grid(18)}</span>
           <span className="font-display uppercase tracking-wider text-paper text-sm">Инвентарь</span>
           <span className="tick-label text-gold">{fmtClock(mePlayer?.secLeft ?? 0)} · {mePlayer?.triesLeft ?? 0} поп.</span>
+          {myTurn && <span className="tick-label text-magma">ваш ход — торги недоступны</span>}
           <GhostBtn small className="ml-auto" onClick={onClose}>{Ic.cross(12)} Закрыть</GhostBtn>
         </div>
 
@@ -1400,14 +1587,18 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
           <div className="space-y-2 mb-4">
             <div className="tick-label text-gold">💼 Предложения вам</div>
             {incoming.map((o) => {
-              const info = findCard(o.cardId);
+              const info = findCard(o.cardId ?? '');
+              const item = o.cellIdx !== undefined ? cellTitle(o.cellIdx) : info?.card.name ?? '—';
+              const isCell = o.cellIdx !== undefined;
               const afford = (mePlayer?.secLeft ?? 0) >= o.priceMin * 60 && (mePlayer?.triesLeft ?? 0) >= o.priceTries;
               const counterSent = o.status === 'countered';
               return (
                 <div key={o.id} className="border-2 border-gold bg-gold/10 px-3 py-2.5 space-y-2">
                   <div className="text-[12px] text-paper">
-                    <span className="font-display uppercase">{info?.ownerName ?? 'Игрок'}</span> предлагает «{info?.card.name ?? '—'}» за {fmtPrice(o.priceMin, o.priceTries)}
+                    <span className="font-display uppercase">{info?.ownerName ?? s.players.find((p) => p.id === o.from)?.name ?? 'Игрок'}</span>{' '}
+                    предлагает {isCell ? 'ЯЧЕЙКУ' : 'карточку'} «{item}» за {fmtPrice(o.priceMin, o.priceTries)}
                   </div>
+                  {isCell && <div className="text-[10.5px] text-dim">Покупка ячейки: хозяином становитесь вы, задание остаётся прежним — создавать новое не нужно.</div>}
                   {counterSent ? (
                     <>
                       <div className="text-[11px] text-dim">Вы предложили встречную цену: {fmtPrice(o.counterMin ?? 0, o.counterTries ?? 0)} — ждём ответа владельца…</div>
@@ -1464,10 +1655,11 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
             <div className="tick-label text-sky">📤 Ваши предложения</div>
             {outgoing.map((o) => {
               const buyer = s.players.find((p) => p.id === o.to);
+              const item = o.cellIdx !== undefined ? cellTitle(o.cellIdx) : findCard(o.cardId ?? '')?.card.name ?? '—';
               return (
                 <div key={o.id} className="border-2 border-edge bg-panel px-3 py-2.5 space-y-1.5">
                   {o.status === 'pending' ? (
-                    <div className="text-[12px] text-paper">«{findCard(o.cardId)?.card.name ?? '—'}» → {buyer?.name ?? '—'}: ждём ответа…</div>
+                    <div className="text-[12px] text-paper">«{item}» → {buyer?.name ?? '—'}: ждём ответа…</div>
                   ) : (
                     <div className="text-[12px] text-paper">
                       {buyer?.name ?? '—'} предлагает встречную цену: {fmtPrice(o.counterMin ?? 0, o.counterTries ?? 0)}
@@ -1489,10 +1681,15 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
           </div>
         )}
 
-        {/* форма продажи */}
-        {sellCard && (
+        {/* форма продажи карточки или ячейки */}
+        {sellSel && (
           <div className="border-2 border-gold/60 bg-gold/5 p-3 mb-4 space-y-2">
-            <div className="font-display text-[12px] uppercase text-gold">Продажа: {sellCard.name}</div>
+            <div className="font-display text-[12px] uppercase text-gold">
+              Продажа: {sellSel.kind === 'cell' ? 'ячейка' : 'карточка'} «{sellSel.name}»
+            </div>
+            {sellSel.kind === 'cell' && (
+              <p className="text-[10.5px] text-dim">Покупатель станет хозяином ячейки; задание останется прежним — новое создавать не нужно.</p>
+            )}
             <Field label="Покупатель (играющего сейчас предложить нельзя)">
               <select className="field-in w-full px-2 py-2 text-sm" value={sellTo} onChange={(e) => setSellTo(e.target.value)}>
                 <option value="">— выбрать игрока —</option>
@@ -1515,65 +1712,216 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
                 color="gold"
                 disabled={!sellTo || sellMin + sellTries <= 0}
                 onClick={() => {
-                  dispatch({ t: 'tradeOffer', id: me, cardId: sellCard.id, to: sellTo, priceMin: sellMin, priceTries: sellTries });
-                  setSellCardId('');
+                  dispatch({
+                    t: 'tradeOffer', id: me, to: sellTo, priceMin: sellMin, priceTries: sellTries,
+                    ...(sellSel.kind === 'cell' ? { cellIdx: Number(sellSel.id) } : { cardId: sellSel.id }),
+                  });
+                  setSellSel(null);
                   setSellTo('');
                 }}
               >
                 {Ic.check(14)} Предложить за {fmtPrice(sellMin, sellTries)}
               </PxBtn>
-              <GhostBtn onClick={() => setSellCardId('')}>Отмена</GhostBtn>
+              <GhostBtn onClick={() => setSellSel(null)}>Отмена</GhostBtn>
             </div>
           </div>
         )}
 
-        {/* мои карточки */}
+        {/* мои карточки — «как в монополии»: вертикальные карточки с цветной шапкой */}
         <div className="space-y-2">
           <div className="tick-label text-faint">Мои карточки · {inv.length}</div>
-          {inv.map((c) => (
-            <div key={c.id} className={`border-2 px-3 py-2.5 ${c.chaos ? 'border-magma/50 bg-magma/5' : 'border-edge bg-panel'}`}>
-              <div className="flex items-start gap-2">
-                <div className="min-w-0 flex-1">
-                  <div className="font-display text-[12px] uppercase text-paper truncate">{c.name}</div>
-                  <div className="text-[10.5px] text-dim leading-tight mt-0.5">{c.desc}</div>
-                  {c.chaos ? (
-                    <span className="inline-block mt-1 font-pixel text-[8px] px-1.5 py-0.5 bg-magma/20 text-magma">😈 ПАКОСТЬ · клеится к своему заданию</span>
-                  ) : (
-                    <span className="inline-block mt-1 font-pixel text-[8px] px-1.5 py-0.5 bg-teal/15 text-teal">ЭФФЕКТ · {effectLabel(c.effect)}</span>
-                  )}
-                </div>
-                <div className="flex flex-col gap-1.5 shrink-0">
-                  {!c.chaos && (
-                    <PxBtn
-                      small
-                      color="teal"
-                      disabled={!myTurn || busy || reservedIds.has(c.id)}
-                      title={!myTurn || busy ? 'Применять — только в свой ход до броска, когда стол пуст' : undefined}
-                      onClick={() => { dispatch({ t: 'useCard', id: me, cardId: c.id }); sfx.card(); }}
-                    >
-                      {Ic.play(12)} Применить
-                    </PxBtn>
-                  )}
-                  <GhostBtn
-                    small
-                    disabled={reservedIds.has(c.id)}
-                    title={reservedIds.has(c.id) ? 'Карточка уже участвует в сделке' : undefined}
-                    onClick={() => { setSellCardId(c.id); setSellTo(''); setSellMin(5); setSellTries(0); sfx.click(); }}
-                  >
-                    Продать
-                  </GhostBtn>
-                </div>
-              </div>
-            </div>
-          ))}
-          {inv.length === 0 && (
+          {inv.length === 0 ? (
             <div className="text-center py-6 text-dim text-[12px]">
-              Инвентарь пуст. Пакости выпадают на ячейках-шансах (бонусах) — если создатель карты их добавил,
-              а обычные карточки «в инвентарь» — на бонусах и ловушках. Карточку можно применить или продать сопернику.
+              Инвентарь пуст. Пакости выпадают на ячейках-шансах (если создатель карты их добавил),
+              радости — за прохождение заданий с наградой. Карточку можно применить, продать или обменять.
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-3 pt-1">
+              {inv.map((c, i) => {
+                const col = cardColors(c);
+                const reserved = reservedIds.has(c.id);
+                return (
+                  <div key={`${c.id}-${i}`} className="flex flex-col gap-1.5" style={{ width: 124 }}>
+                    {/* карточка «как в монополии»: вертикаль 1:2, обводка цветом, название в шапке */}
+                    <div
+                      className="flex flex-col border-[3px] bg-[#f6f2e3] text-[#23263a] shadow-[0_5px_0_rgba(0,0,0,0.4)]"
+                      style={{ borderColor: col.band, height: 186 }}
+                      title={c.desc}
+                    >
+                      <div
+                        className="text-center font-display uppercase text-[10px] leading-[1.15] px-1 py-1.5 border-b-[3px] break-words"
+                        style={{ borderColor: col.band, background: col.band, color: col.ink }}
+                      >
+                        {c.name}
+                      </div>
+                      <div className="flex-1 px-1.5 py-1 text-[9px] leading-[1.25] overflow-hidden">{c.desc}</div>
+                      <div className="px-1.5 py-1 text-center font-pixel text-[7px] border-t-[3px]" style={{ borderColor: col.band, color: col.ink }}>
+                        {cardBadge(c)}
+                      </div>
+                    </div>
+                    {reserved && <span className="font-pixel text-[7px] text-gold text-center">💼 В СДЕЛКЕ</span>}
+                    <div className="flex gap-1">
+                      {joyAppliable(c) && (
+                        <button
+                          className="flex-1 font-pixel text-[7px] py-1 border-2 border-teal text-teal hover:bg-teal/15 cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+                          disabled={!myTurn || busy || reserved || joyUsedThisTurn}
+                          title={
+                            reserved ? 'Карточка зарезервирована сделкой'
+                            : !myTurn || busy ? 'Применять — только в свой ход до броска, когда стол пуст'
+                            : joyUsedThisTurn ? 'Одна радость на ход уже использована'
+                            : undefined
+                          }
+                          onClick={() => { dispatch({ t: 'useCard', id: me, cardId: c.id }); sfx.card(); }}
+                        >
+                          ▶ ПРИМЕНИТЬ
+                        </button>
+                      )}
+                      <button
+                        className="flex-1 font-pixel text-[7px] py-1 border-2 border-edge text-dim hover:border-gold hover:text-gold cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+                        disabled={!canSell || reserved}
+                        title={
+                          reserved ? 'Карточка уже участвует в сделке'
+                          : !canSell ? 'В свой ход торговать нельзя'
+                          : undefined
+                        }
+                        onClick={() => { setSellSel({ kind: 'card', id: c.id, name: c.name }); setSellTo(''); setSellMin(5); setSellTries(0); sfx.click(); }}
+                      >
+                        ПРОДАТЬ
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
+
+        {/* мои ячейки — можно продать/обменять */}
+        <div className="space-y-2 mt-5">
+          <div className="tick-label text-faint">Мои ячейки · {myCells.length}</div>
+          {myCells.length === 0 ? (
+            <div className="text-center py-4 text-dim text-[12px]">
+              Захваченных ячеек пока нет. Пройдите задание на чужой или свободной ячейке — и сможете продавать её соперникам.
+            </div>
+          ) : (
+            <div className="grid sm:grid-cols-2 gap-2">
+              {myCells.map(({ idx }) => {
+                const cell = map!.cells[idx];
+                const underChallenge = s.challenge?.cellIdx === idx;
+                const reserved = reservedCells.has(idx);
+                return (
+                  <div key={idx} className="border-2 px-3 py-2.5 flex items-center gap-2 bg-panel" style={{ borderColor: cell.color || 'var(--color-edge)' }}>
+                    <span className="w-3.5 h-3.5 border border-abyss shrink-0" style={{ background: cell.color ?? '#5aa9ff' }} />
+                    <div className="min-w-0 flex-1">
+                      <div className="font-display text-[11px] uppercase text-paper truncate">{cellTitle(idx)}</div>
+                      <div className="text-[10px] text-dim truncate">{cell.task ? `Ром: ${cell.task.title}` : 'без задания'}</div>
+                    </div>
+                    <GhostBtn
+                      small
+                      disabled={!canSell || reserved || underChallenge}
+                      title={
+                        reserved ? 'Ячейка уже участвует в сделке'
+                        : underChallenge ? 'На ячейке сейчас идёт задание'
+                        : !canSell ? 'В свой ход торговать нельзя'
+                        : undefined
+                      }
+                      onClick={() => { setSellSel({ kind: 'cell', id: String(idx), name: cellTitle(idx) }); setSellTo(''); setSellMin(5); setSellTries(0); sfx.click(); }}
+                    >
+                      Продать
+                    </GhostBtn>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <p className="text-[10px] text-faint leading-tight">
+            Торговать могут только игроки, которые сейчас НЕ играют: играющий видит трансляцию, но купить/продать не может.
+          </p>
+        </div>
       </div>
     </div>
+  );
+}
+
+/* ---------- осмотр ячейки на карте (для всех, включая зрителей) ---------- */
+
+function CellInspectModal({ idx, onClose }: { idx: number; onClose: () => void }) {
+  const st = useApp();
+  const s = st.session;
+  const map = st.sessionMap;
+  const cell = map?.cells[idx];
+  const task = s && map ? cellTaskOf(s, map, idx) : null;
+  const taskImg = useBlobImage(task?.imageId);
+  const cellImg = useBlobImage(cell?.imageId);
+  if (!s || !map || !cell) return null;
+  const ownerId = s.captured?.[idx];
+  const owner = ownerId ? s.players.find((p) => p.id === ownerId) : null;
+  const revealed = (s.revealed ?? []).includes(idx) || !!ownerId;
+  const hidden = !!st.options.hideUnrevealed && !revealed;
+  const rom = task ? st.roms.find((r) => r.id === task.romId) : undefined;
+  const typeLabel = cell.type === 'task' ? 'Задание' : cell.type === 'bonus' ? 'Бонус (шанс)' : cell.type === 'trap' ? 'Ловушка' : 'Квиз';
+  const typeColor = cell.type === 'task' ? 'text-gold' : cell.type === 'bonus' ? 'text-teal' : cell.type === 'trap' ? 'text-coral' : 'text-sky';
+  const joyMeta = task?.joy ? JOY_LIST.find((j) => j.id === task.joy) : null;
+  return (
+    <Modal title={`Ячейка №${cell.n}${cell.label ? ` · ${cell.label}` : ''}`} icon={Ic.target(16)} w="max-w-md" onClose={onClose}>
+      {hidden ? (
+        <p className="text-[12px] text-dim text-center py-6">
+          Ячейка ещё не открывалась в партии — содержимое скрыто опцией «скрывать непосещённые ячейки».
+        </p>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`hud-chip pixel-corners px-3 py-1.5 font-display text-[11px] uppercase ${typeColor}`}>{typeLabel}</span>
+            {cell.color && <span className="w-4 h-4 border border-abyss" style={{ background: cell.color }} />}
+            {owner ? (
+              <span className="hud-chip pixel-corners px-3 py-1.5 text-[10.5px]" style={{ color: PLAYER_COLORS[owner.color] }}>
+                Хозяин: {owner.name}
+              </span>
+            ) : (
+              <span className="hud-chip pixel-corners px-3 py-1.5 text-[10.5px] text-dim">Хозяина нет</span>
+            )}
+          </div>
+          {(cellImg || taskImg) && (
+            <img src={(taskImg ?? cellImg)!} alt="" className="w-full border-[3px] border-edge object-cover max-h-44" />
+          )}
+          {cell.type === 'task' && task && (
+            <>
+              <div>
+                <div className="tick-label text-gold mb-1">Задание</div>
+                <div className="font-display uppercase text-[13px] text-paper">{task.title}</div>
+                <p className="text-[12px] text-dim leading-relaxed mt-1">{task.desc}</p>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[9px] text-faint">
+                  {rom ? (rom.ext === 'nes' ? 'NES' : 'SEGA') : 'РОМ'} · {rom?.name ?? task.romId}
+                </span>
+                {task.chaos && (
+                  <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[9px] text-magma" title={CHAOS_LIST.find((c) => c.kind === task.chaos)?.desc}>
+                    😈 {chaosLabel(task.chaos)}
+                  </span>
+                )}
+                {joyMeta && (
+                  <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[9px] text-teal" title={joyMeta.desc}>
+                    🎉 {joyMeta.name}
+                  </span>
+                )}
+              </div>
+            </>
+          )}
+          {cell.type === 'task' && !task && (
+            <p className="text-[12px] text-dim">Задания на этой ячейке нет — передышка (пока игрок не создаст своё).</p>
+          )}
+          {cell.type === 'bonus' && (
+            <p className="text-[12px] text-dim">Ячейка-шанс: выпадает случайная карточка из колоды бонусов ({map.bonusCards.length} шт., включая пакости).</p>
+          )}
+          {cell.type === 'trap' && (
+            <p className="text-[12px] text-dim">Ячейка-ловушка: выпадает случайная карточка из колоды ловушек ({map.trapCards.length} шт.).</p>
+          )}
+          {cell.type === 'quiz' && (
+            <p className="text-[12px] text-dim">Ячейка-квиз: прозвучит случайный вопрос из колоды ({(map.quizzes ?? []).length} шт.).</p>
+          )}
+        </div>
+      )}
+    </Modal>
   );
 }
