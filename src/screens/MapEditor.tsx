@@ -36,10 +36,22 @@ async function importImage(file: File, maxSide: number, jpeg = false): Promise<{
 }
 
 /* ---------- ЭКСТРАКТОР ТАЙЛОВ: нарезка картинки с однотонным фоном ----------
-   Как работает: ищем цвет фона по рамке картинки, отделяем от него фигуры,
-   находим связные пятна и вырезаем каждое в отдельный тайл с прозрачностью. */
+   Пиксели классифицируются ПО ЦВЕТУ (а не заливкой от края): так чёрные контуры
+   спрайтов на чёрном фоне (листы типа mariouniverse) не «протекают» и не склеивают
+   всё в одно пятно. Настройки: цвет фона (авто/пипетка/палитра), допуск,
+   минимальная сторона тайла, склейка частей одного тайла через щель. */
 
-async function extractTilesFromImage(file: File, thr: number): Promise<TileImg[]> {
+export interface ExtractParams {
+  bgMode: 'auto' | 'custom';
+  bg: string;       // цвет фона при bgMode='custom' (#rrggbb)
+  thr: number;      // допуск по цвету 0..200
+  minSize: number;  // минимальная сторона тайла, px
+  mergeGap: number; // склейка частей: щель между кусками одного тайла, px (0 = выкл)
+}
+
+export interface ExtractInfo { W: number; H: number; data: Uint8ClampedArray }
+
+async function extractTilesFromImage(file: File, p: ExtractParams, infoRef?: { current: ExtractInfo | null }): Promise<{ tiles: TileImg[]; bg: string; hasAlpha: boolean }> {
   const url0 = URL.createObjectURL(file);
   try {
     const img = await new Promise<HTMLImageElement>((res, rej) => {
@@ -56,79 +68,147 @@ async function extractTilesFromImage(file: File, thr: number): Promise<TileImg[]
     const cx = cv.getContext('2d', { willReadFrequently: true })!;
     cx.drawImage(img, 0, 0, W, H);
     const data = cx.getImageData(0, 0, W, H).data;
+    if (infoRef) infoRef.current = { W, H, data };
+    const N = W * H;
 
-    // 1) фоновый цвет — средний цвет рамки картинки (полоса по краю)
-    let br = 0, bgc = 0, bb = 0, bn = 0;
-    const band = Math.max(2, Math.round(Math.min(W, H) * 0.012));
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const edgeX = x < band || x >= W - band;
-        const edgeY = y < band || y >= H - band;
-        if (!edgeX && !edgeY) { x = Math.max(x, W - band - 1); continue; }
-        const i = (y * W + x) * 4;
-        br += data[i]; bgc += data[i + 1]; bb += data[i + 2]; bn++;
+    // 1) прозрачность: если много прозрачных пикселей — фон уже прозрачный
+    let transp = 0;
+    for (let q = 0; q < N; q++) if (data[q * 4 + 3] < 10) transp++;
+    const hasAlpha = transp > N * 0.25;
+
+    // 2) цвет фона: АВТО = самый ЧАСТЫЙ цвет широкой рамки (не средний — так
+    //    спрайты у края не портят цвет); или выбранный пользователем (пипетка/палитра)
+    let foundBg = '';
+    let br = 0, bgc = 0, bb = 0;
+    if (p.bgMode === 'custom') {
+      const h = p.bg.replace('#', '');
+      br = parseInt(h.slice(0, 2), 16) || 0;
+      bgc = parseInt(h.slice(2, 4), 16) || 0;
+      bb = parseInt(h.slice(4, 6), 16) || 0;
+      foundBg = p.bg;
+    } else {
+      const band = Math.max(3, Math.round(Math.min(W, H) * 0.03));
+      const buckets = new Map<number, { r: number; g: number; b: number; n: number }>();
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const eX = x < band || x >= W - band, eY = y < band || y >= H - band;
+          if (!eX && !eY) { x = Math.max(x, W - band - 1); continue; }
+          const i = (y * W + x) * 4;
+          if (data[i + 3] < 10) continue;
+          const key = ((data[i] >> 3) << 10) | ((data[i + 1] >> 3) << 5) | (data[i + 2] >> 3);
+          const b = buckets.get(key);
+          if (b) { b.r += data[i]; b.g += data[i + 1]; b.b += data[i + 2]; b.n++; }
+          else buckets.set(key, { r: data[i], g: data[i + 1], b: data[i + 2], n: 1 });
+        }
       }
-    }
-    if (!bn) return [];
-    br /= bn; bgc /= bn; bb /= bn;
-
-    // 2) дистанция каждого пикселя от фона
-    const dist = new Float32Array(W * H);
-    for (let p = 0; p < W * H; p++) {
-      const i = p * 4;
-      dist[p] = data[i + 3] < 10 ? 999 : Math.hypot(data[i] - br, data[i + 1] - bgc, data[i + 2] - bb);
+      const list = Array.from(buckets.values());
+      if (!list.length) return { tiles: [], bg: '#000000', hasAlpha };
+      list.sort((a, b) => b.n - a.n);
+      br = list[0].r / list[0].n; bgc = list[0].g / list[0].n; bb = list[0].b / list[0].n;
+      const hex = (v: number) => Math.round(v).toString(16).padStart(2, '0');
+      foundBg = `#${hex(br)}${hex(bgc)}${hex(bb)}`;
     }
 
-    // 3) заливка ФОНА от рамки (все пиксели с малой дистанцией, достижимые с края)
-    const isBg = new Uint8Array(W * H);
-    const stack = new Int32Array(W * H);
+    // 3) классификация пикселей: фон = прозрачный ИЛИ близкий к цвету фона (допуск)
+    const isBg = new Uint8Array(N);
+    for (let q = 0; q < N; q++) {
+      const i = q * 4;
+      if (data[i + 3] < 10) { isBg[q] = 1; continue; }
+      if (Math.hypot(data[i] - br, data[i + 1] - bgc, data[i + 2] - bb) <= p.thr) isBg[q] = 1;
+    }
+
+    // 4) связные пятна не-фона (8-связность: диагональные куски держатся вместе)
+    const label = new Int32Array(N).fill(-1);
+    let comps: { minX: number; minY: number; maxX: number; maxY: number; area: number }[] = [];
+    const stack = new Int32Array(N);
     let sp = 0;
-    const pushBg = (p: number) => { if (!isBg[p] && dist[p] <= thr) { isBg[p] = 1; stack[sp++] = p; } };
-    for (let x = 0; x < W; x++) { pushBg(x); pushBg((H - 1) * W + x); }
-    for (let y = 0; y < H; y++) { pushBg(y * W); pushBg(y * W + W - 1); }
-    while (sp > 0) {
-      const p = stack[--sp];
-      const x = p % W, y = (p / W) | 0;
-      if (x > 0) pushBg(p - 1);
-      if (x < W - 1) pushBg(p + 1);
-      if (y > 0) pushBg(p - W);
-      if (y < H - 1) pushBg(p + W);
-    }
-
-    // 4) связные пятна объектов (BFS по !isBg)
-    const label = new Int32Array(W * H).fill(-1);
-    const comps: { id: number; minX: number; minY: number; maxX: number; maxY: number; area: number }[] = [];
-    for (let p0 = 0; p0 < W * H; p0++) {
-      if (isBg[p0] || label[p0] >= 0) continue;
+    for (let q0 = 0; q0 < N; q0++) {
+      if (isBg[q0] || label[q0] >= 0) continue;
       const id = comps.length;
-      const c = { id, minX: W, minY: H, maxX: 0, maxY: 0, area: 0 };
-      label[p0] = id; stack[0] = p0; sp = 1;
+      const c = { minX: W, minY: H, maxX: 0, maxY: 0, area: 0 };
+      label[q0] = id; stack[0] = q0; sp = 1;
       while (sp > 0) {
-        const p = stack[--sp];
-        const x = p % W, y = (p / W) | 0;
+        const q = stack[--sp];
+        const x = q % W, y = (q / W) | 0;
         c.area++;
         if (x < c.minX) c.minX = x;
         if (y < c.minY) c.minY = y;
         if (x > c.maxX) c.maxX = x;
         if (y > c.maxY) c.maxY = y;
-        if (x > 0 && !isBg[p - 1] && label[p - 1] < 0) { label[p - 1] = id; stack[sp++] = p - 1; }
-        if (x < W - 1 && !isBg[p + 1] && label[p + 1] < 0) { label[p + 1] = id; stack[sp++] = p + 1; }
-        if (y > 0 && !isBg[p - W] && label[p - W] < 0) { label[p - W] = id; stack[sp++] = p - W; }
-        if (y < H - 1 && !isBg[p + W] && label[p + W] < 0) { label[p + W] = id; stack[sp++] = p + W; }
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= H) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue;
+            const nx = x + dx;
+            if (nx < 0 || nx >= W) continue;
+            const np = ny * W + nx;
+            if (!isBg[np] && label[np] < 0) { label[np] = id; stack[sp++] = np; }
+          }
+        }
       }
       comps.push(c);
     }
+    if (!comps.length) return { tiles: [], bg: foundBg, hasAlpha };
 
-    // 5) отсеиваем мусор (мелкие пятна), не более 80 крупнейших
-    const minSide = 12;
-    const good = comps.filter((c) => c.maxX - c.minX + 1 >= minSide && c.maxY - c.minY + 1 >= minSide && c.area >= 64);
-    good.sort((a, b) => b.area - a.area);
-    const take = good.slice(0, 80);
+    // 5) СКЛЕЙКА ЧАСТЕЙ: куски одного тайла с щелью ≤ mergeGap объединяем (union-find
+    //    по пересечению раздутых рамок); хвосты/огоньки/щиты одного врага слипаются
+    if (p.mergeGap > 0) {
+      const keptIdx: number[] = [];
+      for (let i = 0; i < comps.length; i++) if (comps[i].area >= 4) keptIdx.push(i); // мусор <4px не склеиваем
+      if (keptIdx.length > 1) {
+        const parent = new Int32Array(keptIdx.length);
+        for (let i = 0; i < keptIdx.length; i++) parent[i] = i;
+        const find = (a: number): number => { while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+        const g = p.mergeGap;
+        for (let i = 0; i < keptIdx.length; i++) {
+          const a = comps[keptIdx[i]];
+          for (let j = i + 1; j < keptIdx.length; j++) {
+            const b = comps[keptIdx[j]];
+            if (a.minX - g > b.maxX || b.minX - g > a.maxX || a.minY - g > b.maxY || b.minY - g > a.maxY) continue;
+            const ri = find(i), rj = find(j);
+            if (ri !== rj) parent[rj] = ri;
+          }
+        }
+        const merged = new Map<number, { minX: number; minY: number; maxX: number; maxY: number; area: number; members: number[] }>();
+        for (let i = 0; i < keptIdx.length; i++) {
+          const r = find(i);
+          const m = merged.get(r);
+          const src = comps[keptIdx[i]];
+          if (!m) merged.set(r, { ...src, members: [i] });
+          else {
+            m.minX = Math.min(m.minX, src.minX);
+            m.minY = Math.min(m.minY, src.minY);
+            m.maxX = Math.max(m.maxX, src.maxX);
+            m.maxY = Math.max(m.maxY, src.maxY);
+            m.area += src.area;
+            m.members.push(i);
+          }
+        }
+        // переметка пикселей: метка → номер объединённого пятна; выброшенный мусор → -1
+        const remap = new Int32Array(comps.length).fill(-1);
+        const mergedList: { minX: number; minY: number; maxX: number; maxY: number; area: number }[] = [];
+        merged.forEach((m, r) => {
+          const ni = mergedList.length;
+          mergedList.push({ minX: m.minX, minY: m.minY, maxX: m.maxX, maxY: m.maxY, area: m.area });
+          for (const k of m.members) remap[keptIdx[k]] = ni;
+        });
+        for (let q = 0; q < N; q++) if (label[q] >= 0) label[q] = remap[label[q]];
+        comps = mergedList;
+      }
+    }
 
-    // 6) вырезаем каждое пятно в PNG с прозрачным фоном
+    // 6) фильтр по минимальной стороне + сортировка «как на листе» (сверху вниз, слева направо).
+    //    ВАЖНО: храним исходный индекс пятна (idx) — метки пикселей в label остаются в исходном порядке
+    const minSide = Math.max(2, p.minSize);
+    let good = comps.map((c, idx) => ({ c, idx })).filter((x) => x.c.maxX - x.c.minX + 1 >= minSide && x.c.maxY - x.c.minY + 1 >= minSide);
+    good.sort((a, b) => (Math.abs(a.c.minY - b.c.minY) > 10 ? a.c.minY - b.c.minY : a.c.minX - b.c.minX));
+    good = good.slice(0, 200);
+
+    // 7) вырезаем каждый тайл в PNG с прозрачным фоном (чужие пиксели не берём)
     const out: TileImg[] = [];
-    const pad = 2;
-    take.forEach((c, ci) => {
+    const pad = 1;
+    good.forEach(({ c, idx }, ci) => {
       const x0 = Math.max(0, c.minX - pad), y0 = Math.max(0, c.minY - pad);
       const x1 = Math.min(W - 1, c.maxX + pad), y1 = Math.min(H - 1, c.maxY + pad);
       const w = x1 - x0 + 1, h = y1 - y0 + 1;
@@ -138,9 +218,9 @@ async function extractTilesFromImage(file: File, thr: number): Promise<TileImg[]
       const timg = tcx.createImageData(w, h);
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
-          const p = (y0 + y) * W + (x0 + x);
-          if (isBg[p] || label[p] !== c.id) continue;
-          const si = p * 4, di = (y * w + x) * 4;
+          const q = (y0 + y) * W + (x0 + x);
+          if (isBg[q] || label[q] !== idx) continue;
+          const si = q * 4, di = (y * w + x) * 4;
           timg.data[di] = data[si];
           timg.data[di + 1] = data[si + 1];
           timg.data[di + 2] = data[si + 2];
@@ -154,7 +234,7 @@ async function extractTilesFromImage(file: File, thr: number): Promise<TileImg[]
         dataUrl: tcv.toDataURL('image/png'),
       });
     });
-    return out;
+    return { tiles: out, bg: foundBg, hasAlpha };
   } finally {
     URL.revokeObjectURL(url0);
   }
@@ -257,7 +337,7 @@ export default function MapEditor() {
   const [linkFrom, setLinkFrom] = useState<number | null>(null);
   const [showGrid, setShowGrid] = useState(true);
   const [snap, setSnap] = useState(false);
-  const [extract, setExtract] = useState<{ file: File; src: string; thr: number; tiles: TileImg[]; busy: boolean; name: string } | null>(null);
+  const [extract, setExtract] = useState<{ file: File; src: string; name: string; busy: boolean; bgMode: 'auto' | 'custom'; bg: string; foundBg: string; thr: number; minSize: number; mergeGap: number; tiles: TileImg[] } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
@@ -461,37 +541,70 @@ export default function MapEditor() {
   };
 
   /* ---------- ЭКСТРАКТОР: нарезка тайлов из картинки с однотонным фоном ---------- */
+  const exInfoRef = useRef<{ W: number; H: number; data: Uint8ClampedArray } | null>(null); // пиксели превью для пипетки
+  const exRunRef = useRef(0);
+  const exTimerRef = useRef<number | null>(null);
+
+  const runExtract = async (base: { file: File; src: string; bgMode: 'auto' | 'custom'; bg: string; thr: number; minSize: number; mergeGap: number; name: string }, patch: Partial<typeof base>) => {
+    const next = { ...base, ...patch };
+    setExtract((ex) => (ex && ex.src === next.src ? { ...ex, ...next, busy: true } : ex));
+    const run = ++exRunRef.current;
+    try {
+      const r = await extractTilesFromImage(next.file, { bgMode: next.bgMode, bg: next.bg, thr: next.thr, minSize: next.minSize, mergeGap: next.mergeGap }, exInfoRef);
+      if (exRunRef.current !== run) return;
+      setExtract((ex) => (ex && ex.src === next.src ? { ...ex, tiles: r.tiles, foundBg: r.bg, busy: false } : ex));
+      if (!r.tiles.length) toast('Ничего не нашлось: снизьте мин. размер, поменяйте фон или допуск', 'err');
+      else sfx.coin();
+    } catch {
+      if (exRunRef.current !== run) return;
+      setExtract((ex) => (ex && ex.src === next.src ? { ...ex, busy: false } : ex));
+      toast('Не удалось обработать картинку', 'err');
+    }
+  };
+
+  /* смена параметра: мгновенно показываем цифру, пересчёт — с небольшой задержкой */
+  const tuneExtract = (patch: { bgMode?: 'auto' | 'custom'; bg?: string; thr?: number; minSize?: number; mergeGap?: number }) => {
+    if (!extract) return;
+    const base = { ...extract, ...patch };
+    setExtract(base);
+    if (exTimerRef.current) window.clearTimeout(exTimerRef.current);
+    exTimerRef.current = window.setTimeout(() => void runExtract(base, {}), 180);
+  };
+
+  /* ПИПЕТКА: клик по превью — взять цвет фона из этой точки */
+  const pipetteBg = (e: { clientX: number; clientY: number; currentTarget: HTMLImageElement }) => {
+    if (!extract) return;
+    const im = e.currentTarget;
+    const info = exInfoRef.current;
+    if (!info || !im.naturalWidth) return;
+    const r = im.getBoundingClientRect();
+    const sc0 = Math.min(r.width / im.naturalWidth, r.height / im.naturalHeight); // object-contain: учитываем поля
+    const dw = im.naturalWidth * sc0, dh = im.naturalHeight * sc0;
+    const ox = (r.width - dw) / 2, oy = (r.height - dh) / 2;
+    const fx = (e.clientX - r.left - ox) / dw;
+    const fy = (e.clientY - r.top - oy) / dh;
+    if (fx < 0 || fy < 0 || fx >= 1 || fy >= 1) return;
+    const x = Math.min(info.W - 1, Math.round(fx * info.W));
+    const y = Math.min(info.H - 1, Math.round(fy * info.H));
+    const i = (y * info.W + x) * 4;
+    const hex = (v: number) => v.toString(16).padStart(2, '0');
+    tuneExtract({ bgMode: 'custom', bg: `#${hex(info.data[i])}${hex(info.data[i + 1])}${hex(info.data[i + 2])}` });
+    sfx.hover();
+  };
+
   const openExtract = async (f: File | null | undefined) => {
     if (!f) return;
     if (!f.type.startsWith('image/')) { toast('Это не картинка', 'err'); return; }
     const name = f.name.replace(/\.[a-z0-9]+$/i, '').slice(0, 20) || 'Вырезанное';
-    setExtract({ file: f, src: URL.createObjectURL(f), thr: 45, tiles: [], busy: true, name });
+    const st = { file: f, src: URL.createObjectURL(f), name, busy: true, bgMode: 'auto' as const, bg: '#000000', foundBg: '', thr: 40, minSize: 12, mergeGap: 3, tiles: [] as TileImg[] };
+    setExtract(st);
     sfx.hover();
-    try {
-      const tiles = await extractTilesFromImage(f, 45);
-      setExtract((ex) => (ex ? { ...ex, tiles, busy: false } : ex));
-      if (!tiles.length) toast('Ничего не нашлось — уменьшите порог и нажмите «Нарезать заново»', 'err');
-    } catch {
-      setExtract((ex) => (ex ? { ...ex, tiles: [], busy: false } : ex));
-      toast('Не удалось обработать картинку', 'err');
-    }
-  };
-
-  const rerunExtract = async (thr: number) => {
-    if (!extract) return;
-    setExtract((ex) => (ex ? { ...ex, busy: true } : ex));
-    try {
-      const tiles = await extractTilesFromImage(extract.file, thr);
-      setExtract((ex) => (ex ? { ...ex, tiles, busy: false, thr } : ex));
-      if (!tiles.length) toast('Ничего не нашлось — попробуйте другой порог', 'err');
-      else sfx.coin();
-    } catch {
-      setExtract((ex) => (ex ? { ...ex, busy: false } : ex));
-      toast('Не удалось обработать картинку', 'err');
-    }
+    await runExtract(st, {});
   };
 
   const closeExtract = () => {
+    if (exTimerRef.current) { window.clearTimeout(exTimerRef.current); exTimerRef.current = null; }
+    exRunRef.current++;
     if (extract) URL.revokeObjectURL(extract.src);
     setExtract(null);
   };
@@ -1383,19 +1496,51 @@ export default function MapEditor() {
       {extract && (
         <Modal title="Нарезка тайлов из картинки" icon={Ic.map(16)} onClose={closeExtract} w="max-w-2xl">
           <p className="text-[12px] text-dim mb-3">
-            Картинка с тайлами на ОДНОТОННОМ фоне: редактор сам найдёт фон, вырежет каждую фигуру
-            и добавит в палитру отдельным спойлером.
+            Картинка с тайлами на однотонном фоне. Укажите фон (клик по превью = пипетка, или АВТО/палитра),
+            подберите допуск, минимальный размер и склейку — нарезка пересчитается сама. Результат добавится в палитру отдельным спойлером.
           </p>
           <div className="flex gap-3 mb-3">
-            <img src={extract.src} alt="исходник" className="w-36 h-36 shrink-0 object-contain border-2 border-edge bg-[#10142a]" />
+            <img
+              src={extract.src}
+              alt="исходник"
+              onClick={pipetteBg}
+              className="w-36 h-36 shrink-0 object-contain border-2 border-edge bg-[repeating-conic-gradient(#141833_0_25%,#0b0e1c_0_50%)_0_0/12px_12px] cursor-crosshair"
+              title="Клик — взять цвет фона пипеткой"
+            />
             <div className="flex-1 min-w-0 space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-dim shrink-0">Фон:</span>
+                <button
+                  onClick={() => tuneExtract({ bgMode: 'auto' })}
+                  className={`px-2 py-1 text-[9px] font-pixel border-2 cursor-pointer ${extract.bgMode === 'auto' ? 'border-gold text-gold' : 'border-edge text-faint hover:text-dim'}`}
+                  title="Найти фон автоматически (самый частый цвет по краям)"
+                >АВТО</button>
+                <input
+                  type="color"
+                  value={extract.bg}
+                  onChange={(e) => tuneExtract({ bgMode: 'custom', bg: e.target.value })}
+                  className="w-8 h-8 border-2 border-edge bg-transparent cursor-pointer p-0"
+                  title="Выбрать цвет фона палитрой"
+                />
+                <span className="tick-label text-faint truncate">
+                  {extract.bgMode === 'custom' ? extract.bg : (extract.foundBg || '…')}
+                </span>
+              </div>
               <div className="flex items-center justify-between">
-                <span className="text-[11px] text-dim">Порог: {extract.thr}</span>
-                <Stepper value={extract.thr} onChange={(v) => { void rerunExtract(v); }} min={10} max={150} step={10} />
+                <span className="text-[11px] text-dim">Допуск фона</span>
+                <Stepper value={extract.thr} onChange={(v) => tuneExtract({ thr: v })} min={0} max={200} step={5} />
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-dim">Мин. размер (px)</span>
+                <Stepper value={extract.minSize} onChange={(v) => tuneExtract({ minSize: v })} min={2} max={120} step={2} />
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-dim">Склейка частей (px)</span>
+                <Stepper value={extract.mergeGap} onChange={(v) => tuneExtract({ mergeGap: v })} min={0} max={40} step={1} />
               </div>
               <p className="text-[10px] text-faint leading-tight">
-                Нарезало ЛИШНЕЕ (фон прилип) — увеличьте порог. Тайлы СКЛЕИЛИСЬ в один — уменьшите.
-                После смены порога нарезка запускается сама.
+                ЛИШНЕЕ прилипло к тайлам — уменьшите допуск. Тайл РАЗВАЛИЛСЯ на части — увеличьте склейку.
+                Разные тайлы слиплись в одно — проверьте фон пипеткой и уменьшите допуск. Мусор в списке — увеличьте мин. размер.
               </p>
               <div className="flex items-center gap-2">
                 <span className="text-[11px] text-dim shrink-0">Название:</span>

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../store';
 import { Field, GhostBtn, Ic, Panel, PxBtn, Stepper } from '../ui';
-import { CELL, drawBoard, fitView } from '../render';
+import { cellAtPoint, drawBoard, fitView } from '../render';
 import { idbPut, uid } from '../db';
 import { cartridgeArt, cardArt, fileToDataUrl } from '../assets';
 import type { CardDef, CardEffect, CellType, ChaosKind, EffectType, GameMap, TaskDef } from '../types';
@@ -158,10 +158,12 @@ export default function TaskEditor() {
     const v = viewRef.current;
     const wx = v.x + (e.clientX - r.left - r.width / 2) / v.zoom;
     const wy = v.y + (e.clientY - r.top - r.height / 2) / v.zoom;
-    const cx = Math.floor(wx / CELL), cy = Math.floor(wy / CELL);
     const m = mapRef.current;
     if (!m) return;
-    const idx = m.cells.findIndex((c) => c.x === cx && c.y === cy);
+    // БАГ-ФИКС: раньше искали по старой сетке (c.x/c.y по 64px), а ячейки нового
+    // редактора — свободные (cx/cy/cw/ch в пикселях) и не находились вообще.
+    // Теперь cellAtPoint понимает ОБА формата.
+    const idx = cellAtPoint(m, wx, wy);
     setSelCell(idx >= 0 ? idx : null);
     if (idx >= 0) sfx.hover();
   };
@@ -338,6 +340,19 @@ export default function TaskEditor() {
         <GhostBtn onClick={() => { setMap(null); setSelCell(null); }}>{Ic.back(14)} Карты</GhostBtn>
         <h1 className="font-display text-lg uppercase tracking-wider text-magma flex items-center gap-2">{Ic.cart(18)} {map.name}</h1>
         {map.ready && <span className="tick-label text-teal">Готова к игре</span>}
+        {/* выбор ячейки списком — если по карте кликнуть трудно (мелкие/внахлёст) */}
+        <select
+          className="field-in px-2 py-1.5 text-[12px] max-w-[230px]"
+          value={selCell ?? ''}
+          onChange={(e) => { const i = e.target.value === '' ? null : Number(e.target.value); setSelCell(i); if (i !== null) sfx.hover(); }}
+        >
+          <option value="">Ячейка: выберите…</option>
+          {map.cells.map((c, i) => (
+            <option key={i} value={i}>
+              {`№${c.n} · ${c.type === 'start' ? 'Старт' : c.type === 'task' ? 'Задание' : c.type === 'bonus' ? 'Бонус' : c.type === 'trap' ? 'Ловушка' : 'Квиз'}${c.label ? ' · ' + c.label : ''}${c.task ? ' ✓' : ''}`}
+            </option>
+          ))}
+        </select>
         <div className="ml-auto flex gap-2">
           <GhostBtn onClick={() => void persist(map)}>{Ic.save(14)} Сохранить</GhostBtn>
           <PxBtn color={issues.length ? 'dim' : 'magma'} onClick={() => void completeMap()}>{Ic.check(14)} Завершить карту</PxBtn>
