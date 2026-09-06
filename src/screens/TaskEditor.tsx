@@ -4,8 +4,9 @@ import { Field, GhostBtn, Ic, Panel, PxBtn, Stepper } from '../ui';
 import { CELL, drawBoard, fitView } from '../render';
 import { idbPut, uid } from '../db';
 import { cartridgeArt, cardArt, fileToDataUrl } from '../assets';
-import type { CardDef, CardEffect, ChaosKind, EffectType, GameMap, TaskDef } from '../types';
+import type { CardDef, CardEffect, CellType, ChaosKind, EffectType, GameMap, TaskDef } from '../types';
 import { CHAOS_LIST, chaosLabel, mkChaosCard, JOY_LIST } from '../types';
+import { renumberByPath, fixLinksAfterDelete } from '../render';
 import { sfx } from '../sound';
 
 const EFFECTS: { key: EffectType; label: string; hasValue?: boolean; hasTarget?: boolean; unit?: string; def: number }[] = [
@@ -234,7 +235,7 @@ export default function TaskEditor() {
     toast('Карточка удалена', 'err');
   };
 
-  const setCellType = async (type: 'task' | 'bonus' | 'trap' | 'quiz') => {
+  const setCellType = async (type: CellType) => {
     if (!map || selCell === null) return;
     const nextMap = JSON.parse(JSON.stringify(map)) as GameMap;
     nextMap.cells[selCell].type = type;
@@ -246,7 +247,7 @@ export default function TaskEditor() {
     if (!map || selCell === null) return;
     const nextMap = JSON.parse(JSON.stringify(map)) as GameMap;
     nextMap.cells.splice(selCell, 1);
-    nextMap.cells = nextMap.cells.map((c, i) => ({ ...c, n: i + 1 }));
+    fixLinksAfterDelete(nextMap, selCell); // сдвигаем стрелки и перенумеровываем по маршруту
     setMap(nextMap);
     setSelCell(null);
     await persist(nextMap);
@@ -389,17 +390,20 @@ export default function TaskEditor() {
             <>
               <Panel title={`Ячейка №${cell.n}`} icon={Ic.target(16)} accent={cell.type === 'bonus' ? 'var(--color-teal)' : cell.type === 'trap' ? 'var(--color-coral)' : 'var(--color-gold)'}>
                 <div className="p-3 space-y-3">
-                  <div className="flex gap-1">
-                    {(['task', 'bonus', 'trap', 'quiz'] as const).map((t) => (
+                  <div className="flex gap-1 flex-wrap">
+                    {(['start', 'task', 'bonus', 'trap', 'quiz'] as const).map((t) => (
                       <button
                         key={t}
                         onClick={() => void setCellType(t)}
                         className={`flex-1 py-1.5 font-display text-[9px] uppercase tracking-wide border-2 transition-colors cursor-pointer ${cell.type === t ? (t === 'bonus' ? 'border-teal text-teal bg-teal/10' : t === 'trap' ? 'border-coral text-coral bg-coral/10' : t === 'quiz' ? 'border-sky text-sky bg-sky/10' : 'border-gold text-gold bg-gold/10') : 'border-edge text-faint hover:text-dim'}`}
                       >
-                        {t === 'task' ? 'Задание' : t === 'bonus' ? 'Бонус' : t === 'trap' ? 'Ловушка' : 'Квиз'}
+                        {t === 'start' ? 'Старт' : t === 'task' ? 'Задание' : t === 'bonus' ? 'Бонус' : t === 'trap' ? 'Ловушка' : 'Квиз'}
                       </button>
                     ))}
                   </div>
+                  {cell.type === 'start' && (
+                    <p className="text-[10px] text-teal leading-tight">Стартовая ячейка: игроки начнут партию с неё, задание не нужно.</p>
+                  )}
                   <GhostBtn className="w-full" onClick={() => void delCell()}>{Ic.trash(13)} Удалить ячейку из маршрута</GhostBtn>
                 </div>
               </Panel>

@@ -1,37 +1,114 @@
-import type { GameMap, TileDef } from './types';
+import type { GameMap, TileDef, TileImg } from './types';
 import { getImage } from './assets';
 
 export const CELL = 64;
 
-export const boardSize = (map: GameMap) => ({ w: map.cols * CELL, h: map.rows * CELL });
+/* Размер поля в пикселях: новые карты хранят mw/mh, старые — сетку cols×rows по 64px */
+export const mapSize = (map: GameMap) => ({
+  w: map.mw ?? map.cols * CELL,
+  h: map.mh ?? map.rows * CELL,
+});
+
+/* Совместимость со старым кодом */
+export const boardSize = mapSize;
 
 export const cellCenter = (map: GameMap, idx: number) => {
   const c = map.cells[idx];
   if (!c) return { x: 0, y: 0 };
+  if (c.cx !== undefined && c.cy !== undefined) return { x: c.cx, y: c.cy };
   return { x: (c.x + (c.w || 1) / 2) * CELL, y: (c.y + (c.h || 1) / 2) * CELL };
 };
 
-/** клетка (gx,gy) занята ячейкой (для расстановки W×H ячеек в редакторе) */
-export function cellCovers(map: GameMap, gx: number, gy: number): number {
-  return map.cells.findIndex(
-    (c) => gx >= c.x && gx < c.x + (c.w || 1) && gy >= c.y && gy < c.y + (c.h || 1),
-  );
+/* Прямоугольник ячейки в пикселях поля (левый верхний угол + размер) */
+export function cellBox(map: GameMap, idx: number) {
+  const c = map.cells[idx];
+  if (!c) return { x: 0, y: 0, w: CELL, h: CELL };
+  if (c.cx !== undefined && c.cy !== undefined) {
+    const w = c.cw ?? CELL, h = c.ch ?? CELL;
+    return { x: c.cx - w / 2, y: c.cy - h / 2, w, h };
+  }
+  return { x: c.x * CELL, y: c.y * CELL, w: (c.w || 1) * CELL, h: (c.h || 1) * CELL };
 }
 
-/** свободна ли прямоугольная область под ячейку w×h (нет других ячеек и в пределах поля) */
-export function areaFree(map: GameMap, x: number, y: number, w: number, h: number, ignoreIdx = -1): boolean {
-  if (x < 0 || y < 0 || x + w > map.cols || y + h > map.rows) return false;
-  for (let gy = y; gy < y + h; gy++) {
-    for (let gx = x; gx < x + w; gx++) {
-      const idx = cellCovers(map, gx, gy);
-      if (idx >= 0 && idx !== ignoreIdx) return false;
-    }
+/* Ячейка под точкой (координаты поля в px); возвращает индекс или -1 */
+export function cellAtPoint(map: GameMap, wx: number, wy: number): number {
+  for (let i = map.cells.length - 1; i >= 0; i--) {
+    const b = cellBox(map, i);
+    if (wx >= b.x && wx < b.x + b.w && wy >= b.y && wy < b.y + b.h) return i;
   }
-  return true;
+  return -1;
+}
+
+/* ШТАМП под точкой: верхний — тот, что позже в массиве (рисуется последним) */
+export function stampAtPoint(map: GameMap, wx: number, wy: number): number {
+  const st = map.stamps ?? [];
+  for (let i = st.length - 1; i >= 0; i--) {
+    const s = st[i];
+    if (wx >= s.x - s.w / 2 && wx < s.x + s.w / 2 && wy >= s.y - s.h / 2 && wy < s.y + s.h / 2) return i;
+  }
+  return -1;
+}
+
+/* ---------- маршрут: следующая/предыдущая ячейка ---------- */
+
+/* Следующая ячейка маршрута: явная стрелка (cell.next), иначе автопорядок (i+1 по кругу) */
+export function nextCellOf(map: GameMap, i: number): number {
+  const N = map.cells.length;
+  if (N === 0) return i;
+  const nx = map.cells[i]?.next;
+  if (nx !== undefined && nx !== i && nx >= 0 && nx < N) return nx;
+  return (i + 1) % N;
+}
+
+/* Предыдущая ячейка: та, чья «следующая» — данная; иначе автопорядок назад */
+export function prevCellOf(map: GameMap, i: number): number {
+  const N = map.cells.length;
+  if (N === 0) return i;
+  for (let j = 0; j < N; j++) {
+    if (j !== i && nextCellOf(map, j) === i) return j;
+  }
+  return (i - 1 + N) % N;
+}
+
+/* Стартовая ячейка: первая с типом «старт», иначе №0 */
+export const startCellIdx = (map: GameMap): number => {
+  const i = map.cells.findIndex((c) => c.type === 'start');
+  return i >= 0 ? i : 0;
+};
+
+/* Нумерация ячеек ПО МАРШРУТУ: идём от стартовой по стрелкам и присваиваем 1,2,3…
+   Замкнувшийся круг или тупик — остаток нумеруется по порядку массива.
+   Так номер на карте совпадает с реальным путём фишки (закутки получают свои номера). */
+export function renumberByPath(map: GameMap): void {
+  const N = map.cells.length;
+  if (N === 0) return;
+  const visited = new Set<number>();
+  let cur = startCellIdx(map);
+  let n = 1;
+  while (!visited.has(cur) && visited.size < N) {
+    visited.add(cur);
+    map.cells[cur].n = n++;
+    cur = nextCellOf(map, cur);
+  }
+  for (let i = 0; i < N; i++) {
+    if (!visited.has(i)) map.cells[i].n = n++;
+  }
+}
+
+/* После УДАЛЕНИЯ ячейки: чистим/сдвигаем явные стрелки (индексы съехали) и перенумеровываем */
+export function fixLinksAfterDelete(map: GameMap, deletedIdx: number): void {
+  const N = map.cells.length;
+  for (const c of map.cells) {
+    if (c.next === undefined) continue;
+    if (c.next === deletedIdx) delete c.next;
+    else if (c.next > deletedIdx) c.next--;
+    if (c.next !== undefined && (c.next < 0 || c.next >= N || c.next === map.cells.indexOf(c))) delete c.next;
+  }
+  renumberByPath(map);
 }
 
 export function fitView(map: GameMap, w: number, h: number) {
-  const b = boardSize(map);
+  const b = mapSize(map);
   const zoom = Math.min(w / (b.w + 120), h / (b.h + 120));
   return { x: b.w / 2, y: b.h / 2, zoom: Math.max(0.2, zoom) };
 }
@@ -72,6 +149,14 @@ const STAR = ['..1..', '.111.', '11111', '.111.', '1.1.1'];
 const SKULL = ['.111.', '11111', '10101', '11111', '.1.1.'];
 const PAD = ['.111.', '11111', '11111', '.111.'];
 const QUIZ = ['.111.', '1..11', '..11.', '..1..', '.....', '..1..'];
+const FLAG = ['1....', '1111.', '11111', '1111.', '1....'];
+const flagIcon = (ctx: CanvasRenderingContext2D, s: number, color: string) => {
+  px(ctx, -2 * s, -2.5 * s, s, FLAG, color);
+};
+
+function tilesetMap(map: GameMap): Map<string, TileImg> {
+  return new Map((map.tileset ?? []).map((t) => [t.id, t]));
+}
 
 export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardDrawOpts) {
   const { view, width, height } = o;
@@ -83,7 +168,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
   ctx.scale(view.zoom, view.zoom);
   ctx.translate(-view.x, -view.y);
 
-  const b = boardSize(map);
+  const b = mapSize(map);
   // подложка карты
   ctx.fillStyle = '#10142a';
   ctx.fillRect(-24, -24, b.w + 48, b.h + 48);
@@ -94,60 +179,109 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
   ctx.lineWidth = 2;
   ctx.strokeRect(-12, -12, b.w + 24, b.h + 24);
 
-  // тайлы
-  for (const pt of map.tiles) {
-    const tile = o.tileById.get(pt.tileId);
-    if (!tile) continue;
-    const img = getImage(tile.dataUrl);
-    const cx = (pt.x + tile.gw / 2) * CELL;
-    const cy = (pt.y + tile.gh / 2) * CELL;
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate((pt.rot * Math.PI) / 2);
-    const w = tile.gw * CELL;
-    const h = tile.gh * CELL;
+  // ОБЩИЙ ФОН КАРТЫ (редактор в стиле Tiled): растянут на поле или 1:1
+  if (map.bg) {
+    const img = getImage(map.bg);
     if (img) {
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(img, -w / 2, -h / 2, w, h);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, b.w, b.h);
+      ctx.clip();
+      ctx.imageSmoothingEnabled = true;
+      if (map.bgMode === 'real') ctx.drawImage(img, 0, 0);
+      else ctx.drawImage(img, 0, 0, b.w, b.h);
+      ctx.restore();
+    }
+  }
+
+  // СТАРЫЙ формат тайлов (глобальная библиотека) — только пока карта не переехала в штампы
+  if (map.tiles.length > 0 && !(map.stamps && map.stamps.length)) {
+    for (const pt of map.tiles) {
+      const tile = o.tileById.get(pt.tileId);
+      if (!tile) continue;
+      const img = getImage(tile.dataUrl);
+      const cx = (pt.x + tile.gw / 2) * CELL;
+      const cy = (pt.y + tile.gh / 2) * CELL;
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate((pt.rot * Math.PI) / 2);
+      const w = tile.gw * CELL;
+      const h = tile.gh * CELL;
+      if (img) {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(img, -w / 2, -h / 2, w, h);
+      } else {
+        ctx.fillStyle = '#1a2244';
+        ctx.fillRect(-w / 2, -h / 2, w, h);
+      }
+      ctx.restore();
+    }
+  }
+
+  // ШТАМПЫ (тайлы редактора в стиле Tiled): порядок в массиве = слой, последние сверху
+  const tset = tilesetMap(map);
+  const stamps = map.stamps ?? [];
+  for (const st of stamps) {
+    const t = tset.get(st.tid);
+    const img = t ? getImage(t.dataUrl) : null;
+    ctx.save();
+    ctx.translate(st.x, st.y);
+    ctx.rotate((st.rot * Math.PI) / 2);
+    if (img) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(img, -st.w / 2, -st.h / 2, st.w, st.h);
     } else {
-      ctx.fillStyle = '#1a2244';
-      ctx.fillRect(-w / 2, -h / 2, w, h);
+      ctx.fillStyle = 'rgba(26,34,68,0.8)';
+      ctx.fillRect(-st.w / 2, -st.h / 2, st.w, st.h);
+      ctx.strokeStyle = '#ff5d73';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-st.w / 2, -st.h / 2, st.w, st.h);
     }
     ctx.restore();
   }
 
-  // сетка
-  ctx.strokeStyle = 'rgba(49,60,114,0.28)';
-  ctx.lineWidth = 1;
-  for (let x = 0; x <= map.cols; x++) {
-    ctx.beginPath(); ctx.moveTo(x * CELL, 0); ctx.lineTo(x * CELL, b.h); ctx.stroke();
-  }
-  for (let y = 0; y <= map.rows; y++) {
-    ctx.beginPath(); ctx.moveTo(0, y * CELL); ctx.lineTo(b.w, y * CELL); ctx.stroke();
+  // сетка — только на картах без фона (поверх картинки она мешает)
+  if (!map.bg) {
+    ctx.strokeStyle = 'rgba(49,60,114,0.28)';
+    ctx.lineWidth = 1;
+    for (let x = 0; x <= b.w; x += CELL) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, b.h); ctx.stroke();
+    }
+    for (let y = 0; y <= b.h; y += CELL) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(b.w, y); ctx.stroke();
+    }
   }
 
   const N = map.cells.length;
   if (N > 1) {
-    // стрелки трека
+    // стрелки маршрута: по ЯВНЫМ связям next (золотые сплошные) или автопорядку (пунктир)
     for (let i = 0; i < N; i++) {
+      const ci = map.cells[i];
+      const j = nextCellOf(map, i);
+      if (j === i) continue; // самозамыкание — стрелку не рисуем
       const a = cellCenter(map, i);
-      const c = cellCenter(map, (i + 1) % N);
+      const c = cellCenter(map, j);
       const dx = c.x - a.x, dy = c.y - a.y;
       const len = Math.hypot(dx, dy) || 1;
+      if (len < 8) continue;
       const ux = dx / len, uy = dy / len;
-      const sx = a.x + ux * 26, sy = a.y + uy * 26;
-      const ex = c.x - ux * 26, ey = c.y - uy * 26;
-      ctx.strokeStyle = 'rgba(233,236,255,0.4)';
-      ctx.lineWidth = 3;
-      ctx.setLineDash([7, 7]);
+      const bi = cellBox(map, i);
+      const bj = cellBox(map, j);
+      const padA = Math.min(bi.w, bi.h) * 0.32 + 6;
+      const padB = Math.min(bj.w, bj.h) * 0.32 + 6;
+      const sx = a.x + ux * padA, sy = a.y + uy * padA;
+      const ex = c.x - ux * padB, ey = c.y - uy * padB;
+      const custom = ci.next !== undefined && ci.next >= 0 && ci.next < N && ci.next !== i;
+      ctx.strokeStyle = custom ? 'rgba(255,207,63,0.85)' : 'rgba(233,236,255,0.35)';
+      ctx.lineWidth = custom ? 3.5 : 3;
+      if (!custom) ctx.setLineDash([7, 7]);
       ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
-      ctx.setLineDash([]);
-      const ax = ex, ay = ey;
-      ctx.fillStyle = 'rgba(233,236,255,0.55)';
+      if (!custom) ctx.setLineDash([]);
+      ctx.fillStyle = custom ? 'rgba(255,207,63,0.95)' : 'rgba(233,236,255,0.55)';
       ctx.beginPath();
-      ctx.moveTo(ax, ay);
-      ctx.lineTo(ax - ux * 10 - uy * 6, ay - uy * 10 + ux * 6);
-      ctx.lineTo(ax - ux * 10 + uy * 6, ay - uy * 10 - ux * 6);
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - ux * 11 - uy * 6.5, ey - uy * 11 + ux * 6.5);
+      ctx.lineTo(ex - ux * 11 + uy * 6.5, ey - uy * 11 - ux * 6.5);
       ctx.fill();
     }
   }
@@ -156,15 +290,17 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
   for (let i = 0; i < N; i++) {
     const cell = map.cells[i];
     const { x: cx, y: cy } = cellCenter(map, i);
+    const box = cellBox(map, i);
     const owner = o.captured[i];
     const isCur = o.currentCell === i;
     const isMystery = !!o.mystery?.has(i);
-    const cw = cell.w || 1;
-    const chh = cell.h || 1;
-    const big = cw > 1 || chh > 1;
+    const isStart = cell.type === 'start';
+    // малая ячейка (до 68px) рисуется схематично фиксированным размером, крупная — во всю площадь
+    const small = box.w <= 68 && box.h <= 68;
     const pulse = isCur ? 1 + Math.sin(o.time / 160) * 0.05 : 1;
-    const W = (big ? cw * CELL - 6 : 44) * pulse;
-    const H = (big ? chh * CELL - 6 : 44) * pulse;
+    const big = !small;
+    const W = (small ? Math.min(44, box.w) : box.w - 6) * pulse;
+    const H = (small ? Math.min(44, box.h) : box.h - 6) * pulse;
 
     ctx.save();
     ctx.translate(cx, cy);
@@ -198,14 +334,15 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       continue;
     }
 
-    const base = cell.type === 'bonus' ? '#0d3f2e' : cell.type === 'trap' ? '#43101c' : '#232741';
-    const edge = cell.color || (cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : '#8f97c9');
+    const base = isStart ? '#12351f'
+      : cell.type === 'bonus' ? '#0d3f2e' : cell.type === 'trap' ? '#43101c' : '#232741';
+    const edge = cell.color || (isStart ? '#ffcf3f'
+      : cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : '#8f97c9');
     ctx.fillStyle = base;
     ctx.fillRect(-W / 2, -H / 2, W, H);
 
     if (big) {
       /* ---------- крупная ячейка «улица монополии» ---------- */
-      // цветовая полоса сверху (группа улиц)
       if (cell.color) {
         ctx.fillStyle = cell.color;
         ctx.fillRect(-W / 2, -H / 2, W, 15);
@@ -216,8 +353,14 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.lineWidth = 3;
       ctx.strokeRect(-W / 2, -H / 2, W, H);
 
-      if (cell.type === 'task') {
-        // картинка задания + название, если влезает
+      if (isStart) {
+        // стартовая ячейка: флаг и подпись
+        flagIcon(ctx, Math.min(6, Math.max(3, W / 12)), '#ffcf3f');
+        ctx.fillStyle = '#ffcf3f';
+        ctx.font = '8px "Press Start 2P", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('СТАРТ', 0, H / 2 - 8);
+      } else if (cell.type === 'task') {
         const imgSrc = cell.task?.imageId || cell.imageId;
         const img = imgSrc ? getImage(imgSrc) : null;
         const areaTop = -H / 2 + (cell.color ? 20 : 5);
@@ -244,7 +387,6 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
           const maxChars = Math.floor((W - 12) / 7);
           ctx.fillText(title.slice(0, maxChars), 0, H / 2 - 6);
         }
-        // задание не назначено — предупреждение
         if (!cell.task) {
           ctx.fillStyle = 'rgba(255,139,63,0.95)';
           ctx.font = '10px "Press Start 2P", monospace';
@@ -252,7 +394,6 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
           ctx.fillText('!', W / 2 - 9, -H / 2 + (cell.color ? 30 : 16));
         }
       } else {
-        // бонус/ловушка/квиз — крупная иконка и подпись
         const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : QUIZ;
         const iconColor = cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : '#5aa9ff';
         px(ctx, -icon[0].length * 3, -H / 2 + (cell.color ? 24 : 12), 6, icon, iconColor);
@@ -269,7 +410,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         ctx.fillText(String(cell.n), -W / 2 + 6, H / 2 - 6);
       }
     } else {
-      /* ---------- обычная ячейка 1×1 (схематичная) ---------- */
+      /* ---------- малая ячейка (схематичная) ---------- */
       if (cell.color) {
         ctx.globalAlpha = 0.3;
         ctx.fillStyle = cell.color;
@@ -284,7 +425,9 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.strokeRect(-W / 2 + 3, -H / 2 + 3, W - 6, H - 6);
 
       const cellImg = cell.imageId ? getImage(cell.imageId) : null;
-      if (cellImg) {
+      if (isStart) {
+        flagIcon(ctx, 4, '#ffcf3f');
+      } else if (cellImg) {
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(cellImg, -11, -13, 22, 22);
       } else {
@@ -298,7 +441,6 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         ctx.textAlign = 'center';
         ctx.fillText(cell.label.slice(0, 9).toUpperCase(), 0, 8);
       }
-      // задание не назначено — предупреждение
       if (cell.type === 'task' && !cell.task) {
         ctx.strokeStyle = 'rgba(255,139,63,0.85)';
         ctx.lineWidth = 2;
@@ -338,9 +480,9 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     ctx.restore();
   }
 
-  // стартовый флаг на ячейке №1
+  // флаг старта — над стартовой ячейкой (или над первой, если старой разметки нет)
   if (N > 0) {
-    const c0 = cellCenter(map, 0);
+    const c0 = cellCenter(map, startCellIdx(map));
     ctx.save();
     ctx.translate(c0.x + 20, c0.y - 34);
     ctx.fillStyle = '#e9ecff';
@@ -360,7 +502,6 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const s = t.active ? 1.12 : 1;
     ctx.scale(s, s);
     ctx.globalAlpha = t.alive ? 1 : 0.35;
-    // тень
     ctx.fillStyle = 'rgba(0,0,0,0.45)';
     ctx.beginPath();
     ctx.ellipse(0, 16 - bob / s, 11, 4.5, 0, 0, Math.PI * 2);
@@ -368,7 +509,6 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
 
     const custom = t.img ? getImage(t.img) : null;
     if (custom) {
-      // кастомная фишка-картинка (PNG, прозрачность сохраняется)
       ctx.imageSmoothingEnabled = false;
       const sz = 34;
       ctx.drawImage(custom, -sz / 2, -sz / 2 - 4, sz, sz);
@@ -378,7 +518,6 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         ctx.strokeRect(-sz / 2 - 3, -sz / 2 - 7, sz + 6, sz + 6);
       }
     } else {
-      // стандартный робот
       const body = t.alive ? t.color : '#5a628f';
       ctx.fillStyle = body;
       ctx.fillRect(-9, -12, 18, 22);

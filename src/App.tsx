@@ -3,7 +3,6 @@ import { initApp, useApp } from './store';
 import { Toasts } from './ui';
 import { setVolume } from './sound';
 import MenuScreen from './screens/MenuScreen';
-import TileEditor from './screens/TileEditor';
 import MapEditor from './screens/MapEditor';
 import TaskEditor from './screens/TaskEditor';
 import QuizEditor from './screens/QuizEditor';
@@ -62,7 +61,6 @@ export default function App() {
       {screen === 'lobby' && <LobbyScreen />}
       {screen === 'game' && <GameScreen />}
       {screen === 'mapEditor' && <MapEditor />}
-      {screen === 'tileEditor' && <TileEditor />}
       {screen === 'taskEditor' && <TaskEditor />}
       {screen === 'quizEditor' && <QuizEditor />}
       {screen === 'tokenEditor' && <TokenEditor />}

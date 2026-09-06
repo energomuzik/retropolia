@@ -4,8 +4,7 @@ import type { Screen } from '../store';
 import { sfx } from '../sound';
 
 const EDITORS: { screen: Screen; label: string; desc: string; color: string; icon: (s?: number) => React.ReactNode }[] = [
-  { screen: 'mapEditor', label: 'Редактор карт', desc: 'тайлы, маршрут, ячейки, их тип и оформление', color: '#2ee6a8', icon: Ic.map },
-  { screen: 'tileEditor', label: 'Редактор тайлов', desc: 'загрузка, нарезка картинки, пиксельная правка', color: '#9be84d', icon: Ic.grid },
+  { screen: 'mapEditor', label: 'Редактор карт', desc: 'фон, тайлы как в Tiled, ячейки в любом месте, стрелки маршрута', color: '#2ee6a8', icon: Ic.map },
   { screen: 'taskEditor', label: 'Редактор заданий', desc: 'ромы, сохранки, картинки, бонусы и ловушки', color: '#ff8b3f', icon: Ic.cart },
   { screen: 'quizEditor', label: 'Редактор квизов', desc: 'вопросы: выбор, текст, музыка, «кот в мешке»', color: '#5aa9ff', icon: Ic.dice },
   { screen: 'tokenEditor', label: 'Редактор фишек', desc: 'свои фигурки игроков, пиксель-арт, прозрачность', color: '#ff7ad9', icon: Ic.pawn },
@@ -47,7 +46,7 @@ export default function EditorsHub() {
         </div>
 
         <p className="text-center text-[11px] text-faint mt-8">
-          Порядок создания: тайлы → карта и ячейки → задания и квизы → фишки
+          Порядок создания: карта с тайлами и ячейками → задания и квизы → фишки
         </p>
       </div>
     </div>

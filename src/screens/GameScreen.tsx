@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp, getRomData, useBlobImage } from '../store';
 import { dispatch, streamBus, type StreamPacket } from '../useGame';
-import { CELL, cellCenter, drawBoard, fitView } from '../render';
+import { CELL, cellAtPoint, cellCenter, drawBoard, fitView, mapSize } from '../render';
 import { cellTaskOf, fmtClock, spentInfo } from '../engine';
 import { effectLabel } from './TaskEditor';
 import { cardArt, cartridgeArt } from '../assets';
@@ -387,9 +387,10 @@ export default function GameScreen() {
           const baseZx = Math.min(2.1, Math.max(0.7, Math.min(w, h) / (CELL * 7.2)));
           const focus = anyoneMoving ? 1.5 : 1.0; // приближаемся, пока фишку передвигают
           const zx = Math.min(2.6, baseZx * focus);
+          const msz = mapSize(m);
           goal = {
-            x: (followP?.x ?? m.cols * CELL / 2) + lookPanRef.current.x,
-            y: (followP?.y ?? m.rows * CELL / 2) + lookPanRef.current.y,
+            x: (followP?.x ?? msz.w / 2) + lookPanRef.current.x,
+            y: (followP?.y ?? msz.h / 2) + lookPanRef.current.y,
             zoom: zx * lookZoomRef.current,
           };
         }
@@ -678,7 +679,7 @@ export default function GameScreen() {
               const v = viewRef.current;
               const wx = v.x + (e.clientX - r.left - r.width / 2) / v.zoom;
               const wy = v.y + (e.clientY - r.top - r.height / 2) / v.zoom;
-              const idx = map.cells.findIndex((c) => c.x === Math.floor(wx / CELL) && c.y === Math.floor(wy / CELL));
+              const idx = cellAtPoint(map, wx, wy);
               setInspectIdx(idx >= 0 ? idx : null);
               if (idx >= 0) sfx.hover();
             }

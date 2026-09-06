@@ -1,4 +1,4 @@
-export type CellType = 'task' | 'bonus' | 'trap' | 'quiz';
+export type CellType = 'start' | 'task' | 'bonus' | 'trap' | 'quiz';
 
 export interface PlacedTile {
   x: number;
@@ -18,13 +18,20 @@ export interface TaskDef {
 }
 
 export interface CellDef {
-  n: number; // порядковый номер (1-based), он же index+1 в массиве cells
+  n: number; // номер на карте (1-based). Движку не нужен — путь задаётся связями next/порядком массива
   x: number;
   y: number;
-  w?: number; // ширина в клетках (по умолчанию 1) — «улицы монополии»
-  h?: number; // высота в клетках (по умолчанию 1)
+  w?: number; // ШИРИНА В КЛЕТКАХ — только для СТАРЫХ карт (сетка 64px)
+  h?: number;
   type: CellType;
   task?: TaskDef | null;
+  // свободное размещение (новые карты): центр и размер в ПИКСЕЛЯХ поля — без привязки к сетке
+  cx?: number; // центр X, px
+  cy?: number; // центр Y, px
+  cw?: number; // ширина, px (по умолчанию 64)
+  ch?: number; // высота, px (по умолчанию 64)
+  next?: number; // ЯВНАЯ стрелка к следующей ячейке (индекс). Нет — авто (следующая по массиву, по кругу).
+  // задание не назначено — предупреждение
   // оформление «как в монополии»: цвет группы, короткое имя, картинка
   label?: string;
   color?: string;
@@ -214,18 +221,44 @@ export interface TradeOffer {
   ts: number;
 }
 
+export interface TileImg {
+  id: string;
+  name: string;
+  dataUrl: string;
+}
+
+/* Штамп — экземпляр картинки из tileset, поставленный на поле.
+   Позиция — ЦЕНТР в пикселях поля; w/h — размер в пикселях; rot — 0..3 по 90°.
+   Порядок в массиве stamps = порядок отрисовки (слой): последние — сверху. */
+export interface Stamp {
+  id: string;
+  tid: string; // id картинки в map.tileset
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  rot: number;
+}
+
 export interface GameMap {
   id: string;
   name: string;
   cols: number;
   rows: number;
-  tiles: PlacedTile[];
+  tiles: PlacedTile[]; // СТАРЫЙ формат тайлов (глобальная библиотека) — новые карты не используют
   cells: CellDef[];
   bonusCards: CardDef[];
   trapCards: CardDef[];
   quizzes: QuizDef[]; // квизы карты (случайно выпадают на ячейках-квизах)
   startMin?: number; // стартовые минуты каждого игрока (по умолчанию 60)
   startTries?: number; // стартовые попытки каждого игрока (по умолчанию 60)
+  /* --- редактор карт в стиле Tiled --- */
+  mw?: number; // ширина поля в ПИКСЕЛЯХ (старые карты: cols * 64)
+  mh?: number; // высота поля в пикселях (старые карты: rows * 64)
+  bg?: string; // общий фон карты (dataUrl), рисуется под всем
+  bgMode?: 'stretch' | 'real'; // растянуть на поле или рисовать 1:1 от левого верхнего угла
+  tileset?: TileImg[]; // картинки тайлов, встроенные в КАРТУ (уезжают по P2P вместе с ней)
+  stamps?: Stamp[]; // размещённые тайлы (слой декора поверх фона, под ячейками)
   ready: boolean;
   createdAt: number;
   updatedAt: number;
@@ -371,7 +404,7 @@ export interface NetMsg {
   p?: unknown;
 }
 
-export const APP_VERSION = 9; // 9: стартовые минуты/попытки задаются в редакторе карт, торги доступны текущему игроку до броска кубиков
+export const APP_VERSION = 10; // 10: редактор карт в стиле Tiled (фон, тайлсеты, свободные ячейки, стрелки-связи, стартовая ячейка)
 export const START_SEC = 60 * 60;
 export const START_TRIES = 60;
 export const SKIP_COST = 5;
