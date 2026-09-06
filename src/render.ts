@@ -100,9 +100,9 @@ export function fixLinksAfterDelete(map: GameMap, deletedIdx: number): void {
   const N = map.cells.length;
   for (const c of map.cells) {
     if (c.next === undefined) continue;
-    if (c.next === deletedIdx) delete c.next;
+    if (c.next === deletedIdx) { delete c.next; delete c.nextTag; }
     else if (c.next > deletedIdx) c.next--;
-    if (c.next !== undefined && (c.next < 0 || c.next >= N || c.next === map.cells.indexOf(c))) delete c.next;
+    if (c.next !== undefined && (c.next < 0 || c.next >= N || c.next === map.cells.indexOf(c))) { delete c.next; delete c.nextTag; }
   }
   renumberByPath(map);
 }
@@ -254,7 +254,13 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
 
   const N = map.cells.length;
   if (N > 1) {
-    // стрелки маршрута: по ЯВНЫМ связям next (золотые сплошные) или автопорядку (пунктир)
+    // стрелки маршрута: по ЯВНЫМ связям next (сплошные) или автопорядку (пунктир).
+    // Метки закутков: «вход» — голубая, «выход» — зелёная, обычная кастомная — золотая.
+    const ARROW_STYLES: Record<string, { color: string; label: string }> = {
+      in: { color: '#5aa9ff', label: 'ВХОД' },
+      out: { color: '#2ee6a8', label: 'ВЫХОД' },
+    };
+    ctx.textAlign = 'center';
     for (let i = 0; i < N; i++) {
       const ci = map.cells[i];
       const j = nextCellOf(map, i);
@@ -272,17 +278,31 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       const sx = a.x + ux * padA, sy = a.y + uy * padA;
       const ex = c.x - ux * padB, ey = c.y - uy * padB;
       const custom = ci.next !== undefined && ci.next >= 0 && ci.next < N && ci.next !== i;
-      ctx.strokeStyle = custom ? 'rgba(255,207,63,0.85)' : 'rgba(233,236,255,0.35)';
+      const style = custom && ci.nextTag ? ARROW_STYLES[ci.nextTag] : null;
+      const strokeCol = style ? style.color : custom ? 'rgba(255,207,63,0.85)' : 'rgba(233,236,255,0.35)';
+      const headCol = style ? style.color : custom ? 'rgba(255,207,63,0.95)' : 'rgba(233,236,255,0.55)';
+      ctx.strokeStyle = strokeCol;
       ctx.lineWidth = custom ? 3.5 : 3;
       if (!custom) ctx.setLineDash([7, 7]);
       ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
       if (!custom) ctx.setLineDash([]);
-      ctx.fillStyle = custom ? 'rgba(255,207,63,0.95)' : 'rgba(233,236,255,0.55)';
+      ctx.fillStyle = headCol;
       ctx.beginPath();
       ctx.moveTo(ex, ey);
       ctx.lineTo(ex - ux * 11 - uy * 6.5, ey - uy * 11 + ux * 6.5);
       ctx.lineTo(ex - ux * 11 + uy * 6.5, ey - uy * 11 - ux * 6.5);
       ctx.fill();
+      // подпись метки у середины стрелки (чуть сбоку, чтобы не сливалась с линией)
+      if (style) {
+        const mx = (sx + ex) / 2 - uy * 13;
+        const my = (sy + ey) / 2 + ux * 13;
+        ctx.fillStyle = 'rgba(7,9,18,0.8)';
+        const tw = style.label.length * 6 + 6;
+        ctx.fillRect(mx - tw / 2, my - 7, tw, 12);
+        ctx.fillStyle = style.color;
+        ctx.font = '7px "Press Start 2P", monospace';
+        ctx.fillText(style.label, mx, my + 2);
+      }
     }
   }
 
