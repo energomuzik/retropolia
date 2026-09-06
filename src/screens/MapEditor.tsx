@@ -67,6 +67,7 @@ export default function MapEditor() {
     const m: GameMap = {
       id: uid('map'), name: 'Новая карта', cols: 12, rows: 9,
       tiles: [], cells: [], bonusCards: [], trapCards: [], quizzes: [],
+      startMin: 60, startTries: 60,
       ready: false, createdAt: Date.now(), updatedAt: Date.now(),
     };
     openMap(m);
@@ -371,6 +372,14 @@ export default function MapEditor() {
                   <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Ширина</span><Stepper value={map.cols} onChange={(v) => resize('cols', v)} min={6} max={40} /></div>
                   <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Высота</span><Stepper value={map.rows} onChange={(v) => resize('rows', v)} min={6} max={40} /></div>
                 </div>
+              </div>
+              <div>
+                <div className="tick-label mb-2">Ресурсы игроков</div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Минут у каждого</span><Stepper value={map.startMin ?? 60} onChange={(v) => mutate((mm) => { mm.startMin = v; })} min={5} max={180} /></div>
+                  <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><Stepper value={map.startTries ?? 60} onChange={(v) => mutate((mm) => { mm.startTries = v; })} min={5} max={180} /></div>
+                </div>
+                <div className="text-[10px] text-faint mt-1.5 leading-tight">Стартовый запас времени и попыток — одинаковый для всех игроков. Применяется при запуске партии.</div>
               </div>
             </>
           )}

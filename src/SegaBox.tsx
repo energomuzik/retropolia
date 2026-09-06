@@ -104,7 +104,7 @@ export default function SegaBox({
 
   const html = useMemo(() => {
     const opts = useApp.getState().options;
-    const volume = opts.emuSound ? Math.max(0, Math.min(1, opts.emuVolume ?? 1)) : 0;
+    const volume = Math.max(0, Math.min(1, opts.emuVolume ?? 1));
     const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
     return buildHtml(resolvedCore, volume, CDN_DATA, bootStateRef.current, nonce, remapJsonRef.current, chaosJsonRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -119,7 +119,7 @@ export default function SegaBox({
 
   // Живая громкость — без перезапуска ядра (встроенная панель со звуком спрятана).
   // Шлём при старте и при каждом изменении опций; работает и для NES, и для SEGA.
-  const emuVol = useApp((s) => (s.options.emuSound ? Math.max(0, Math.min(1, s.options.emuVolume ?? 1)) : 0));
+  const emuVol = useApp((s) => Math.max(0, Math.min(1, s.options.emuVolume ?? 1)));
   useEffect(() => {
     if (status !== 'ready') return;
     try { frameRef.current?.contentWindow?.postMessage({ type: 'set-volume', v: emuVol }, '*'); } catch { /* noop */ }
@@ -303,9 +303,6 @@ export default function SegaBox({
           </span>
         </div>
       )}
-      <div className="absolute bottom-1 right-2 font-pixel text-[7px] text-[rgba(233,236,255,0.35)] z-10">
-        {resolvedCore === 'nes' ? 'FCEUMM · EMULATORJS' : 'GENESIS PLUS GX'}
-      </div>
     </div>
   );
 }
@@ -318,7 +315,10 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '<!DOCTYPE html><html><head><meta charset="utf-8"><style>',
     'html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden}',
     '#game{position:absolute;inset:0;width:100%;height:100%}',
-    // прокрутка экрана: #game масштабируется и плавно ездит туда-обратно (ease-in-out alternate)
+    // прокрутка экрана: #game масштабирован и НЕПРЕРЫВНО едет в одну сторону
+    // (linear infinite); доехав до края, мгновенно «перескакивает» назад — по кругу,
+    // без обратного хода. Диапазон ±25.9% — ровно переполнение масштаба 1.35,
+    // поэтому на всём пути кадр полностью закрывает контейнер.
     '@keyframes cscroll-h1{from{transform:scale(1.35) translate(0,0)}to{transform:scale(1.35) translate(-25.9%,0)}}',
     '@keyframes cscroll-h2{from{transform:scale(1.35) translate(-25.9%,0)}to{transform:scale(1.35) translate(0,0)}}',
     '@keyframes cscroll-v1{from{transform:scale(1.35) translate(0,0)}to{transform:scale(1.35) translate(0,-25.9%)}}',
@@ -520,9 +520,10 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '    var cv=document.querySelector("#game canvas");',
     '    if(cv){cv.style.filter=fx.filter.trim();var tr=(fx.flip?" rotate(180deg)":"")+(fx.mirror?" scaleX(-1)":"");cv.style.transform=tr.trim();}',
     '    var host=document.getElementById("game");',
-    // прокрутка экрана: анимация на контейнере (кадр масштабирован и ездит туда-обратно)
+    // прокрутка экрана: анимация на контейнере — кадр масштабирован и едет ПО КРУГУ
+    // в одну сторону (linear infinite, без alternate — никакого возврата)
     '    if(host){',
-    '      if(fx.scroll){host.style.transformOrigin="top left";host.style.animation="cscroll-"+fx.scroll+" 4.2s ease-in-out infinite alternate";}',
+    '      if(fx.scroll){host.style.transformOrigin="top left";host.style.animation="cscroll-"+fx.scroll+" 4.2s linear infinite";}',
     '      else{host.style.animation="none";}',
     '    }',
     '    var cur=document.getElementById("chaos-curtain");',
@@ -766,14 +767,15 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '      var fx2=chaosFx();',
     '      if(fx2.filter)x2.filter=fx2.filter.trim();',
     '      if(fx2.scroll){',
-    // прокрутка: рисуем масштабированный кадр со смещением, синхронным анимации (4.2 c, туда-обратно)
+    // прокрутка: рисуем масштабированный кадр со смещением, синхронным анимации
+    // (4.2 c, линейный «пилозуб» — по кругу в одну сторону, как на экране игрока)
     '        var s1=1.35,dw=c2.width*s1,dh=c2.height*s1;',
-    '        var ph=(Date.now()/4200)%1;var tri=ph<0.5?ph*2:2-ph*2;',
+    '        var ph=(Date.now()/4200)%1;',
     '        var px=0,py=0;',
-    '        if(fx2.scroll==="h1")px=-tri*(dw-c2.width);',
-    '        else if(fx2.scroll==="h2")px=-(1-tri)*(dw-c2.width);',
-    '        else if(fx2.scroll==="v1")py=-tri*(dh-c2.height);',
-    '        else py=-(1-tri)*(dh-c2.height);',
+    '        if(fx2.scroll==="h1")px=-ph*(dw-c2.width);',
+    '        else if(fx2.scroll==="h2")px=-(1-ph)*(dw-c2.width);',
+    '        else if(fx2.scroll==="v1")py=-ph*(dh-c2.height);',
+    '        else py=-(1-ph)*(dh-c2.height);',
     '        x2.drawImage(cv,0,0,cv.width,cv.height,px,py,dw,dh);',
     '      }else if(fx2.flip||fx2.mirror){',
     '        x2.translate(c2.width/2,c2.height/2);',

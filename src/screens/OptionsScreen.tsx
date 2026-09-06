@@ -92,24 +92,10 @@ export default function OptionsScreen() {
                   className="w-full"
                 />
               </div>
-              <div className="border-t-2 border-edge pt-3 space-y-3">
-                <Toggle
-                  checked={options.emuSound}
-                  onChange={(v) => setOptions({ emuSound: v })}
-                  label="Звук эмуляторов"
-                  hint="NES и SEGA — отдельно от эффектов интерфейса"
-                />
-                <div className={options.emuSound ? '' : 'opacity-40 pointer-events-none'}>
-                  <span className="tick-label block mb-2">Громкость эмуляторов · {Math.round((options.emuVolume ?? 1) * 100)}%</span>
-                  <input
-                    type="range" min={0} max={1} step={0.05}
-                    value={options.emuVolume ?? 1}
-                    onChange={(e) => setOptions({ emuVolume: Number(e.target.value) })}
-                    className="w-full"
-                  />
-                </div>
+              <div className="border-t-2 border-edge pt-3">
                 <p className="text-[10px] text-faint leading-relaxed">
-                  Громкость обоих эмуляторов применяется на лету — ещё и ползунком «Звук эмулятора» рядом с окном эмулятора.
+                  Звук эмуляторов (NES и SEGA) регулируется ползунком «Звук эмулятора» рядом с окном эмулятора —
+                  в челлендже и на странице запуска. Применяется на лету, отдельно от эффектов интерфейса.
                 </p>
               </div>
             </div>

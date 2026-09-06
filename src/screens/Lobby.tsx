@@ -86,6 +86,12 @@ export function CreateScreen() {
                   ));
                 })()}
               </div>
+              <div className="mt-2.5 pt-2 border-t-2 border-edge flex items-center gap-2 flex-wrap">
+                <span className="font-display text-[11px] uppercase text-gold">{m.startMin ?? 60} мин</span>
+                <span className="font-pixel text-[8px] text-faint">·</span>
+                <span className="font-display text-[11px] uppercase text-sky">{m.startTries ?? 60} попыток</span>
+                <span className="text-[10px] text-faint">у каждого игрока</span>
+              </div>
             </button>
           ))}
           {ready.length === 0 && (

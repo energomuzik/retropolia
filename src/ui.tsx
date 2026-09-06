@@ -551,14 +551,14 @@ export function Toasts({ items }: { items: { id: number; text: string; kind: str
 
 /**
  * Полоска громкости эмулятора — постоянный элемент окна эмулятора (вместо
- * спрятанной встроенной панели EmulatorJS). Меняет опции на лету: SegaBox
- * доставляет их в работающее ядро сообщением set-volume (NES и SEGA).
+ * спрятанной встроенной панели EmulatorJS) и ЕДИНСТВЕННОЕ место управления
+ * звуком эмуляторов (в общих опциях этой настройки больше нет). Меняет опции
+ * на лету: SegaBox доставляет их в работающее ядро сообщением set-volume (NES и SEGA).
  */
 export function EmuVolumeChip({ className }: { className?: string }) {
-  const emuSound = useApp((s) => s.options.emuSound);
   const emuVolume = useApp((s) => s.options.emuVolume ?? 1);
   const setOptions = useApp((s) => s.setOptions);
-  const shown = emuSound ? emuVolume : 0;
+  const shown = emuVolume;
   return (
     <div className={`hud-chip pixel-corners px-3 py-2 ${className ?? ''}`}>
       <div className="flex items-center gap-2">
@@ -570,8 +570,7 @@ export function EmuVolumeChip({ className }: { className?: string }) {
           step={0.05}
           value={shown}
           onChange={(e) => {
-            const v = Number(e.target.value);
-            setOptions(emuSound ? { emuVolume: v } : { emuSound: true, emuVolume: v });
+            setOptions({ emuVolume: Number(e.target.value) });
           }}
           className="w-full"
           aria-label="Громкость эмулятора"

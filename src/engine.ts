@@ -544,11 +544,16 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     case 'start': {
       if (s.phase !== 'lobby') break;
       if (s.players.length < 2) break; // партия только для двух и более игроков
+      /* Стартовые ресурсы — из карты (одинаковые для всех игроков).
+         Старые карты без настроек получают прежние значения (60 мин / 60 попыток). */
+      const sm = Math.max(5, Math.min(180, Math.floor(map.startMin ?? START_SEC / 60)));
+      const st = Math.max(5, Math.min(180, Math.floor(map.startTries ?? START_TRIES)));
+      for (const p of s.players) { p.secLeft = sm * 60; p.triesLeft = st; }
       s.phase = 'rollOff';
       s.rollOffIdx = 0;
       s.rollOffValues = {};
       s.rollOffReady = [];
-      log('Игра начинается! Бросок за первый ход…');
+      log(`Игра начинается! У каждого: ${sm} мин и ${st} поп. Бросок за первый ход…`);
       break;
     }
     case 'roll': {
@@ -904,11 +909,13 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (s.phase !== 'playing') break;
       const p = actor();
       if (!p || !p.alive) break;
-      // торгуются только те, кто сейчас НЕ играет (и продающий, и покупающий)
-      if (p.id === current().id) { log('✖ В свой ход торговать нельзя'); break; }
+      // торгуются те, кто сейчас не в процессе хода; текущий игрок — только ДО броска
+      // кубиков (пока !moving && !challenge && !pendingCard && !quiz && !awaitPost)
+      const turnBusy = !!(s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost);
+      if (p.id === current().id && turnBusy) { log('✖ Ход уже начался — торговать нельзя (торги открыты до броска кубиков)'); break; }
       const buyer = s.players.find((x) => x.id === (a as { to?: string }).to && x.alive);
       if (!buyer || buyer.id === p.id) break;
-      if (buyer.id === current().id) { log(`✖ Нельзя предлагать сделку ${buyer.name} — он сейчас играет`); break; }
+      if (buyer.id === current().id && turnBusy) { log(`✖ Нельзя предлагать сделку ${buyer.name} — его ход уже начался`); break; }
       const min = Math.max(0, Math.min(90, Math.floor((a as { priceMin?: number }).priceMin ?? 0)));
       const tries = Math.max(0, Math.min(90, Math.floor((a as { priceTries?: number }).priceTries ?? 0)));
       if (min + tries <= 0) { log('✖ Цена не может быть нулевой'); break; }

@@ -1561,14 +1561,14 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
     const t = cell.task?.title ? ` · ${cell.task.title}` : '';
     return `Ячейка №${cell.n}${cell.label ? ` «${cell.label}»` : ''}${t}`;
   };
-  const sellTargets = s.players.filter((p) => p.alive && p.id !== me && p.id !== active?.id);
+  const sellTargets = s.players.filter((p) => p.alive && p.id !== me && (p.id !== active?.id || !busy));
   const incoming = trades.filter((o) => o.to === me && isOpen(o));
   const outgoing = trades.filter((o) => o.from === me && isOpen(o));
   const myCells = Object.entries(s.captured ?? {})
     .map(([k, v]) => ({ idx: Number(k), owner: v as string }))
     .filter((x) => x.owner === me && map?.cells[x.idx])
     .sort((a, b) => a.idx - b.idx);
-  const canSell = !myTurn; // торгуются только те, кто сейчас не играет
+  const canSell = !myTurn || !busy; // текущий игрок тоже может торговать — пока не бросил кубики
   const joyAppliable = (c: CardDef) =>
     !c.chaos && c.effect.type !== 'immuneSega' && c.effect.type !== 'immuneNes';
 
@@ -1580,7 +1580,9 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
           <span className="text-teal">{Ic.grid(18)}</span>
           <span className="font-display uppercase tracking-wider text-paper text-sm">Инвентарь</span>
           <span className="tick-label text-gold">{fmtClock(mePlayer?.secLeft ?? 0)} · {mePlayer?.triesLeft ?? 0} поп.</span>
-          {myTurn && <span className="tick-label text-magma">ваш ход — торги недоступны</span>}
+          {myTurn && (busy
+            ? <span className="tick-label text-magma">ваш ход — торги недоступны</span>
+            : <span className="tick-label text-teal">ваш ход — торги открыты до броска кубиков</span>)}
           <GhostBtn small className="ml-auto" onClick={onClose}>{Ic.cross(12)} Закрыть</GhostBtn>
         </div>
 
@@ -1783,7 +1785,7 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
                         disabled={!canSell || reserved}
                         title={
                           reserved ? 'Карточка уже участвует в сделке'
-                          : !canSell ? 'В свой ход торговать нельзя'
+                          : !canSell ? 'Ход уже начался — торговать можно только до броска кубиков'
                           : undefined
                         }
                         onClick={() => { setSellSel({ kind: 'card', id: c.id, name: c.name }); setSellTo(''); setSellMin(5); setSellTries(0); sfx.click(); }}
@@ -1824,7 +1826,7 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
                       title={
                         reserved ? 'Ячейка уже участвует в сделке'
                         : underChallenge ? 'На ячейке сейчас идёт задание'
-                        : !canSell ? 'В свой ход торговать нельзя'
+                        : !canSell ? 'Ход уже начался — торговать можно только до броска кубиков'
                         : undefined
                       }
                       onClick={() => { setSellSel({ kind: 'cell', id: String(idx), name: cellTitle(idx) }); setSellTo(''); setSellMin(5); setSellTries(0); sfx.click(); }}
