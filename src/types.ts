@@ -110,7 +110,7 @@ export type ChaosKind =
   | 'curtainLeft10' | 'curtainLeft20' | 'curtainLeft50'
   | 'curtainRight10' | 'curtainRight20' | 'curtainRight50'
   | 'pal50' | 'speed150' | 'speed200' | 'speed300' | 'lagButtons'
-  | 'scrollH1' | 'scrollH2' | 'scrollV1' | 'scrollV2' // прокрутка экрана
+  | 'scrollH1' | 'scrollH2' | 'scrollV1' | 'scrollV2' // прокрутка экрана — УДАЛЕНА (легаси, игнорируется)
   | 'static' | 'vhs' // помехи / VHS-плёнка
   | 'skipX2' | 'noReward' | 'halfWin' | 'dice0' | 'oneDie'; // пакости-правила
 
@@ -123,10 +123,6 @@ export const CHAOS_LIST: { kind: ChaosKind; name: string; desc: string }[] = [
   { kind: 'skipX2', name: 'Штраф ×2', desc: 'Пропуск задания стоит вдвое дороже: не 5, а 10 ресурсов' },
   { kind: 'dice0', name: 'Кубики-0', desc: 'Вставший на ячейку бросает 0 и застревает, пока не пройдёт задание. Прошедший и заменивший его снимает проклятие для остальных' },
   { kind: 'oneDie', name: 'Один кубик', desc: 'Следующий бросок вставшего на ячейку — только ОДИН кубик; бонус «+1 кубик» применять нельзя' },
-  { kind: 'scrollH1', name: 'Прокрутка →', desc: 'Картинка непрерывно уезжает вбок ПО КРУГУ — без возврата, глаз не за что зацепить' },
-  { kind: 'scrollH2', name: 'Прокрутка ←', desc: 'То же самое, но по горизонтали в другую сторону — тоже по кругу, без возврата' },
-  { kind: 'scrollV1', name: 'Прокрутка ↓', desc: 'Картинка плывёт сверху вниз по кругу — доехав до края, начинает заново' },
-  { kind: 'scrollV2', name: 'Прокрутка ↑', desc: 'Картинка плывёт снизу вверх по кругу — без обратного хода' },
   { kind: 'static', name: 'Помехи', desc: 'Экран шипит белыми помехами и рвётся полосами — как телевизор с плохой антенной' },
   { kind: 'vhs', name: 'VHS-плёнка', desc: 'Затёртая кассета: полосы трекинга, рябь, выцветший цвет и виньетка по краям' },
   { kind: 'invertPad', name: 'Реверс крестовины', desc: 'Влево едет вправо, вверх едет вниз' },
@@ -152,6 +148,10 @@ export const CHAOS_LIST: { kind: ChaosKind; name: string; desc: string }[] = [
 /* Устаревшие пакости, которых больше нет в выборе, но они могут лежать в старых сохранениях */
 const CHAOS_LEGACY: Partial<Record<ChaosKind, string>> = {
   blur: 'Туман (устарела)',
+  scrollH1: 'Прокрутка → (удалена)',
+  scrollH2: 'Прокрутка ← (удалена)',
+  scrollV1: 'Прокрутка ↓ (удалена)',
+  scrollV2: 'Прокрутка ↑ (удалена)',
 };
 
 export const chaosLabel = (k: ChaosKind): string =>

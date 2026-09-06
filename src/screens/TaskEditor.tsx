@@ -44,6 +44,8 @@ export default function TaskEditor() {
   const [view, setView] = useState({ x: 0, y: 0, zoom: 1 });
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
+  // точка нажатия: чтобы отличить клик (выбор ячейки) от перетаскивания камеры
+  const inspectDownRef = useRef<{ x: number; y: number } | null>(null);
   const viewRef = useRef(view); viewRef.current = view;
   const mapRef = useRef(map); mapRef.current = map;
   const selRef = useRef(selCell); selRef.current = selCell;
@@ -345,14 +347,13 @@ export default function TaskEditor() {
         <div className="flex-1 min-w-0 relative">
           <canvas
             ref={canvasRef}
-            className="w-full h-full block cursor-pointer"
+            className="w-full h-full block select-none"
+            style={{ cursor: dragRef.current ? 'grabbing' : 'grab' }}
             onPointerDown={(e) => {
               e.currentTarget.setPointerCapture(e.pointerId);
-              if (e.button === 1 || e.button === 2) {
-                dragRef.current = { sx: e.clientX, sy: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
-              } else {
-                pickCell(e);
-              }
+              // ЛЮБОЙ кнопкой можно тащить карту; клик без движения выберет ячейку
+              inspectDownRef.current = { x: e.clientX, y: e.clientY };
+              dragRef.current = { sx: e.clientX, sy: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
             }}
             onPointerMove={(e) => {
               if (dragRef.current) {
@@ -360,12 +361,19 @@ export default function TaskEditor() {
                 setView((v) => ({ ...v, x: d.vx - (e.clientX - d.sx) / v.zoom, y: d.vy - (e.clientY - d.sy) / v.zoom }));
               }
             }}
-            onPointerUp={() => { dragRef.current = null; }}
+            onPointerUp={(e) => {
+              // клик без перетаскивания — выбор ячейки
+              const d = inspectDownRef.current;
+              inspectDownRef.current = null;
+              dragRef.current = null;
+              if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 6) pickCell(e);
+            }}
+            onPointerLeave={() => { dragRef.current = null; inspectDownRef.current = null; }}
             onContextMenu={(e) => e.preventDefault()}
             onWheel={(e) => setView((v) => ({ ...v, zoom: Math.min(3, Math.max(0.25, v.zoom * Math.exp(-e.deltaY * 0.0012))) }))}
           />
           <div className="absolute bottom-3 left-3 hud-chip pixel-corners px-3 py-2 text-[11px] text-dim">
-            Клик по ячейке — редактировать · ПКМ — камера · колесо — зум
+            Тяните карту мышью · клик по ячейке — редактировать · колесо — зум
           </div>
         </div>
 

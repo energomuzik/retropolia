@@ -315,14 +315,6 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '<!DOCTYPE html><html><head><meta charset="utf-8"><style>',
     'html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden}',
     '#game{position:absolute;inset:0;width:100%;height:100%}',
-    // прокрутка экрана: #game масштабирован и НЕПРЕРЫВНО едет в одну сторону
-    // (linear infinite); доехав до края, мгновенно «перескакивает» назад — по кругу,
-    // без обратного хода. Диапазон ±25.9% — ровно переполнение масштаба 1.35,
-    // поэтому на всём пути кадр полностью закрывает контейнер.
-    '@keyframes cscroll-h1{from{transform:scale(1.35) translate(0,0)}to{transform:scale(1.35) translate(-25.9%,0)}}',
-    '@keyframes cscroll-h2{from{transform:scale(1.35) translate(-25.9%,0)}to{transform:scale(1.35) translate(0,0)}}',
-    '@keyframes cscroll-v1{from{transform:scale(1.35) translate(0,0)}to{transform:scale(1.35) translate(0,-25.9%)}}',
-    '@keyframes cscroll-v2{from{transform:scale(1.35) translate(0,-25.9%)}to{transform:scale(1.35) translate(0,0)}}',
     // ЖЁСТКО прячем ВСЮ встроенную обвязку EmulatorJS: нижнюю панель с кнопками
     // (play/pause, звук, ползунок громкости, шестерёнка, fullscreen) и меню правой
     // кнопки. Панель выезжала при каждом движении мыши и пряталась через 3 c —
@@ -463,7 +455,7 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     'setInterval(silenceCoreGamepad,2000);',
     // -------- ПАКОСТИ: искажения картинки, шторки, скорость (set-chaos) --------
     'function chaosFx(){',
-    '  var out={filter:"",flip:false,mirror:false,side:"",pct:0,scroll:"",noise:false,vhs:false};',
+    '  var out={filter:"",flip:false,mirror:false,side:"",pct:0,noise:false,vhs:false};',
     '  for(var i=0;i<CHAOS.list.length;i++){',
     '    var k=CHAOS.list[i];',
     '    if(k==="grayscale")out.filter+=" grayscale(1)";',
@@ -472,10 +464,6 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '    else if(k==="mirror")out.mirror=true;',
     '    else if(k==="static")out.noise=true;',
     '    else if(k==="vhs"){out.vhs=true;out.filter+=" saturate(0.55) contrast(1.15) sepia(0.18) brightness(0.97)";}',
-    '    else if(k==="scrollH1")out.scroll="h1";',
-    '    else if(k==="scrollH2")out.scroll="h2";',
-    '    else if(k==="scrollV1")out.scroll="v1";',
-    '    else if(k==="scrollV2")out.scroll="v2";',
     '    else{var m=/^curtain(Top|Bottom|Left|Right)(\\d+)$/.exec(k);if(m){out.side=m[1];out.pct=Number(m[2]);}}',
     '  }',
     '  return out;',
@@ -520,12 +508,6 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '    var cv=document.querySelector("#game canvas");',
     '    if(cv){cv.style.filter=fx.filter.trim();var tr=(fx.flip?" rotate(180deg)":"")+(fx.mirror?" scaleX(-1)":"");cv.style.transform=tr.trim();}',
     '    var host=document.getElementById("game");',
-    // прокрутка экрана: анимация на контейнере — кадр масштабирован и едет ПО КРУГУ
-    // в одну сторону (linear infinite, без alternate — никакого возврата)
-    '    if(host){',
-    '      if(fx.scroll){host.style.transformOrigin="top left";host.style.animation="cscroll-"+fx.scroll+" 4.2s linear infinite";}',
-    '      else{host.style.animation="none";}',
-    '    }',
     '    var cur=document.getElementById("chaos-curtain");',
     '    if(fx.side&&!cur&&host){cur=document.createElement("div");cur.id="chaos-curtain";cur.style.cssText="position:absolute;background:#000;z-index:40;pointer-events:none";host.appendChild(cur);}',
     '    if(cur){',
@@ -763,21 +745,10 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '      var w=cv.width||320,h=cv.height||240,k=Math.min(1,320/Math.max(1,w));',
     '      var c2=document.createElement("canvas");c2.width=Math.max(1,Math.round(w*k));c2.height=Math.max(1,Math.round(h*k));',
     '      var x2=c2.getContext("2d");',
-    // пакости отражаются и в трансляции: фильтры/переворот/зеркало/прокрутка/шторка рисуются на кадре
+    // пакости отражаются и в трансляции: фильтры/переворот/зеркало/шторка рисуются на кадре
     '      var fx2=chaosFx();',
     '      if(fx2.filter)x2.filter=fx2.filter.trim();',
-    '      if(fx2.scroll){',
-    // прокрутка: рисуем масштабированный кадр со смещением, синхронным анимации
-    // (4.2 c, линейный «пилозуб» — по кругу в одну сторону, как на экране игрока)
-    '        var s1=1.35,dw=c2.width*s1,dh=c2.height*s1;',
-    '        var ph=(Date.now()/4200)%1;',
-    '        var px=0,py=0;',
-    '        if(fx2.scroll==="h1")px=-ph*(dw-c2.width);',
-    '        else if(fx2.scroll==="h2")px=-(1-ph)*(dw-c2.width);',
-    '        else if(fx2.scroll==="v1")py=-ph*(dh-c2.height);',
-    '        else py=-(1-ph)*(dh-c2.height);',
-    '        x2.drawImage(cv,0,0,cv.width,cv.height,px,py,dw,dh);',
-    '      }else if(fx2.flip||fx2.mirror){',
+    '      if(fx2.flip||fx2.mirror){',
     '        x2.translate(c2.width/2,c2.height/2);',
     '        if(fx2.flip)x2.rotate(Math.PI);',
     '        if(fx2.mirror)x2.scale(-1,1);',

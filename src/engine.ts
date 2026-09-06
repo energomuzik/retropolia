@@ -727,6 +727,15 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const ch = s.challenge;
       const p = current();
       if (!ch || ch.status !== 'playing' || p.id !== a.id) break;
+      // при нуле ресурса перезапускать нечего: в попытках каждая загрузка стоит попытку,
+      // во времени — время уже вышло, задание непроходимо. Единственный путь — «Пропустить».
+      {
+        const nowMs = Date.now();
+        const running = ch.mode === 'time' && ch.started && !ch.paused && ch.startedAt > 0;
+        const msSpent = ch.accMs + (running ? nowMs - ch.startedAt : 0);
+        if (ch.mode === 'tries' && p.triesLeft - ch.loads <= 0) break;
+        if (ch.mode === 'time' && p.secLeft * 1000 - msSpent <= 0) break;
+      }
       if (ch.mode === 'tries') ch.loads++;
       ch.reloadId++;
       if (ch.paused) {
@@ -785,12 +794,16 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       // пакость «Штраф ×2»: цена пропуска удваивается
       const need = SKIP_COST * (cellTaskOf(s, map, ch.cellIdx)?.chaos === 'skipX2' ? 2 : 1);
 
-      // правило: если на старте ресурса было меньше цены — пропуск разрешён только при нуле
+      // правило: если на старте ресурса было меньше цены — пропуск разрешён только при нуле.
+      // Нуль считаем по ОСТАТКУ (хранящийся ресурс минус потраченное в этом задании):
+      // хранящиеся secLeft/triesLeft во время задания не меняются — списываются только в конце.
       const nowMs = Date.now();
       const running = ch.mode === 'time' && ch.started && !ch.paused && ch.startedAt > 0;
       const ms = ch.accMs + (running ? nowMs - ch.startedAt : 0);
       if (ch.mode && ch.lowStart) {
-        const rem = ch.mode === 'time' ? p.secLeft : p.triesLeft;
+        const rem = ch.mode === 'time'
+          ? p.secLeft * 1000 - ms
+          : p.triesLeft - ch.loads;
         if (rem > 0) break;
       }
       // обычный пропуск требует потратить цену пропуска (5, а при «Штраф ×2» — 10)

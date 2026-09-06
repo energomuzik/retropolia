@@ -434,13 +434,19 @@ export default function GameScreen() {
   }
 
   const info = ch ? spentInfo(ch, Date.now()) : null;
-  // остаток выбранного ресурса прямо сейчас
-  const remainingNow = ch?.mode === 'time' ? (mePlayer?.secLeft ?? 0) : (mePlayer?.triesLeft ?? 0);
+  // остаток выбранного ресурса ПРЯМО СЕЙЧАС (с учётом потраченного в этом задании —
+  // хранящиеся secLeft/triesLeft списываются только в конце, поэтому считаем сами)
+  const remainingNow = !ch ? 0
+    : ch.mode === 'time'
+      ? Math.max(0, (mePlayer?.secLeft ?? 0) - (info?.ms ?? 0) / 1000)
+      : Math.max(0, (mePlayer?.triesLeft ?? 0) - (info?.loads ?? 0));
   // пропуск: обычно после 5 потраченных (при «Штраф ×2» — после 10); при «низком старте» — только на нуле
   const naturalCanSkip = !!ch && !!info && (ch.lowStart ? remainingNow <= 0 : info.units >= skipNeed);
   // «Пропустить · 5» (заплатить ровно 5 авансом) доступен, только пока потрачено МЕНЬШЕ 5.
   // Когда потрачено 5+ — игрок обязан пользоваться кнопкой «Пропустить» (спишет фактическую цену).
   const instantSkipAllowed = !!ch && !!info && (ch.lowStart ? remainingNow <= 0 : info.units < skipNeed);
+  // перезапуск требует ресурс: на нуле задание непроходимо — остаётся только «Пропустить»
+  const canReload = !!ch && !!info && remainingNow > 0;
   const owner = ch ? s.captured[ch.cellIdx] : undefined;
   // свой ход, фишка стоит, кубики не брошены — можно осматривать карту перетаскиванием
   const canLookAround = !!s && !!mePlayer && myTurn && s.phase === 'playing' && !s.moving && !ch && !s.pendingCard && !s.quiz && !s.awaitPost && viewMode === 'follow' && !peekMap;
@@ -1211,7 +1217,12 @@ export default function GameScreen() {
                           <p className="text-[10px] text-dim leading-tight">
                             Эмулятор загружен и ждёт. {ch.mode === 'time' ? 'Таймер пойдёт' : 'Попытка спишется'} только после запуска — можно спокойно подготовиться.
                           </p>
-                          <GhostBtn className="w-full" onClick={() => dispatch({ t: 'skip', id: me, instant: true, spentMs: 0, loads: 0 })}>
+                          <GhostBtn
+                            className="w-full"
+                            disabled={ch.lowStart === true}
+                            title={ch.lowStart ? 'Ресурса меньше цены пропуска — авансом заплатить нельзя. Запускайте и тратьте ресурс: «Пропустить» разблокируется на нуле' : undefined}
+                            onClick={() => dispatch({ t: 'skip', id: me, instant: true, spentMs: 0, loads: 0 })}
+                          >
                             {Ic.bolt(13)} Заплатить {skipNeed} и пропустить
                           </GhostBtn>
                           {immuneBtns}
@@ -1219,7 +1230,12 @@ export default function GameScreen() {
                       )}
                       {myTurn && (ch.status === 'playing' || ch.status === 'voting') && (
                         <>
-                          <GhostBtn className="w-full" onClick={() => dispatch({ t: 'reloadSave', id: me })}>
+                          <GhostBtn
+                            className="w-full"
+                            disabled={!canReload}
+                            title={!canReload ? 'Ресурс закончился — перезапускать нечем. Пропустите задание (кнопка «Пропустить»)' : undefined}
+                            onClick={() => dispatch({ t: 'reloadSave', id: me })}
+                          >
                             {Ic.rotate(13)} Перезапуск задания
                           </GhostBtn>
                           <GhostBtn
@@ -1238,15 +1254,17 @@ export default function GameScreen() {
                           <GhostBtn
                             className="w-full"
                             disabled={!naturalCanSkip}
-                            title={!naturalCanSkip ? (ch.lowStart ? 'Ресурса было меньше цены пропуска — пропуск станет доступен, когда он закончится' : 'Сначала потратьте ресурсы — или платите сразу') : undefined}
+                            title={!naturalCanSkip ? (ch.lowStart ? 'Ресурса было меньше цены пропуска — кнопка разблокируется, когда ресурс закончится' : 'Сначала потратьте ресурсы — или платите сразу') : undefined}
                             onClick={() => info && dispatch({ t: 'skip', id: me, instant: false, spentMs: info.ms, loads: info.loads })}
                           >
-                            {Ic.bolt(13)} Пропустить · потратить {ch.mode === 'time' ? `${Math.max(info?.min ?? 0, skipNeed)} мин` : `${Math.max(info?.loads ?? 0, skipNeed)} поп.`}
+                            {Ic.bolt(13)} Пропустить · потратить {ch.mode === 'time'
+                              ? `${naturalCanSkip && remainingNow <= 0 ? Math.max(1, Math.ceil((info?.ms ?? 0) / 60000)) : Math.max(info?.min ?? 0, skipNeed)} мин`
+                              : `${naturalCanSkip && remainingNow <= 0 ? Math.max(1, mePlayer?.triesLeft ?? 0) : Math.max(info?.loads ?? 0, skipNeed)} поп.`}
                           </GhostBtn>
                           <GhostBtn
                             className="w-full"
                             disabled={!instantSkipAllowed}
-                            title={!instantSkipAllowed ? (ch.lowStart ? 'Ресурса было меньше цены пропуска — пропуск станет доступен, когда он закончится' : 'Вы уже потратили достаточно ресурсов — используйте кнопку «Пропустить», она спишет фактическую цену') : undefined}
+                            title={!instantSkipAllowed ? (ch.lowStart ? 'Ресурса было меньше цены пропуска — кнопка разблокируется, когда ресурс закончится' : 'Вы уже потратили достаточно ресурсов — используйте кнопку «Пропустить», она спишет фактическую цену') : undefined}
                             onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: ch.mode === 'time' ? 'time' : 'tries', spentMs: 0, loads: 0 })}
                           >
                             {Ic.bolt(13)} Заплатить {skipNeed} {ch.mode === 'time' ? 'мин' : 'поп.'} и пропустить
