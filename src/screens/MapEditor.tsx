@@ -3,7 +3,7 @@ import { useApp } from '../store';
 import { GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
 import {
   CELL, mapSize, drawBoard, fitView, cellAtPoint, stampAtPoint, cellBox, cellCenter,
-  renumberByPath, fixLinksAfterDelete, startCellIdx,
+  renumberByPath, fixLinksAfterDelete, startCellIdx, loopSpanOf,
 } from '../render';
 import { idbDel, idbPut, uid } from '../db';
 import type { CellDef, CellType, GameMap, Stamp, TileGroup, TileImg } from '../types';
@@ -526,8 +526,8 @@ export default function MapEditor() {
       const cells = m.cells.slice();
       cells[idx] = { ...cells[idx], ...patch };
       const nm = { ...m, cells } as GameMap;
-      // смена стрелки/метки меняет маршрут — перенумеровываем (круг уходит из нумерации)
-      if (patch.next !== undefined || patch.nextTag !== undefined) renumberByPath(nm);
+      // смена стрелки/метки (включая СТИРАНИЕ метки) меняет маршрут — перенумеровываем
+      if (patch.next !== undefined || 'nextTag' in patch) renumberByPath(nm);
       return nm;
     });
   const updStamp = (idx: number, patch: Partial<Stamp>) =>
@@ -1502,28 +1502,57 @@ export default function MapEditor() {
                         <GhostBtn small onClick={() => setLink(selCell, null)}>Авто</GhostBtn>
                       )}
                     </div>
-                    {selCellDef.next !== undefined && (
-                      <div className="mt-2">
-                        <div className="tick-label mb-1">Метка закоулка</div>
-                        <div className="grid grid-cols-3 gap-1">
-                          <button
-                            onClick={() => { updCell(selCell, { nextTag: undefined }); dirtyRef.current = true; sfx.hover(); }}
-                            className={`py-1 font-display text-[8px] uppercase border-2 cursor-pointer ${!selCellDef.nextTag ? 'border-gold text-gold' : 'border-edge text-faint hover:text-dim'}`}
-                          >Обычн.</button>
-                          <button
-                            onClick={() => { updCell(selCell, { nextTag: 'in' }); dirtyRef.current = true; sfx.hover(); }}
-                            title="ВХОД: начало закоулка — ставь на ячейке, С КОТОРОЙ фишка сворачивает в круг (в примере — №3)"
-                            className={`py-1 font-display text-[8px] uppercase border-2 cursor-pointer ${selCellDef.nextTag === 'in' ? 'border-sky text-sky' : 'border-edge text-faint hover:text-dim'}`}
-                          >Вход</button>
-                          <button
-                            onClick={() => { updCell(selCell, { nextTag: 'out' }); dirtyRef.current = true; sfx.hover(); }}
-                            title="ВЫХОД: конец закоулка — ставь на ячейке, КУДА приводит круг (в примере — №8). Встав на неё, фишка дальше ходит по обычной нумерации"
-                            className={`py-1 font-display text-[8px] uppercase border-2 cursor-pointer ${selCellDef.nextTag === 'out' ? 'border-teal text-teal' : 'border-edge text-faint hover:text-dim'}`}
-                          >Выход</button>
-                        </div>
-                        <p className="text-[10px] text-faint mt-1 leading-tight">ЗАКОУЛОК: ВХОД — на ячейке, с которой фишка сворачивает в круг. ВЫХОД — на ячейке, куда круг ПРИВОДИТ (не на последней в круге!). Ячейки между ними по стрелкам перестают нумероваться. Пример: путь 1..10, вход на №3, выход на №8 — ячейки 4,5,6,7 остаются без номеров.</p>
+                    <div className="mt-2">
+                      <div className="tick-label mb-1">Метка закоулка (можно и при стрелке «Авто»)</div>
+                      <div className="grid grid-cols-3 gap-1">
+                        <button
+                          onClick={() => { updCell(selCell, { nextTag: undefined }); dirtyRef.current = true; sfx.hover(); }}
+                          className={`py-1 font-display text-[8px] uppercase border-2 cursor-pointer ${!selCellDef.nextTag ? 'border-gold text-gold' : 'border-edge text-faint hover:text-dim'}`}
+                        >Обычн.</button>
+                        <button
+                          onClick={() => {
+                            const wasOut = selCellDef.nextTag === 'out';
+                            updCell(selCell, { nextTag: 'in' }); dirtyRef.current = true; sfx.hover();
+                            toast(wasOut ? 'С этой ячейки снята метка ВЫХОД и поставлена ВХОД' : 'ВХОД отмечен. Теперь выдели ячейку, КУДА приводит круг, и нажми ВЫХОД', wasOut ? 'err' : 'info');
+                          }}
+                          title="ВХОД: начало закоулка — ставь на ячейке, С КОТОРОЙ фишка сворачивает в круг (в примере — №3)"
+                          className={`py-1 font-display text-[8px] uppercase border-2 cursor-pointer ${selCellDef.nextTag === 'in' ? 'border-sky text-sky' : 'border-edge text-faint hover:text-dim'}`}
+                        >Вход</button>
+                        <button
+                          onClick={() => {
+                            const m = mapRef.current; if (!m) return;
+                            const wasIn = selCellDef.nextTag === 'in';
+                            const cells = m.cells.slice();
+                            cells[selCell] = { ...cells[selCell], nextTag: 'out' };
+                            const inIdx = cells.findIndex((c) => c.nextTag === 'in');
+                            const span = inIdx >= 0 ? loopSpanOf({ ...m, cells } as GameMap, inIdx) : null;
+                            updCell(selCell, { nextTag: 'out' }); dirtyRef.current = true; sfx.hover();
+                            if (wasIn) toast('С этой ячейки снята метка ВХОД и поставлена ВЫХОД', 'err');
+                            else if (span) toast(`Готово! Клеток в круге: ${span.cells.length} — номера с них исчезли`, 'ok');
+                            else toast('ВЫХОД отмечен, но круг не собрался: от ВХОДА нет пути по стрелкам до этой ячейки', 'err');
+                          }}
+                          title="ВЫХОД: конец закоулка — ставь на ячейке, КУДА приводит круг (в примере — №8). Встав на неё, фишка дальше ходит по обычной нумерации"
+                          className={`py-1 font-display text-[8px] uppercase border-2 cursor-pointer ${selCellDef.nextTag === 'out' ? 'border-teal text-teal' : 'border-edge text-faint hover:text-dim'}`}
+                        >Выход</button>
                       </div>
-                    )}
+                      {(() => {
+                        const m = map;
+                        if (!m) return null;
+                        const circleOk = m.cells.some((c) => c.n === 0);
+                        const hasIn = m.cells.some((c) => c.nextTag === 'in');
+                        const hasOut = m.cells.some((c) => c.nextTag === 'out');
+                        return (
+                          <p className={`text-[10px] mt-1 leading-tight ${circleOk ? 'text-teal' : hasIn && hasOut ? 'text-coral' : 'text-faint'}`}>
+                            {circleOk
+                              ? 'Круг собран: клетки между входом и выходом — без номеров.'
+                              : hasIn && hasOut
+                                ? 'Круг НЕ собран: проверь, что от ВХОДА по стрелкам (включая пунктир) можно дойти до ВЫХОДА.'
+                                : 'Отметь ВХОД (№3) и ВЫХОД (№8) — клетки между ними по стрелкам перестанут нумероваться.'}
+                          </p>
+                        );
+                      })()}
+                      <p className="text-[10px] text-faint mt-1 leading-tight">ЗАКОУЛОК: ВХОД — на ячейке, С КОТОРОЙ фишка сворачивает в круг (её стрелка станет голубой). ВЫХОД — на ячейке, КУДА круг приводит (её стрелка станет зелёной — даже пунктир «авто» станет цветной сплошной). Пример: путь 1..10, вход на №3, выход на №8 — ячейки 4,5,6,7 остаются без номеров.</p>
+                    </div>
                     <p className="text-[10px] text-faint mt-1 leading-tight">Как работает: фишка ходит по стрелкам по ОДНОЙ клетке за каждый шаг кубика — и через закоулок проходит пошагово, БЕЗ протаскивания до выхода. Встав на выход, дальше идёт по обычной нумерации.</p>
                   </div>
 

@@ -335,14 +335,15 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       const sx = a.x + ux * padA, sy = a.y + uy * padA;
       const ex = c.x - ux * padB, ey = c.y - uy * padB;
       const custom = ci.next !== undefined && ci.next >= 0 && ci.next < N && ci.next !== i;
-      const style = custom && ci.nextTag ? ARROW_STYLES[ci.nextTag] : null;
+      // метка закоулка видна и на авто-стрелке (пунктир): она становится цветной сплошной линией
+      const style = ci.nextTag ? ARROW_STYLES[ci.nextTag] : null;
       const strokeCol = style ? style.color : custom ? 'rgba(255,207,63,0.85)' : 'rgba(233,236,255,0.35)';
       const headCol = style ? style.color : custom ? 'rgba(255,207,63,0.95)' : 'rgba(233,236,255,0.55)';
       ctx.strokeStyle = strokeCol;
-      ctx.lineWidth = custom ? 3.5 : 3;
-      if (!custom) ctx.setLineDash([7, 7]);
+      ctx.lineWidth = custom || style ? 3.5 : 3;
+      if (!custom && !style) ctx.setLineDash([7, 7]);
       ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
-      if (!custom) ctx.setLineDash([]);
+      if (!custom && !style) ctx.setLineDash([]);
       ctx.fillStyle = headCol;
       ctx.beginPath();
       ctx.moveTo(ex, ey);
