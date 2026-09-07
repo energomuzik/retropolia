@@ -1,7 +1,7 @@
 import type { CardDef, GameMap, GameOptions, GameSession, PlayerState, TaskDef, TradeOffer } from './types';
 import { APP_VERSION, SKIP_COST, START_SEC, START_TRIES, JOY_LIST, mkJoyCard } from './types';
 import type { JoyId } from './types';
-import { loopWalkFrom, nextCellOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
+import { prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
 
 export type Action =
   | { t: 'hello'; id: string; name: string }
@@ -319,8 +319,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     if (cell.type === 'bonus' || cell.type === 'trap') {
       const deck = cell.type === 'bonus' ? map.bonusCards : map.trapCards;
       if (deck.length === 0) {
-        log(`Ячейка №${cell.n} пуста — передышка`);
-        s.notice = { text: `Ячейка №${cell.n} (${cell.type === 'bonus' ? 'бонус' : 'ловушка'}) без карточек — передышка. Добавьте карточки в редакторе заданий.`, ts: Date.now() };
+        log(`Ячейка ${posName(p.pos)} пуста — передышка`);
+        s.notice = { text: `Ячейка ${posName(p.pos)} (${cell.type === 'bonus' ? 'бонус' : 'ловушка'}) без карточек — передышка. Добавьте карточки в редакторе заданий.`, ts: Date.now() };
         endTurnNow();
         return;
       }
@@ -333,7 +333,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     if (cell.type === 'quiz') {
       const all = map.quizzes ?? [];
       if (all.length === 0) {
-        log(`Ячейка №${cell.n} — квиз, но на карте нет вопросов. Передышка`);
+        log(`Ячейка ${posName(p.pos)} — квиз, но на карте нет вопросов. Передышка`);
         s.notice = { text: `На карте нет вопросов для квиза — передышка. Создайте квизы в редакторе.`, ts: Date.now() };
         endTurnNow();
         return;
@@ -351,11 +351,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (q.type === 'mystery') {
         // «кот в мешке»: игрок сам выбирает, кому передать вопрос
         s.quiz = { quizId: q.id, askerId: p.id, targetId: '', startedAt: 0, resolved: false };
-        log(`🎁 ${p.name} встал на «кота в мешке» (ячейка №${cell.n}) — выбирает, кому передать вопрос`);
+        log(`🎁 ${p.name} встал на «кота в мешке» (ячейка ${posName(p.pos)}) — выбирает, кому передать вопрос`);
       } else {
         // гонка: вопрос видят все, отвечает кто быстрее
         s.quiz = { quizId: q.id, askerId: p.id, targetId: p.id, startedAt: Date.now(), resolved: false };
-        log(`🎲 КВИЗ (ячейка №${cell.n})! Вопрос видят все — кто первым ответит, тот и забирает`);
+        log(`🎲 КВИЗ (ячейка ${posName(p.pos)})! Вопрос видят все — кто первым ответит, тот и забирает`);
       }
       return;
     }
@@ -366,13 +366,13 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     }
     const task = cellTaskOf(s, map, p.pos);
     if (!task) {
-      log(`Ячейка №${cell.n} без задания — передышка`);
-      s.notice = { text: `Ячейка №${cell.n} без задания — передышка. Назначьте ей ром и сохранение в редакторе заданий.`, ts: Date.now() };
+      log(`Ячейка ${posName(p.pos)} без задания — передышка`);
+      s.notice = { text: `Ячейка ${posName(p.pos)} без задания — передышка. Назначьте ей ром и сохранение в редакторе заданий.`, ts: Date.now() };
       endTurnNow();
       return;
     }
     if (s.captured[p.pos] === p.id) {
-      log(`${p.name} на своей ячейке №${cell.n} — отдых`);
+      log(`${p.name} на своей ячейке ${posName(p.pos)} — отдых`);
       endTurnNow();
       return;
     }
@@ -382,7 +382,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       status: 'choose', approvals: [], violations: [], lowStart: false,
     };
     const owner = s.captured[p.pos] ? s.players.find((x) => x.id === s.captured[p.pos]) : null;
-    log(`🎯 ${p.name}: задание на ячейке №${cell.n}${owner ? ` (хозяин ${owner.name})` : ''}`);
+    log(`🎯 ${p.name}: задание на ячейке ${posName(p.pos)}${owner ? ` (хозяин ${owner.name})` : ''}`);
     /* пакость «Один кубик»: следующий бросок вставшего — только один кубик */
     if (task.chaos === 'oneDie' && s.captured[p.pos] !== p.id && !p.oneDie) {
       p.oneDie = true;
@@ -390,14 +390,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     }
   };
 
-  /* фишка остановилась на входе закоулка? — протаскиваем её по кругу до выхода
-     (и так цепочкой, если на выходе следующего закоулка — тоже вход) */
-  const appendLoops = (path: number[]) => {
-    for (let guard = 0; guard < 4; guard++) {
-      const walk = loopWalkFrom(map, path[path.length - 1]);
-      if (!walk.length) break;
-      path.push(...walk);
-    }
+  /* имя ячейки для логов: №N или «на круге» (ячейки закоулка без номеров) */
+  const posName = (idx: number): string => {
+    const c = map.cells[idx];
+    return c ? (c.n > 0 ? `№${c.n}` : 'на круге') : `№${idx + 1}`;
   };
 
   const applyCard = (p: PlayerState, card: CardDef) => {
@@ -415,7 +411,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     };
     switch (e.type) {
       case 'move': {
-        // шагаем по ОСНОВНОМУ ПУТИ (закоулки перескакиваются), а не по порядку массива
+        // шагаем по СТРЕЛКАМ маршрута (закоулок проходится по клеткам, как и весь путь)
         const dir = e.value >= 0 ? 1 : -1;
         const path: number[] = [];
         let c = p.pos;
@@ -424,23 +420,21 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           path.push(c);
         }
         if (!path.length) path.push(p.pos);
-        appendLoops(path); // остановился на входе закоулка — провалился в круг
         s.moving = { player: p.id, path, ts: Date.now() };
         p.pos = path[path.length - 1];
-        log(`${p.name} → ячейка №${map.cells[p.pos]?.n ?? p.pos + 1}`);
+        log(`${p.name} → ячейка ${posName(p.pos)}`);
         break;
       }
       case 'teleport': {
         // переход на ячейку с НОМЕРОМ N (номер = тот, что нарисован на карте);
-        // ячейки круга (без номеров) и вход закоулка не доступны напрямую,
-        // но если телепортировало на вход — ловушка сработает
+        // ячейки круга (без номеров) недоступны для телепорта; протаскивания нет —
+        // если телепортировало на вход закоулка, дальше фишка пойдёт по стрелкам на общих основаниях
         const byN = map.cells.findIndex((cc) => cc.n === e.value);
         const to = byN >= 0 ? byN : Math.min(Math.max(1, e.value), N) - 1;
         const path = [to];
-        appendLoops(path);
         s.moving = { player: p.id, path, ts: Date.now() };
         p.pos = path[path.length - 1];
-        log(`${p.name} → ячейка №${map.cells[p.pos]?.n ?? p.pos + 1}`);
+        log(`${p.name} → ячейка ${posName(p.pos)}`);
         break;
       }
       case 'jail':
@@ -462,7 +456,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         }
         s.moving = { player: p.id, path: stepsTo(p.pos, to, 1), ts: Date.now() };
         p.pos = to;
-        log(`${p.name}: поворот не туда → №${map.cells[p.pos]?.n ?? p.pos + 1}`);
+        log(`${p.name}: поворот не туда → ячейка ${posName(p.pos)}`);
         break;
       }
       case 'extraTurn': p.extraTurn = true; log(`${p.name}: доп. ход!`); break;
@@ -658,7 +652,6 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         const path: number[] = [];
         let c = p.pos;
         for (let i = 1; i <= va; i++) { c = stepNext(map, c); path.push(c); }
-        appendLoops(path); // остановился на входе закоулка — провалился в круг
         s.moving = { player: p.id, path, ts: Date.now() };
         log(`🎲 😈 ${p.name}: один кубик — ${va}`);
         break;
@@ -669,7 +662,6 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const steps = va + vb + (threeDice ? vc : 0);
       let c2 = p.pos;
       for (let i = 1; i <= steps; i++) { c2 = stepNext(map, c2); path.push(c2); }
-      appendLoops(path); // остановился на входе закоулка — провалился в круг
       s.moving = { player: p.id, path, ts: Date.now() };
       log(`🎲 ${p.name}: ${va} + ${vb}${threeDice ? ` + ${vc}` : ''} = ${steps}${threeDice ? ' (3 кубика!)' : ''}`);
       break;

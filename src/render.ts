@@ -70,77 +70,51 @@ export function prevCellOf(map: GameMap, i: number): number {
   return (i - 1 + N) % N;
 }
 
-/* ---------- ЗАКОУЛОК-ЛОВУШКА ----------
-   Стрелка с меткой «вход» (голубая) ведёт с основного пути В круг.
-   Стрелка с меткой «выход» (зелёная) ведёт ИЗ последней ячейки круга
-   наружу — на ячейку выхода. Ячейки круга ВНЕ НУМЕРАЦИИ (n = 0):
-   кубик считает только основной путь и «перелетает» круг.
-   Фишка, ОСТАНОВИВШАЯСЯ на входной ячейке, проваливается в круг:
-   её протаскивает по стрелкам до ячейки выхода. */
+/* ---------- ЗАКОУЛОК ----------
+   Закоулок — секция маршрута между метками «вход» и «выход».
+   «ВХОД» (голубая метка) ставится на ячейке, С КОТОРОЙ фишка сворачивает
+   в круг (например, №3). «ВЫХОД» (зелёная) — на ячейке, КУДА приводит
+   круг (например, №8): встав на неё, фишка дальше ходит по обычной
+   нумерации. Ячейки МЕЖДУ ними (по стрелкам от входной) — ВНЕ НУМЕРАЦИИ
+   (n = 0): номер на них не рисуется.
+   Движение ВСЕГДА идёт по стрелкам, по ОДНОЙ клетке за каждый шаг кубика:
+   сколько выбросил — столько клеток и прошёл. Никаких прыжков через круг
+   и автопротаскивания до выхода. */
 
-/* Куда ведёт закоулок: если с ячейки i начинается круг (метка «вход») и он
-   замкнут (впереди по стрелкам есть стрелка с меткой «выход») — возвращаем
-   цель стрелки «выход» (ячейку выхода). Иначе -1: метка просто украшение. */
-export function loopExitOf(map: GameMap, i: number): number {
+/* Клетки закоулка: идём по стрелкам от входной ячейки, пока не встретим
+   метку «выход». Возвращаем клетки МЕЖДУ входом и выходом (им достанется
+   n = 0) и саму выходную ячейку (остаётся нумерованной). Если выхода по
+   пути нет (метку не поставили / цепочка вернулась на пронумерованный
+   путь) — null: метка «вход» просто украшение, нумерация не меняется. */
+export function loopSpanOf(
+  map: GameMap,
+  entry: number,
+  visited?: Set<number>, // уже пронумерованные ячейки — круг в них заходить не должен
+): { cells: number[]; exit: number } | null {
   const N = map.cells.length;
-  const c = map.cells[i];
-  if (!c || c.nextTag !== 'in' || c.next === undefined || c.next < 0 || c.next >= N || c.next === i) return -1;
-  let j: number = c.next;
-  let steps = 0;
-  for (let guard = 0; guard <= N; guard++) {
-    const cj = map.cells[j];
-    if (!cj) return -1;
-    if (cj.nextTag === 'out' && cj.next !== undefined && cj.next >= 0 && cj.next < N && cj.next !== i) {
-      return steps > 0 ? cj.next : -1; // «пустой» круг (вход сразу на выход) — не считаем
-    }
-    steps++;
-    if (cj.next === undefined || cj.next < 0 || cj.next >= N) return -1;
-    j = cj.next;
+  const cells: number[] = [];
+  let c = nextCellOf(map, entry);
+  for (let guard = 0; guard < N; guard++) {
+    if (c < 0 || c >= N || c === entry) return null;
+    const cc = map.cells[c];
+    if (!cc) return null;
+    if (cc.nextTag === 'out') return cells.length ? { cells, exit: c } : null; // «пустой» круг (вход сразу на выход) — не считаем
+    if (visited?.has(c)) return null;
+    cells.push(c);
+    c = nextCellOf(map, c);
   }
-  return -1;
+  return null;
 }
 
-/* Шаг фишки ВПЕРЁД по основному пути: закоулок перескакивается целиком */
+/* Шаг фишки ВПЕРЁД: строго по стрелке маршрута — закоулок проходится
+   по клеткам, как и весь остальной путь */
 export function stepNext(map: GameMap, i: number): number {
-  const le = loopExitOf(map, i);
-  if (le >= 0) return le;
   return nextCellOf(map, i);
 }
 
-/* Шаг фишки НАЗАД по основному пути: закоулки тоже перескакиваются */
+/* Шаг фишки НАЗАД: против стрелки маршрута */
 export function stepPrev(map: GameMap, i: number): number {
-  const N = map.cells.length;
-  let best = -1, bestN = -1;
-  for (let j = 0; j < N; j++) {
-    if (j === i || map.cells[j].n === 0) continue; // ячейки круга — вне счёта
-    if (stepNext(map, j) === i) {
-      const nj = map.cells[j].n;
-      if (nj > bestN) { bestN = nj; best = j; }
-    }
-  }
-  return best >= 0 ? best : prevCellOf(map, i);
-}
-
-/* Протаскивание по кругу: путь от входной ячейки до выхода (включительно).
-   Пустой список — закоулка нет. */
-export function loopWalkFrom(map: GameMap, from: number): number[] {
-  const N = map.cells.length;
-  const st = map.cells[from];
-  if (!st || st.nextTag !== 'in' || st.next === undefined) return [];
-  const exit = loopExitOf(map, from);
-  if (exit < 0) return [];
-  const out: number[] = [];
-  let c: number = st.next;
-  for (let guard = 0; guard <= N; guard++) {
-    if (c < 0 || c >= N) return [];
-    const cc = map.cells[c];
-    if (!cc) return [];
-    out.push(c);
-    if (cc.nextTag === 'out' && cc.next !== undefined) { out.push(cc.next); return out; }
-    if (cc.next === undefined) return [];
-    c = cc.next;
-  }
-  return [];
+  return prevCellOf(map, i);
 }
 
 /* Стартовая ячейка: первая с типом «старт», иначе №0 */
@@ -150,9 +124,9 @@ export const startCellIdx = (map: GameMap): number => {
 };
 
 /* Нумерация ячеек ПО МАРШРУТУ: идём от стартовой по стрелкам и присваиваем 1,2,3…
-   Ячейки ЗАКОУЛКА (между стрелками «вход» и «выход») — ВНЕ НУМЕРАЦИИ (n = 0):
-   их не считает кубик, по ним фишку протаскивает только ловушка входа.
-   Замкнувшийся круг без меток или тупик — остаток нумеруется по порядку массива. */
+   Ячейки ЗАКОУЛКА (между метками «вход» и «выход») — ВНЕ НУМЕРАЦИИ (n = 0):
+   номер на них не рисуется, но фишка проходит их по стрелкам, как и все.
+   Нет метки «выход» по пути — закоулок не признаётся, нумеруется всё подряд. */
 export function renumberByPath(map: GameMap): void {
   const N = map.cells.length;
   if (N === 0) return;
@@ -162,16 +136,13 @@ export function renumberByPath(map: GameMap): void {
   while (!visited.has(cur) && visited.size < N) {
     visited.add(cur);
     map.cells[cur].n = n++;
-    const le = loopExitOf(map, cur);
-    if (le >= 0) {
-      // закоулок: ячейки круга остаются без номеров
-      let c: number | undefined = map.cells[cur].next;
-      for (let guard = 0; guard <= N && c !== undefined && c >= 0 && c < N; guard++) {
+    const span = map.cells[cur].nextTag === 'in' ? loopSpanOf(map, cur, visited) : null;
+    if (span) {
+      // закоулок: клетки между «входом» и «выходом» остаются без номеров
+      for (const c of span.cells) {
         if (!visited.has(c)) { visited.add(c); map.cells[c].n = 0; }
-        if (map.cells[c].nextTag === 'out') break;
-        c = map.cells[c].next;
       }
-      cur = le;
+      cur = span.exit;
     } else {
       cur = nextCellOf(map, cur);
     }
