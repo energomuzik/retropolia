@@ -1578,7 +1578,7 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
     const cell = map?.cells[idx];
     if (!cell) return `Ячейка №${idx + 1}`;
     const t = cell.task?.title ? ` · ${cell.task.title}` : '';
-    return `Ячейка №${cell.n}${cell.label ? ` «${cell.label}»` : ''}${t}`;
+    return `Ячейка ${cell.n > 0 ? '№' + cell.n : 'на круге'}${cell.label ? ` «${cell.label}»` : ''}${t}`;
   };
   const sellTargets = s.players.filter((p) => p.alive && p.id !== me && (p.id !== active?.id || !busy));
   const incoming = trades.filter((o) => o.to === me && isOpen(o));
@@ -1886,7 +1886,7 @@ function CellInspectModal({ idx, onClose }: { idx: number; onClose: () => void }
   const typeColor = cell.type === 'task' ? 'text-gold' : cell.type === 'bonus' ? 'text-teal' : cell.type === 'trap' ? 'text-coral' : 'text-sky';
   const joyMeta = task?.joy ? JOY_LIST.find((j) => j.id === task.joy) : null;
   return (
-    <Modal title={`Ячейка №${cell.n}${cell.label ? ` · ${cell.label}` : ''}`} icon={Ic.target(16)} w="max-w-md" onClose={onClose}>
+    <Modal title={`${cell.n > 0 ? `Ячейка №${cell.n}` : 'Ячейка на круге'}${cell.label ? ` · ${cell.label}` : ''}`} icon={Ic.target(16)} w="max-w-md" onClose={onClose}>
       {hidden ? (
         <p className="text-[12px] text-dim text-center py-6">
           Ячейка ещё не открывалась в партии — содержимое скрыто опцией «скрывать непосещённые ячейки».

@@ -1,7 +1,7 @@
 import type { CardDef, GameMap, GameOptions, GameSession, PlayerState, TaskDef, TradeOffer } from './types';
 import { APP_VERSION, SKIP_COST, START_SEC, START_TRIES, JOY_LIST, mkJoyCard } from './types';
 import type { JoyId } from './types';
-import { nextCellOf, prevCellOf, startCellIdx } from './render';
+import { loopWalkFrom, nextCellOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
 
 export type Action =
   | { t: 'hello'; id: string; name: string }
@@ -390,6 +390,16 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     }
   };
 
+  /* фишка остановилась на входе закоулка? — протаскиваем её по кругу до выхода
+     (и так цепочкой, если на выходе следующего закоулка — тоже вход) */
+  const appendLoops = (path: number[]) => {
+    for (let guard = 0; guard < 4; guard++) {
+      const walk = loopWalkFrom(map, path[path.length - 1]);
+      if (!walk.length) break;
+      path.push(...walk);
+    }
+  };
+
   const applyCard = (p: PlayerState, card: CardDef) => {
     const e = card.effect;
     const N = map.cells.length;
@@ -405,26 +415,31 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     };
     switch (e.type) {
       case 'move': {
-        // шагаем по СТРЕЛКАМ маршрута (с учётом закутков), а не по порядку массива
+        // шагаем по ОСНОВНОМУ ПУТИ (закоулки перескакиваются), а не по порядку массива
         const dir = e.value >= 0 ? 1 : -1;
         const path: number[] = [];
         let c = p.pos;
         for (let g = 0; g < Math.abs(e.value); g++) {
-          c = dir === 1 ? nextCellOf(map, c) : prevCellOf(map, c);
+          c = dir === 1 ? stepNext(map, c) : stepPrev(map, c);
           path.push(c);
         }
         if (!path.length) path.push(p.pos);
+        appendLoops(path); // остановился на входе закоулка — провалился в круг
         s.moving = { player: p.id, path, ts: Date.now() };
         p.pos = path[path.length - 1];
         log(`${p.name} → ячейка №${map.cells[p.pos]?.n ?? p.pos + 1}`);
         break;
       }
       case 'teleport': {
-        // переход на ячейку с НОМЕРОМ N (номер = тот, что нарисован на карте)
+        // переход на ячейку с НОМЕРОМ N (номер = тот, что нарисован на карте);
+        // ячейки круга (без номеров) и вход закоулка не доступны напрямую,
+        // но если телепортировало на вход — ловушка сработает
         const byN = map.cells.findIndex((cc) => cc.n === e.value);
         const to = byN >= 0 ? byN : Math.min(Math.max(1, e.value), N) - 1;
-        s.moving = { player: p.id, path: [to], ts: Date.now() };
-        p.pos = to;
+        const path = [to];
+        appendLoops(path);
+        s.moving = { player: p.id, path, ts: Date.now() };
+        p.pos = path[path.length - 1];
         log(`${p.name} → ячейка №${map.cells[p.pos]?.n ?? p.pos + 1}`);
         break;
       }
@@ -433,11 +448,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         log(`${p.name}: отпуск — пропуск ${Math.max(1, e.value)} х.`);
         break;
       case 'wrongway': {
-        // ищем ближайшую спец-ячейку ВПЕРЁД ПО СТРЕЛКАМ (не по порядку массива)
+        // ищем ближайшую спец-ячейку ВПЕРЁД ПО ОСНОВНОМУ ПУТИ (закоулки перескакиваем)
         let to = -1;
         let c = p.pos;
         for (let st = 1; st <= N; st++) {
-          c = nextCellOf(map, c);
+          c = stepNext(map, c);
           const cc = map.cells[c];
           if (cc && (cc.type === 'trap' || cc.type === 'bonus')) { to = c; break; }
         }
@@ -642,7 +657,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         s.dice = { a: va, b: 0, count: 1, roll: (s.dice?.roll ?? 0) + 1 };
         const path: number[] = [];
         let c = p.pos;
-        for (let i = 1; i <= va; i++) { c = nextCellOf(map, c); path.push(c); }
+        for (let i = 1; i <= va; i++) { c = stepNext(map, c); path.push(c); }
+        appendLoops(path); // остановился на входе закоулка — провалился в круг
         s.moving = { player: p.id, path, ts: Date.now() };
         log(`🎲 😈 ${p.name}: один кубик — ${va}`);
         break;
@@ -652,7 +668,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const path: number[] = [];
       const steps = va + vb + (threeDice ? vc : 0);
       let c2 = p.pos;
-      for (let i = 1; i <= steps; i++) { c2 = nextCellOf(map, c2); path.push(c2); }
+      for (let i = 1; i <= steps; i++) { c2 = stepNext(map, c2); path.push(c2); }
+      appendLoops(path); // остановился на входе закоулка — провалился в круг
       s.moving = { player: p.id, path, ts: Date.now() };
       log(`🎲 ${p.name}: ${va} + ${vb}${threeDice ? ` + ${vc}` : ''} = ${steps}${threeDice ? ' (3 кубика!)' : ''}`);
       break;

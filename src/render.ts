@@ -70,6 +70,79 @@ export function prevCellOf(map: GameMap, i: number): number {
   return (i - 1 + N) % N;
 }
 
+/* ---------- ЗАКОУЛОК-ЛОВУШКА ----------
+   Стрелка с меткой «вход» (голубая) ведёт с основного пути В круг.
+   Стрелка с меткой «выход» (зелёная) ведёт ИЗ последней ячейки круга
+   наружу — на ячейку выхода. Ячейки круга ВНЕ НУМЕРАЦИИ (n = 0):
+   кубик считает только основной путь и «перелетает» круг.
+   Фишка, ОСТАНОВИВШАЯСЯ на входной ячейке, проваливается в круг:
+   её протаскивает по стрелкам до ячейки выхода. */
+
+/* Куда ведёт закоулок: если с ячейки i начинается круг (метка «вход») и он
+   замкнут (впереди по стрелкам есть стрелка с меткой «выход») — возвращаем
+   цель стрелки «выход» (ячейку выхода). Иначе -1: метка просто украшение. */
+export function loopExitOf(map: GameMap, i: number): number {
+  const N = map.cells.length;
+  const c = map.cells[i];
+  if (!c || c.nextTag !== 'in' || c.next === undefined || c.next < 0 || c.next >= N || c.next === i) return -1;
+  let j: number = c.next;
+  let steps = 0;
+  for (let guard = 0; guard <= N; guard++) {
+    const cj = map.cells[j];
+    if (!cj) return -1;
+    if (cj.nextTag === 'out' && cj.next !== undefined && cj.next >= 0 && cj.next < N && cj.next !== i) {
+      return steps > 0 ? cj.next : -1; // «пустой» круг (вход сразу на выход) — не считаем
+    }
+    steps++;
+    if (cj.next === undefined || cj.next < 0 || cj.next >= N) return -1;
+    j = cj.next;
+  }
+  return -1;
+}
+
+/* Шаг фишки ВПЕРЁД по основному пути: закоулок перескакивается целиком */
+export function stepNext(map: GameMap, i: number): number {
+  const le = loopExitOf(map, i);
+  if (le >= 0) return le;
+  return nextCellOf(map, i);
+}
+
+/* Шаг фишки НАЗАД по основному пути: закоулки тоже перескакиваются */
+export function stepPrev(map: GameMap, i: number): number {
+  const N = map.cells.length;
+  let best = -1, bestN = -1;
+  for (let j = 0; j < N; j++) {
+    if (j === i || map.cells[j].n === 0) continue; // ячейки круга — вне счёта
+    if (stepNext(map, j) === i) {
+      const nj = map.cells[j].n;
+      if (nj > bestN) { bestN = nj; best = j; }
+    }
+  }
+  return best >= 0 ? best : prevCellOf(map, i);
+}
+
+/* Протаскивание по кругу: путь от входной ячейки до выхода (включительно).
+   Пустой список — закоулка нет. */
+export function loopWalkFrom(map: GameMap, from: number): number[] {
+  const N = map.cells.length;
+  const st = map.cells[from];
+  if (!st || st.nextTag !== 'in' || st.next === undefined) return [];
+  const exit = loopExitOf(map, from);
+  if (exit < 0) return [];
+  const out: number[] = [];
+  let c: number = st.next;
+  for (let guard = 0; guard <= N; guard++) {
+    if (c < 0 || c >= N) return [];
+    const cc = map.cells[c];
+    if (!cc) return [];
+    out.push(c);
+    if (cc.nextTag === 'out' && cc.next !== undefined) { out.push(cc.next); return out; }
+    if (cc.next === undefined) return [];
+    c = cc.next;
+  }
+  return [];
+}
+
 /* Стартовая ячейка: первая с типом «старт», иначе №0 */
 export const startCellIdx = (map: GameMap): number => {
   const i = map.cells.findIndex((c) => c.type === 'start');
@@ -77,8 +150,9 @@ export const startCellIdx = (map: GameMap): number => {
 };
 
 /* Нумерация ячеек ПО МАРШРУТУ: идём от стартовой по стрелкам и присваиваем 1,2,3…
-   Замкнувшийся круг или тупик — остаток нумеруется по порядку массива.
-   Так номер на карте совпадает с реальным путём фишки (закутки получают свои номера). */
+   Ячейки ЗАКОУЛКА (между стрелками «вход» и «выход») — ВНЕ НУМЕРАЦИИ (n = 0):
+   их не считает кубик, по ним фишку протаскивает только ловушка входа.
+   Замкнувшийся круг без меток или тупик — остаток нумеруется по порядку массива. */
 export function renumberByPath(map: GameMap): void {
   const N = map.cells.length;
   if (N === 0) return;
@@ -88,7 +162,19 @@ export function renumberByPath(map: GameMap): void {
   while (!visited.has(cur) && visited.size < N) {
     visited.add(cur);
     map.cells[cur].n = n++;
-    cur = nextCellOf(map, cur);
+    const le = loopExitOf(map, cur);
+    if (le >= 0) {
+      // закоулок: ячейки круга остаются без номеров
+      let c: number | undefined = map.cells[cur].next;
+      for (let guard = 0; guard <= N && c !== undefined && c >= 0 && c < N; guard++) {
+        if (!visited.has(c)) { visited.add(c); map.cells[c].n = 0; }
+        if (map.cells[c].nextTag === 'out') break;
+        c = map.cells[c].next;
+      }
+      cur = le;
+    } else {
+      cur = nextCellOf(map, cur);
+    }
   }
   for (let i = 0; i < N; i++) {
     if (!visited.has(i)) map.cells[i].n = n++;
@@ -255,7 +341,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
   const N = map.cells.length;
   if (N > 1) {
     // стрелки маршрута: по ЯВНЫМ связям next (сплошные) или автопорядку (пунктир).
-    // Метки закутков: «вход» — голубая, «выход» — зелёная, обычная кастомная — золотая.
+    // Метки закоулков: «вход» — голубая, «выход» — зелёная, обычная кастомная — золотая.
     const ARROW_STYLES: Record<string, { color: string; label: string }> = {
       in: { color: '#5aa9ff', label: 'ВХОД' },
       out: { color: '#2ee6a8', label: 'ВЫХОД' },
@@ -345,7 +431,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.font = `${big ? 20 : 15}px "Press Start 2P", monospace`;
       ctx.textAlign = 'center';
       ctx.fillText('?', 0, big ? 8 : 6);
-      if (o.showNumbers) {
+      if (o.showNumbers && cell.n > 0) {
         ctx.fillStyle = '#8f97c9';
         ctx.font = '8px "Press Start 2P", monospace';
         ctx.fillText(String(cell.n), 0, H / 2 - 6);
@@ -423,7 +509,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         const name = cell.label || (cell.type === 'bonus' ? 'БОНУС' : cell.type === 'trap' ? 'ЛОВУШКА' : 'КВИЗ');
         ctx.fillText(name.slice(0, Math.floor((W - 10) / 8)).toUpperCase(), 0, H / 2 - 8);
       }
-      if (o.showNumbers) {
+      if (o.showNumbers && cell.n > 0) {
         ctx.fillStyle = '#e9ecff';
         ctx.font = '8px "Press Start 2P", monospace';
         ctx.textAlign = 'left';
@@ -473,7 +559,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         ctx.textAlign = 'center';
         ctx.fillText('!', W / 2 - 8, -H / 2 + 14);
       }
-      if (o.showNumbers) {
+      if (o.showNumbers && cell.n > 0) {
         ctx.fillStyle = '#e9ecff';
         ctx.font = '9px "Press Start 2P", monospace';
         ctx.textAlign = 'center';

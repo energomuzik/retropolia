@@ -432,7 +432,7 @@ const TOOLS: { key: Tool; label: string; hint: string }[] = [
   { key: 'select', label: 'Выбор', hint: 'клик — выбрать тайл/ячейку и тянуть мышью · пустое место — двигать камеру' },
   { key: 'tile', label: 'Тайл', hint: 'клик — поставить выбранный тайл; можно тянуть с зажатой кнопкой' },
   { key: 'cell', label: 'Ячейка', hint: 'клик — новая ячейка В ЛЮБОМ МЕСТЕ (без привязки к сетке), клик по ячейке — выбрать' },
-  { key: 'link', label: 'Стрелка', hint: 'клик по ячейке А, затем по ячейке Б: маршрут пойдёт А → Б. Так делают закутки и круги! Клик по той же ячейке — убрать стрелку' },
+  { key: 'link', label: 'Стрелка', hint: 'клик по ячейке А, затем по ячейке Б: маршрут пойдёт А → Б. Так делают закоулки и круги! Клик по той же ячейке — убрать стрелку' },
   { key: 'erase', label: 'Ластик', hint: 'клик или протяни с зажатой кнопкой — убирает ТАЙЛЫ под курсором. Ячейки ластик не трогает: выдели ячейку и нажми Delete' },
   { key: 'pan', label: 'Рука', hint: 'двигать камеру (колесо — зум под курсором)' },
 ];
@@ -525,7 +525,10 @@ export default function MapEditor() {
       if (!m || !m.cells[idx]) return m;
       const cells = m.cells.slice();
       cells[idx] = { ...cells[idx], ...patch };
-      return { ...m, cells };
+      const nm = { ...m, cells } as GameMap;
+      // смена стрелки/метки меняет маршрут — перенумеровываем (круг уходит из нумерации)
+      if (patch.next !== undefined || patch.nextTag !== undefined) renumberByPath(nm);
+      return nm;
     });
   const updStamp = (idx: number, patch: Partial<Stamp>) =>
     setMap((m) => {
@@ -1369,7 +1372,7 @@ export default function MapEditor() {
               <div className="font-display uppercase text-paper text-lg">Выберите карту или создайте новую</div>
               <p className="text-[13px] text-dim max-w-md">
                 Как в программе Tiled: загрузите общий фон, поверх ставьте тайлы любого размера и в несколько слоёв,
-                а ячейки маршрута размещайте в любом месте и соединяйте стрелками — можно делать закутки и круги-ловушки.
+                а ячейки маршрута размещайте в любом месте и соединяйте стрелками — можно делать закоулки: круг с метками «вход» и «выход» становится ловушкой (ячейки круга перестают нумероваться).
               </p>
               <div className="flex gap-3">
                 <PxBtn color="teal" onClick={newMap}>Новая карта</PxBtn>
@@ -1430,7 +1433,7 @@ export default function MapEditor() {
               {selCellDef && selCell !== null && (
                 <div className="absolute top-14 right-3 w-[264px] pixel-panel pixel-corners p-3.5 space-y-3 pop-in shadow-[0_14px_40px_rgba(0,0,0,0.6)] max-h-[80%] overflow-y-auto">
                   <div className="flex items-center justify-between">
-                    <span className="font-display uppercase text-[12px] text-gold">Ячейка №{selCellDef.n}{selCellDef.next !== undefined ? ' ↗' : ''}</span>
+                    <span className="font-display uppercase text-[12px] text-gold">{selCellDef.n > 0 ? `Ячейка №${selCellDef.n}` : 'Ячейка на круге'}{selCellDef.next !== undefined ? ' ↗' : ''}</span>
                     <button onClick={() => { setSelCell(null); sfx.hover(); }} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
                   </div>
 
@@ -1501,7 +1504,7 @@ export default function MapEditor() {
                     </div>
                     {selCellDef.next !== undefined && (
                       <div className="mt-2">
-                        <div className="tick-label mb-1">Метка (для закутков)</div>
+                        <div className="tick-label mb-1">Метка закоулка</div>
                         <div className="grid grid-cols-3 gap-1">
                           <button
                             onClick={() => { updCell(selCell, { nextTag: undefined }); dirtyRef.current = true; sfx.hover(); }}
@@ -1509,19 +1512,19 @@ export default function MapEditor() {
                           >Обычн.</button>
                           <button
                             onClick={() => { updCell(selCell, { nextTag: 'in' }); dirtyRef.current = true; sfx.hover(); }}
-                            title="Вход в закуток — стрелка с основного пути внутрь"
+                            title="ВХОД: фишка, остановившаяся на этой ячейке, проваливается в круг и идёт по стрелкам до выхода"
                             className={`py-1 font-display text-[8px] uppercase border-2 cursor-pointer ${selCellDef.nextTag === 'in' ? 'border-sky text-sky' : 'border-edge text-faint hover:text-dim'}`}
                           >Вход</button>
                           <button
                             onClick={() => { updCell(selCell, { nextTag: 'out' }); dirtyRef.current = true; sfx.hover(); }}
-                            title="Выход из закутка — стрелка наружу на основной путь"
+                            title="ВЫХОД: стрелка из ПОСЛЕДНЕЙ ячейки круга наружу — на неё встаёт фишка, выйдя с круга"
                             className={`py-1 font-display text-[8px] uppercase border-2 cursor-pointer ${selCellDef.nextTag === 'out' ? 'border-teal text-teal' : 'border-edge text-faint hover:text-dim'}`}
                           >Выход</button>
                         </div>
-                        <p className="text-[10px] text-faint mt-1 leading-tight">ВХОД (голубая) — с большого пути внутрь закутка. ВЫХОД (зелёная) — из закутка наружу. Это ДВЕ разные стрелки (могут быть у одной ячейки). Пометки видны на карте — не запутаешься.</p>
+                        <p className="text-[10px] text-faint mt-1 leading-tight">ЗАКОУЛОК: ВХОД — на ячейке основного пути, её стрелка ведёт В круг. ВЫХОД — на ПОСЛЕДНЕЙ ячейке круга, её стрелка ведёт наружу (дальше по основному пути). Ячейки круга перестают нумероваться. Стрелку с выхода обратно на вход НЕ рисуйте — круг замыкается сам.</p>
                       </div>
                     )}
-                    <p className="text-[10px] text-faint mt-1 leading-tight">Стрелки в обход порядка = закутки и круги-ловушки. Игрок выйдет из круга, только выбросив точное число до «выходной» ячейки, чья стрелка ведёт наружу.</p>
+                    <p className="text-[10px] text-faint mt-1 leading-tight">Как работает: кубик считает только нумерованные ячейки и «перелетает» круг. Но если фишка ОСТАНОВИЛАСЬ точно на входе — её протаскивает по кругу до выхода. Обойти круг — только выбросив точное число.</p>
                   </div>
 
                   <div>
