@@ -1,4 +1,4 @@
-import type { GameMap, TileDef, TileImg } from './types';
+import type { CellDef, GameMap, TileDef, TileImg } from './types';
 import { getImage } from './assets';
 
 export const CELL = 64;
@@ -70,51 +70,70 @@ export function prevCellOf(map: GameMap, i: number): number {
   return (i - 1 + N) % N;
 }
 
-/* ---------- ЗАКОУЛОК ----------
-   Закоулок — секция маршрута между метками «вход» и «выход».
-   «ВХОД» (голубая метка) ставится на ячейке, С КОТОРОЙ фишка сворачивает
-   в круг (например, №3). «ВЫХОД» (зелёная) — на ячейке, КУДА приводит
-   круг (например, №8): встав на неё, фишка дальше ходит по обычной
-   нумерации. Ячейки МЕЖДУ ними (по стрелкам от входной) — ВНЕ НУМЕРАЦИИ
-   (n = 0): номер на них не рисуется.
-   Движение ВСЕГДА идёт по стрелкам, по ОДНОЙ клетке за каждый шаг кубика:
-   сколько выбросил — столько клеток и прошёл. Никаких прыжков через круг
-   и автопротаскивания до выхода. */
+/* ---------- ЗАКОУЛОК ПО-НАСТОЯЩЕМУ (как в классических настольных играх) ----------
+   · Ячейка может быть БЕЗ НОМЕРА (nonumber) — клетка круга/закоулка в стороне.
+     Основной ход по номерам её ПЕРЕСКАКИВАЕТ (№3 → №8), попасть можно только по стрелке.
+   · Стрелка (next) у БЕЗНОМЕРНОЙ ячейки — «дорога»: фишка ШАГАЕТ по ней кубиком.
+     Стрелка у ПРОНУМЕРОВАННОЙ — прыжок: фишка, ОСТАНОВИВШАЯСЬ на ней, прыгает по стрелке.
+   · ВТОРАЯ стрелка (hop, «ПЕРЕХОД») — прыжок при остановке с любой ячейки:
+     выход из круга на №8, штраф-телепорт. Проходом мимо — не срабатывает.
+   Остановился → прыгнул → выполняет ячейку, на которой стоит. Один прыжок за остановку. */
 
-/* Клетки закоулка: идём по стрелкам от входной ячейки, пока не встретим
-   метку «выход». Возвращаем клетки МЕЖДУ входом и выходом (им достанется
-   n = 0) и саму выходную ячейку (остаётся нумерованной). Если выхода по
-   пути нет (метку не поставили / цепочка вернулась на пронумерованный
-   путь) — null: метка «вход» просто украшение, нумерация не меняется. */
-export function loopSpanOf(
-  map: GameMap,
-  entry: number,
-  visited?: Set<number>, // уже пронумерованные ячейки — круг в них заходить не должен
-): { cells: number[]; exit: number } | null {
+const isNoNum = (c: CellDef): boolean => !!c.nonumber || c.n === 0; // n=0 — старые карты закоулков v0.12.x
+
+/* Цель прыжка при ОСТАНОВКЕ на ячейке: вторая стрелка hop, а у пронумерованной —
+   и обычная стрелка next (это и есть «вход» в круг / штраф-стрелка).
+   Нет прыжка — возвращается та же ячейка. */
+export function hopTargetOf(map: GameMap, i: number): number {
   const N = map.cells.length;
-  const cells: number[] = [];
-  let c = nextCellOf(map, entry);
-  for (let guard = 0; guard < N; guard++) {
-    if (c < 0 || c >= N || c === entry) return null;
-    const cc = map.cells[c];
-    if (!cc) return null;
-    if (cc.nextTag === 'out') return cells.length ? { cells, exit: c } : null; // «пустой» круг (вход сразу на выход) — не считаем
-    if (visited?.has(c)) return null;
-    cells.push(c);
-    c = nextCellOf(map, c);
-  }
-  return null;
+  const c = map.cells[i];
+  if (!c || N === 0) return i;
+  const legacy = (c as CellDef & { nextTag?: 'in' | 'out' }).nextTag;
+  let raw = c.hop;
+  if (raw === undefined && !isNoNum(c) && legacy !== 'out' && c.next !== undefined) raw = c.next;
+  if (raw === undefined || raw < 0 || raw >= N || raw === i) return i;
+  return raw;
 }
 
-/* Шаг фишки ВПЕРЁД: строго по стрелке маршрута — закоулок проходится
-   по клеткам, как и весь остальной путь */
+/* Шаг фишки ВПЕРЁД:
+   · пронумерованная ячейка → следующая ПРОНУМЕРОВАННАЯ по порядку (безномерные перескакиваются);
+   · безномерная → по своей стрелке-дороге (нет стрелки — стоит на месте). */
 export function stepNext(map: GameMap, i: number): number {
-  return nextCellOf(map, i);
+  const N = map.cells.length;
+  if (N === 0) return i;
+  const c = map.cells[i];
+  if (!c) return i;
+  if (isNoNum(c)) {
+    const j = c.next;
+    return j !== undefined && j >= 0 && j < N && j !== i ? j : i;
+  }
+  for (let k = 1; k <= N; k++) {
+    const j = (i + k) % N;
+    if (!isNoNum(map.cells[j])) return j;
+  }
+  return i;
 }
 
-/* Шаг фишки НАЗАД: против стрелки маршрута */
+/* Шаг фишки НАЗАД:
+   · пронумерованная → предыдущая ПРОНУМЕРОВАННАЯ по порядку;
+   · безномерная → против дороги (та ячейка, чья стрелка ведёт сюда; нет — стоит). */
 export function stepPrev(map: GameMap, i: number): number {
-  return prevCellOf(map, i);
+  const N = map.cells.length;
+  if (N === 0) return i;
+  const c = map.cells[i];
+  if (!c) return i;
+  if (isNoNum(c)) {
+    for (let j = 0; j < N; j++) {
+      if (j === i) continue;
+      if (map.cells[j].next !== undefined && map.cells[j].next === i) return j;
+    }
+    return i;
+  }
+  for (let k = 1; k <= N; k++) {
+    const j = (i - k + N + N) % N;
+    if (!isNoNum(map.cells[j])) return j;
+  }
+  return i;
 }
 
 /* Стартовая ячейка: первая с типом «старт», иначе №0 */
@@ -123,43 +142,41 @@ export const startCellIdx = (map: GameMap): number => {
   return i >= 0 ? i : 0;
 };
 
-/* Нумерация ячеек ПО МАРШРУТУ: идём от стартовой по стрелкам и присваиваем 1,2,3…
-   Ячейки ЗАКОУЛКА (между метками «вход» и «выход») — ВНЕ НУМЕРАЦИИ (n = 0):
-   номер на них не рисуется, но фишка проходит их по стрелкам, как и все.
-   Нет метки «выход» по пути — закоулок не признаётся, нумеруется всё подряд. */
+/* Нумерация ПО ПОРЯДКУ СОЗДАНИЯ: ячейка №1 — первая поставленная и т.д.
+   Кнопка «Без номера» лишь прячет номер и выводит клетку из основного пути —
+   номера ОСТАЛЬНЫХ ячеек НЕ сдвигаются (№8 остаётся №8). */
 export function renumberByPath(map: GameMap): void {
-  const N = map.cells.length;
-  if (N === 0) return;
-  const visited = new Set<number>();
-  let cur = startCellIdx(map);
-  let n = 1;
-  while (!visited.has(cur) && visited.size < N) {
-    visited.add(cur);
-    map.cells[cur].n = n++;
-    const span = map.cells[cur].nextTag === 'in' ? loopSpanOf(map, cur, visited) : null;
-    if (span) {
-      // закоулок: клетки между «входом» и «выходом» остаются без номеров
-      for (const c of span.cells) {
-        if (!visited.has(c)) { visited.add(c); map.cells[c].n = 0; }
-      }
-      cur = span.exit;
-    } else {
-      cur = nextCellOf(map, cur);
-    }
-  }
-  for (let i = 0; i < N; i++) {
-    if (!visited.has(i)) map.cells[i].n = n++;
-  }
+  for (let i = 0; i < map.cells.length; i++) map.cells[i].n = i + 1;
 }
 
-/* После УДАЛЕНИЯ ячейки: чистим/сдвигаем явные стрелки (индексы съехали) и перенумеровываем */
+/* Разовая конвертация старых карт (метки «вход/выход» v0.12.x) в новую модель:
+   клетки с n=0 → без номера; у «выхода» дорога наружу больше не нужна;
+   метки стираются (стрелка «входа» и так прыжок у пронумерованной ячейки). */
+export function normCellsLegacy(map: GameMap): void {
+  for (const c of map.cells) {
+    if (c.n === 0 && !c.nonumber) c.nonumber = true;
+    const legacy = (c as CellDef & { nextTag?: 'in' | 'out' }).nextTag;
+    if (legacy === 'out' && c.next !== undefined && c.hop === undefined) delete c.next;
+    delete (c as CellDef & { nextTag?: 'in' | 'out' }).nextTag;
+  }
+  renumberByPath(map);
+}
+
+/* После УДАЛЕНИЯ ячейки: чистим/сдвигаем явные стрелки и прыжки (индексы съехали) и перенумеровываем */
 export function fixLinksAfterDelete(map: GameMap, deletedIdx: number): void {
   const N = map.cells.length;
-  for (const c of map.cells) {
-    if (c.next === undefined) continue;
-    if (c.next === deletedIdx) { delete c.next; delete c.nextTag; }
-    else if (c.next > deletedIdx) c.next--;
-    if (c.next !== undefined && (c.next < 0 || c.next >= N || c.next === map.cells.indexOf(c))) { delete c.next; delete c.nextTag; }
+  for (let i = 0; i < N; i++) {
+    const c = map.cells[i];
+    if (c.next !== undefined) {
+      if (c.next === deletedIdx) { delete c.next; delete (c as CellDef & { nextTag?: 'in' | 'out' }).nextTag; }
+      else if (c.next > deletedIdx) c.next--;
+      if (c.next !== undefined && (c.next < 0 || c.next >= N || c.next === i)) { delete c.next; delete (c as CellDef & { nextTag?: 'in' | 'out' }).nextTag; }
+    }
+    if (c.hop !== undefined) {
+      if (c.hop === deletedIdx) delete c.hop;
+      else if (c.hop > deletedIdx) c.hop--;
+      if (c.hop !== undefined && (c.hop < 0 || c.hop >= N || c.hop === i)) delete c.hop;
+    }
   }
   renumberByPath(map);
 }
@@ -311,56 +328,66 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
 
   const N = map.cells.length;
   if (N > 1) {
-    // стрелки маршрута: по ЯВНЫМ связям next (сплошные) или автопорядку (пунктир).
-    // Метки закоулков: «вход» — голубая, «выход» — зелёная, обычная кастомная — золотая.
-    const ARROW_STYLES: Record<string, { color: string; label: string }> = {
-      in: { color: '#5aa9ff', label: 'ВХОД' },
-      out: { color: '#2ee6a8', label: 'ВЫХОД' },
+    // Стрелки: ЗОЛОТАЯ — явная «дорога» (у безномерной — куда шагает фишка, у
+    // пронумерованной — прыжок при остановке); белый ПУНКТИР — авто-порядок у
+    // пронумерованных; КОРАЛЛОВАЯ с подписью «ПЕРЕХОД» — вторая стрелка-прыжок.
+    // Старые метки закоулков («вход»/«выход») подсвечиваются голубым/зелёным.
+    const TAG_STYLES: Record<string, { c: string; h: string; label: string }> = {
+      in: { c: '#5aa9ff', h: '#7bbcff', label: 'ВХОД' },
+      out: { c: '#2ee6a8', h: '#5ff0bf', label: 'ВЫХОД' },
     };
-    ctx.textAlign = 'center';
-    for (let i = 0; i < N; i++) {
-      const ci = map.cells[i];
-      const j = nextCellOf(map, i);
-      if (j === i) continue; // самозамыкание — стрелку не рисуем
-      const a = cellCenter(map, i);
-      const c = cellCenter(map, j);
+    const GOLD = 'rgba(255,207,63,0.85)', GOLD_H = 'rgba(255,207,63,0.95)';
+    const AUTO = 'rgba(233,236,255,0.35)', AUTO_H = 'rgba(233,236,255,0.55)';
+    const HOP = '#ff6b6b', HOP_H = '#ff9b9b';
+    const seg = (ai: number, bi: number, col: string, head: string, dashed: boolean, label?: string) => {
+      const a = cellCenter(map, ai);
+      const c = cellCenter(map, bi);
       const dx = c.x - a.x, dy = c.y - a.y;
       const len = Math.hypot(dx, dy) || 1;
-      if (len < 8) continue;
+      if (len < 8) return;
       const ux = dx / len, uy = dy / len;
-      const bi = cellBox(map, i);
-      const bj = cellBox(map, j);
-      const padA = Math.min(bi.w, bi.h) * 0.32 + 6;
-      const padB = Math.min(bj.w, bj.h) * 0.32 + 6;
+      const ba = cellBox(map, ai);
+      const bb = cellBox(map, bi);
+      const padA = Math.min(ba.w, ba.h) * 0.32 + 6;
+      const padB = Math.min(bb.w, bb.h) * 0.32 + 6;
       const sx = a.x + ux * padA, sy = a.y + uy * padA;
       const ex = c.x - ux * padB, ey = c.y - uy * padB;
-      const custom = ci.next !== undefined && ci.next >= 0 && ci.next < N && ci.next !== i;
-      // метка закоулка видна и на авто-стрелке (пунктир): она становится цветной сплошной линией
-      const style = ci.nextTag ? ARROW_STYLES[ci.nextTag] : null;
-      const strokeCol = style ? style.color : custom ? 'rgba(255,207,63,0.85)' : 'rgba(233,236,255,0.35)';
-      const headCol = style ? style.color : custom ? 'rgba(255,207,63,0.95)' : 'rgba(233,236,255,0.55)';
-      ctx.strokeStyle = strokeCol;
-      ctx.lineWidth = custom || style ? 3.5 : 3;
-      if (!custom && !style) ctx.setLineDash([7, 7]);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = dashed ? 3 : 3.5;
+      if (dashed) ctx.setLineDash([7, 7]);
       ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
-      if (!custom && !style) ctx.setLineDash([]);
-      ctx.fillStyle = headCol;
+      if (dashed) ctx.setLineDash([]);
+      ctx.fillStyle = head;
       ctx.beginPath();
       ctx.moveTo(ex, ey);
       ctx.lineTo(ex - ux * 11 - uy * 6.5, ey - uy * 11 + ux * 6.5);
       ctx.lineTo(ex - ux * 11 + uy * 6.5, ey - uy * 11 - ux * 6.5);
       ctx.fill();
-      // подпись метки у середины стрелки (чуть сбоку, чтобы не сливалась с линией)
-      if (style) {
+      // подпись у середины стрелки (чуть сбоку, чтобы не сливалась с линией)
+      if (label) {
         const mx = (sx + ex) / 2 - uy * 13;
         const my = (sy + ey) / 2 + ux * 13;
         ctx.fillStyle = 'rgba(7,9,18,0.8)';
-        const tw = style.label.length * 6 + 6;
+        const tw = label.length * 6 + 6;
         ctx.fillRect(mx - tw / 2, my - 7, tw, 12);
-        ctx.fillStyle = style.color;
+        ctx.fillStyle = col;
         ctx.font = '7px "Press Start 2P", monospace';
-        ctx.fillText(style.label, mx, my + 2);
+        ctx.textAlign = 'center';
+        ctx.fillText(label, mx, my + 2);
       }
+    };
+    for (let i = 0; i < N; i++) {
+      const ci = map.cells[i];
+      const legacyTag = (ci as CellDef & { nextTag?: 'in' | 'out' }).nextTag;
+      const nxt = ci.next;
+      if (nxt !== undefined && nxt >= 0 && nxt < N && nxt !== i) {
+        const st = legacyTag ? TAG_STYLES[legacyTag] : null;
+        seg(i, nxt, st ? st.c : GOLD, st ? st.h : GOLD_H, false, st ? st.label : undefined);
+      } else if (!isNoNum(ci)) {
+        seg(i, (i + 1) % N, AUTO, AUTO_H, true); // авто-порядок у пронумерованных
+      }
+      const h = ci.hop;
+      if (h !== undefined && h >= 0 && h < N && h !== i) seg(i, h, HOP, HOP_H, false, 'ПЕРЕХОД');
     }
   }
 
@@ -403,7 +430,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.font = `${big ? 20 : 15}px "Press Start 2P", monospace`;
       ctx.textAlign = 'center';
       ctx.fillText('?', 0, big ? 8 : 6);
-      if (o.showNumbers && cell.n > 0) {
+      if (o.showNumbers && cell.n > 0 && !cell.nonumber) {
         ctx.fillStyle = '#8f97c9';
         ctx.font = '8px "Press Start 2P", monospace';
         ctx.fillText(String(cell.n), 0, H / 2 - 6);
@@ -474,14 +501,35 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       } else {
         const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : QUIZ;
         const iconColor = cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : '#5aa9ff';
-        px(ctx, -icon[0].length * 3, -H / 2 + (cell.color ? 24 : 12), 6, icon, iconColor);
+        const cimg = cell.imageId ? getImage(cell.imageId) : null;
+        if (cimg) {
+          // картинка на бонусе/ловушке/квизе — как на заданиях; иконка типа в углу, чтобы ячейка читалась
+          const areaTop2 = -H / 2 + (cell.color ? 20 : 5);
+          const areaH2 = H - (cell.color ? 20 : 5) - 16;
+          ctx.imageSmoothingEnabled = false;
+          const iw = cimg.width || 1, ih = cimg.height || 1;
+          const sc = Math.max((W - 10) / iw, areaH2 / ih);
+          const dw = iw * sc, dh = ih * sc;
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-W / 2 + 4, areaTop2, W - 8, areaH2);
+          ctx.clip();
+          ctx.drawImage(cimg, -dw / 2, areaTop2 + (areaH2 - dh) / 2, dw, dh);
+          ctx.restore();
+          const icw = icon[0].length * 2 + 6;
+          ctx.fillStyle = 'rgba(7,9,18,0.72)';
+          ctx.fillRect(-W / 2 + 4, areaTop2 + 2, icw, 12);
+          px(ctx, -W / 2 + 7, areaTop2 + 4, 2, icon, iconColor);
+        } else {
+          px(ctx, -icon[0].length * 3, -H / 2 + (cell.color ? 24 : 12), 6, icon, iconColor);
+        }
         ctx.fillStyle = '#e9ecff';
         ctx.font = '8px "Press Start 2P", monospace';
         ctx.textAlign = 'center';
         const name = cell.label || (cell.type === 'bonus' ? 'БОНУС' : cell.type === 'trap' ? 'ЛОВУШКА' : 'КВИЗ');
         ctx.fillText(name.slice(0, Math.floor((W - 10) / 8)).toUpperCase(), 0, H / 2 - 8);
       }
-      if (o.showNumbers && cell.n > 0) {
+      if (o.showNumbers && cell.n > 0 && !cell.nonumber) {
         ctx.fillStyle = '#e9ecff';
         ctx.font = '8px "Press Start 2P", monospace';
         ctx.textAlign = 'left';
@@ -531,7 +579,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         ctx.textAlign = 'center';
         ctx.fillText('!', W / 2 - 8, -H / 2 + 14);
       }
-      if (o.showNumbers && cell.n > 0) {
+      if (o.showNumbers && cell.n > 0 && !cell.nonumber) {
         ctx.fillStyle = '#e9ecff';
         ctx.font = '9px "Press Start 2P", monospace';
         ctx.textAlign = 'center';

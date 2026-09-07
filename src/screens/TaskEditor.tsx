@@ -349,7 +349,7 @@ export default function TaskEditor() {
           <option value="">Ячейка: выберите…</option>
           {map.cells.map((c, i) => (
             <option key={i} value={i}>
-              {`${c.n > 0 ? '№' + c.n : 'КРУГ'} · ${c.type === 'start' ? 'Старт' : c.type === 'task' ? 'Задание' : c.type === 'bonus' ? 'Бонус' : c.type === 'trap' ? 'Ловушка' : 'Квиз'}${c.label ? ' · ' + c.label : ''}${c.task ? ' ✓' : ''}`}
+              {`${c.nonumber || c.n === 0 ? 'БЕЗ №' : '№' + c.n} · ${c.type === 'start' ? 'Старт' : c.type === 'task' ? 'Задание' : c.type === 'bonus' ? 'Бонус' : c.type === 'trap' ? 'Ловушка' : 'Квиз'}${c.label ? ' · ' + c.label : ''}${c.task ? ' ✓' : ''}`}
             </option>
           ))}
         </select>
@@ -403,7 +403,7 @@ export default function TaskEditor() {
             </div>
           ) : (
             <>
-              <Panel title={cell.n > 0 ? `Ячейка №${cell.n}` : 'Ячейка на круге (без номера)'} icon={Ic.target(16)} accent={cell.type === 'bonus' ? 'var(--color-teal)' : cell.type === 'trap' ? 'var(--color-coral)' : 'var(--color-gold)'}>
+              <Panel title={!(cell.nonumber || cell.n === 0) ? `Ячейка №${cell.n}` : 'Ячейка без номера (на круге)'} icon={Ic.target(16)} accent={cell.type === 'bonus' ? 'var(--color-teal)' : cell.type === 'trap' ? 'var(--color-coral)' : 'var(--color-gold)'}>
                 <div className="p-3 space-y-3">
                   <div className="flex gap-1 flex-wrap">
                     {(['start', 'task', 'bonus', 'trap', 'quiz'] as const).map((t) => (

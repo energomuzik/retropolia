@@ -3,7 +3,7 @@ import { useApp } from '../store';
 import { GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
 import {
   CELL, mapSize, drawBoard, fitView, cellAtPoint, stampAtPoint, cellBox, cellCenter,
-  renumberByPath, fixLinksAfterDelete, startCellIdx, loopSpanOf,
+  renumberByPath, normCellsLegacy, fixLinksAfterDelete, startCellIdx,
 } from '../render';
 import { idbDel, idbPut, uid } from '../db';
 import type { CellDef, CellType, GameMap, Stamp, TileGroup, TileImg } from '../types';
@@ -420,19 +420,22 @@ function migrateMap(m: GameMap, libTiles: { id: string; dataUrl: string; gw: num
     next.stamps = [];
   }
   renumberByPath(next);
+  // старые карты: метки закоулков v0.12.x → безномерные ячейки + стрелки
+  normCellsLegacy(next);
   next.updatedAt = Date.now();
   return next;
 }
 
 /* ---------- инструменты ---------- */
 
-type Tool = 'select' | 'tile' | 'cell' | 'link' | 'erase' | 'pan';
+type Tool = 'select' | 'tile' | 'cell' | 'link' | 'hop' | 'erase' | 'pan';
 
 const TOOLS: { key: Tool; label: string; hint: string }[] = [
   { key: 'select', label: 'Выбор', hint: 'клик — выбрать тайл/ячейку и тянуть мышью · пустое место — двигать камеру' },
   { key: 'tile', label: 'Тайл', hint: 'клик — поставить выбранный тайл; можно тянуть с зажатой кнопкой' },
   { key: 'cell', label: 'Ячейка', hint: 'клик — новая ячейка В ЛЮБОМ МЕСТЕ (без привязки к сетке), клик по ячейке — выбрать' },
-  { key: 'link', label: 'Стрелка', hint: 'клик по ячейке А, затем по ячейке Б: маршрут пойдёт А → Б. Так делают закоулки и круги! Клик по той же ячейке — убрать стрелку' },
+  { key: 'link', label: 'Стрелка', hint: 'клик по ячейке А, затем по Б. У БЕЗНОМЕРНОЙ ячейки стрелка — куда шагает фишка; у ПРОНУМЕРОВАННОЙ — прыжок при остановке. Клик по той же ячейке — убрать' },
+  { key: 'hop', label: 'Переход', hint: 'ВТОРАЯ стрелка: клик по ячейке А, затем по Б — когда фишка ОСТАНОВИТСЯ на А, она прыгнет на Б (выход из круга, штраф-телепорт). Клик по той же ячейке — убрать' },
   { key: 'erase', label: 'Ластик', hint: 'клик или протяни с зажатой кнопкой — убирает ТАЙЛЫ под курсором. Ячейки ластик не трогает: выдели ячейку и нажми Delete' },
   { key: 'pan', label: 'Рука', hint: 'двигать камеру (колесо — зум под курсором)' },
 ];
@@ -525,10 +528,8 @@ export default function MapEditor() {
       if (!m || !m.cells[idx]) return m;
       const cells = m.cells.slice();
       cells[idx] = { ...cells[idx], ...patch };
-      const nm = { ...m, cells } as GameMap;
-      // смена стрелки/метки (включая СТИРАНИЕ метки) меняет маршрут — перенумеровываем
-      if (patch.next !== undefined || 'nextTag' in patch) renumberByPath(nm);
-      return nm;
+      // номера — по порядку создания, стрелки/метки на них не влияют — перенумерация не нужна
+      return { ...m, cells } as GameMap;
     });
   const updStamp = (idx: number, patch: Partial<Stamp>) =>
     setMap((m) => {
@@ -827,10 +828,19 @@ export default function MapEditor() {
     setMap((mm) => {
       if (!mm || !mm.cells[from]) return mm;
       const cells = mm.cells.slice();
-      cells[from] = { ...cells[from], next: to ?? undefined, nextTag: undefined };
-      const nm = { ...mm, cells } as GameMap;
-      renumberByPath(nm);
-      return nm;
+      cells[from] = { ...cells[from], next: to ?? undefined };
+      return { ...mm, cells } as GameMap;
+    });
+    dirtyRef.current = true;
+  };
+
+  /* вторая стрелка «переход»: прыжок при остановке на ячейке */
+  const setHop = (from: number, to: number | null) => {
+    setMap((mm) => {
+      if (!mm || !mm.cells[from]) return mm;
+      const cells = mm.cells.slice();
+      cells[from] = { ...cells[from], hop: to ?? undefined };
+      return { ...mm, cells } as GameMap;
     });
     dirtyRef.current = true;
   };
@@ -915,6 +925,24 @@ export default function MapEditor() {
         setLink(linkFrom, ci);
         setLinkFrom(null);
         sfx.coin();
+      }
+      return;
+    }
+    if (tool === 'hop') {
+      const ci = cellAtPoint(m, w.x, w.y);
+      if (ci < 0) { setLinkFrom(null); return; }
+      if (linkFrom === null) {
+        setLinkFrom(ci);
+        sfx.hover();
+      } else if (linkFrom === ci) {
+        setHop(ci, null); // та же ячейка — убрать переход
+        setLinkFrom(null);
+        sfx.fail();
+      } else {
+        setHop(linkFrom, ci);
+        setLinkFrom(null);
+        sfx.coin();
+        toast('ПЕРЕХОД готов: фишка прыгнет по стрелке, когда ОСТАНОВИТСЯ на исходной ячейке', 'ok');
       }
       return;
     }
@@ -1372,7 +1400,7 @@ export default function MapEditor() {
               <div className="font-display uppercase text-paper text-lg">Выберите карту или создайте новую</div>
               <p className="text-[13px] text-dim max-w-md">
                 Как в программе Tiled: загрузите общий фон, поверх ставьте тайлы любого размера и в несколько слоёв,
-                а ячейки маршрута размещайте в любом месте и соединяйте стрелками — можно делать закоулки: метки «вход» и «выход» убирают номера с ячеек круга, фишка проходит его пошагово по стрелкам.
+                а ячейки маршрута размещайте в любом месте и соединяйте стрелками. Круги и закоулки: сделайте ячейки БЕЗ НОМЕРА, нарисуйте по ним стрелки-дорогу, а вход и выход — стрелками ПЕРЕХОДА (прыжок при остановке фишки).
               </p>
               <div className="flex gap-3">
                 <PxBtn color="teal" onClick={newMap}>Новая карта</PxBtn>
@@ -1398,7 +1426,7 @@ export default function MapEditor() {
                   <button
                     key={tl.key}
                     title={tl.hint}
-                    onClick={() => { setTool(tl.key); if (tl.key !== 'link') setLinkFrom(null); sfx.hover(); }}
+                    onClick={() => { setTool(tl.key); if (tl.key !== 'link' && tl.key !== 'hop') setLinkFrom(null); sfx.hover(); }}
                     className={`px-3 py-1.5 font-display text-[10px] uppercase tracking-wide transition-colors cursor-pointer ${tool === tl.key ? 'bg-gold text-abyss' : 'text-dim hover:text-paper'}`}
                   >
                     {tl.label}
@@ -1423,6 +1451,7 @@ export default function MapEditor() {
                   Задания: {taskCells}{noTask > 0 ? <span className="text-magma"> (без рома: {noTask})</span> : ''} · Тайлов: {(map.stamps ?? []).length} · {msz.w}×{msz.h}
                 </div>
                 {tool === 'link' && <div className="text-gold font-pixel text-[8px]">СТРЕЛКА: клик по ячейке А, затем по Б · Esc — отмена{linkFrom !== null ? ' · выбрана А, жмите Б' : ''}</div>}
+                {tool === 'hop' && <div className="text-coral font-pixel text-[8px]">ПЕРЕХОД: клик по ячейке А, затем по Б — при остановке на А фишка прыгнет на Б · Esc — отмена{linkFrom !== null ? ' · выбрана А, жмите Б' : ''}</div>}
                 {tool === 'erase' && <div className="text-coral font-pixel text-[8px]">ЛАСТИК: клик или тяните с кнопкой — стирает ТАЙЛЫ под курсором · ячейки не трогает</div>}
               </div>
               <div className="absolute bottom-3 right-3 tick-label text-faint text-right pointer-events-none">
@@ -1433,7 +1462,7 @@ export default function MapEditor() {
               {selCellDef && selCell !== null && (
                 <div className="absolute top-14 right-3 w-[264px] pixel-panel pixel-corners p-3.5 space-y-3 pop-in shadow-[0_14px_40px_rgba(0,0,0,0.6)] max-h-[80%] overflow-y-auto">
                   <div className="flex items-center justify-between">
-                    <span className="font-display uppercase text-[12px] text-gold">{selCellDef.n > 0 ? `Ячейка №${selCellDef.n}` : 'Ячейка на круге'}{selCellDef.next !== undefined ? ' ↗' : ''}</span>
+                    <span className="font-display uppercase text-[12px] text-gold">{selCellDef.nonumber ? 'Ячейка без номера' : `Ячейка №${selCellDef.n}`}{selCellDef.next !== undefined ? ' ↗' : ''}{selCellDef.hop !== undefined ? ' ⇢' : ''}</span>
                     <button onClick={() => { setSelCell(null); sfx.hover(); }} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
                   </div>
 
@@ -1453,6 +1482,18 @@ export default function MapEditor() {
                     {selCellDef.type === 'start' && (
                       <p className="text-[10px] text-teal mt-1 leading-tight">Игроки начнут партию с этой ячейки. Задание ей не нужно.</p>
                     )}
+                    <button
+                      onClick={() => {
+                        const willHide = !selCellDef.nonumber;
+                        updCell(selCell, { nonumber: willHide });
+                        dirtyRef.current = true; sfx.hover();
+                        toast(willHide
+                          ? 'Ячейка БЕЗ НОМЕРА: основной путь её перескакивает — рисуй стрелку-дорогу'
+                          : 'Ячейке возвращён номер — она снова в основном пути', 'info');
+                      }}
+                      title="Без номера — клетка круга/закоулка: основной путь по номерам её ПЕРЕСКАКИВАЕТ, попасть можно только по стрелке. Номера остальных ячеек НЕ сдвигаются"
+                      className={`w-full mt-1.5 py-1.5 font-display text-[9px] uppercase border-2 cursor-pointer transition-colors ${selCellDef.nonumber ? 'border-coral text-coral bg-coral/10' : 'border-edge text-faint hover:text-dim'}`}
+                    >{selCellDef.nonumber ? '✓ Без номера — клик, вернуть номер' : 'Сделать БЕЗ НОМЕРА (для кругов)'}</button>
                   </div>
 
                   <div>
@@ -1486,11 +1527,13 @@ export default function MapEditor() {
                   </div>
 
                   <div>
-                    <div className="tick-label mb-1.5">Стрелка маршрута (куда идём дальше)</div>
+                    <div className="tick-label mb-1.5">Стрелка маршрута</div>
                     {selCellDef.next !== undefined && map.cells[selCellDef.next] ? (
-                      <div className="text-[11px] text-gold mb-1.5">Ведёт в ячейку №{map.cells[selCellDef.next].n}</div>
+                      <div className="text-[11px] text-gold mb-1.5">Ведёт в ячейку №{map.cells[selCellDef.next].n}{selCellDef.nonumber ? ' — по ней фишка ШАГАЕТ' : ' — прыжок при остановке'}</div>
                     ) : (
-                      <div className="text-[11px] text-dim mb-1.5">Авто — в следующую по порядку создания</div>
+                      <div className={`text-[11px] mb-1.5 ${selCellDef.nonumber ? 'text-coral' : 'text-dim'}`}>
+                        {selCellDef.nonumber ? 'Нет стрелки — фишка здесь ЗАСТРЯНЕТ! Нарисуй стрелку-дорогу' : 'Авто — в следующую по порядку создания'}
+                      </div>
                     )}
                     <div className="flex gap-1.5">
                       <GhostBtn
@@ -1502,58 +1545,31 @@ export default function MapEditor() {
                         <GhostBtn small onClick={() => setLink(selCell, null)}>Авто</GhostBtn>
                       )}
                     </div>
-                    <div className="mt-2">
-                      <div className="tick-label mb-1">Метка закоулка (можно и при стрелке «Авто»)</div>
-                      <div className="grid grid-cols-3 gap-1">
-                        <button
-                          onClick={() => { updCell(selCell, { nextTag: undefined }); dirtyRef.current = true; sfx.hover(); }}
-                          className={`py-1 font-display text-[8px] uppercase border-2 cursor-pointer ${!selCellDef.nextTag ? 'border-gold text-gold' : 'border-edge text-faint hover:text-dim'}`}
-                        >Обычн.</button>
-                        <button
-                          onClick={() => {
-                            const wasOut = selCellDef.nextTag === 'out';
-                            updCell(selCell, { nextTag: 'in' }); dirtyRef.current = true; sfx.hover();
-                            toast(wasOut ? 'С этой ячейки снята метка ВЫХОД и поставлена ВХОД' : 'ВХОД отмечен. Теперь выдели ячейку, КУДА приводит круг, и нажми ВЫХОД', wasOut ? 'err' : 'info');
-                          }}
-                          title="ВХОД: начало закоулка — ставь на ячейке, С КОТОРОЙ фишка сворачивает в круг (в примере — №3)"
-                          className={`py-1 font-display text-[8px] uppercase border-2 cursor-pointer ${selCellDef.nextTag === 'in' ? 'border-sky text-sky' : 'border-edge text-faint hover:text-dim'}`}
-                        >Вход</button>
-                        <button
-                          onClick={() => {
-                            const m = mapRef.current; if (!m) return;
-                            const wasIn = selCellDef.nextTag === 'in';
-                            const cells = m.cells.slice();
-                            cells[selCell] = { ...cells[selCell], nextTag: 'out' };
-                            const inIdx = cells.findIndex((c) => c.nextTag === 'in');
-                            const span = inIdx >= 0 ? loopSpanOf({ ...m, cells } as GameMap, inIdx) : null;
-                            updCell(selCell, { nextTag: 'out' }); dirtyRef.current = true; sfx.hover();
-                            if (wasIn) toast('С этой ячейки снята метка ВХОД и поставлена ВЫХОД', 'err');
-                            else if (span) toast(`Готово! Клеток в круге: ${span.cells.length} — номера с них исчезли`, 'ok');
-                            else toast('ВЫХОД отмечен, но круг не собрался: от ВХОДА нет пути по стрелкам до этой ячейки', 'err');
-                          }}
-                          title="ВЫХОД: конец закоулка — ставь на ячейке, КУДА приводит круг (в примере — №8). Встав на неё, фишка дальше ходит по обычной нумерации"
-                          className={`py-1 font-display text-[8px] uppercase border-2 cursor-pointer ${selCellDef.nextTag === 'out' ? 'border-teal text-teal' : 'border-edge text-faint hover:text-dim'}`}
-                        >Выход</button>
-                      </div>
-                      {(() => {
-                        const m = map;
-                        if (!m) return null;
-                        const circleOk = m.cells.some((c) => c.n === 0);
-                        const hasIn = m.cells.some((c) => c.nextTag === 'in');
-                        const hasOut = m.cells.some((c) => c.nextTag === 'out');
-                        return (
-                          <p className={`text-[10px] mt-1 leading-tight ${circleOk ? 'text-teal' : hasIn && hasOut ? 'text-coral' : 'text-faint'}`}>
-                            {circleOk
-                              ? 'Круг собран: клетки между входом и выходом — без номеров.'
-                              : hasIn && hasOut
-                                ? 'Круг НЕ собран: проверь, что от ВХОДА по стрелкам (включая пунктир) можно дойти до ВЫХОДА.'
-                                : 'Отметь ВХОД (№3) и ВЫХОД (№8) — клетки между ними по стрелкам перестанут нумероваться.'}
-                          </p>
-                        );
-                      })()}
-                      <p className="text-[10px] text-faint mt-1 leading-tight">ЗАКОУЛОК: ВХОД — на ячейке, С КОТОРОЙ фишка сворачивает в круг (её стрелка станет голубой). ВЫХОД — на ячейке, КУДА круг приводит (её стрелка станет зелёной — даже пунктир «авто» станет цветной сплошной). Пример: путь 1..10, вход на №3, выход на №8 — ячейки 4,5,6,7 остаются без номеров.</p>
+                  </div>
+
+                  <div>
+                    <div className="tick-label mb-1.5">Стрелка ПЕРЕХОДА (вторая стрелка)</div>
+                    {selCellDef.hop !== undefined && map.cells[selCellDef.hop] ? (
+                      <div className="text-[11px] text-coral mb-1.5">Прыжок в ячейку №{map.cells[selCellDef.hop].n} — когда фишка ОСТАНОВИТСЯ здесь</div>
+                    ) : (
+                      <div className="text-[11px] text-dim mb-1.5">Нет — при остановке фишка просто стоит</div>
+                    )}
+                    <div className="flex gap-1.5">
+                      <GhostBtn
+                        small
+                        className="flex-1"
+                        onClick={() => { setTool('hop'); setLinkFrom(selCell); toast('Теперь кликните по ячейке, куда фишка прыгнет при остановке здесь', 'info'); }}
+                      >Задать переход</GhostBtn>
+                      {selCellDef.hop !== undefined && (
+                        <GhostBtn small onClick={() => setHop(selCell, null)}>Убрать</GhostBtn>
+                      )}
                     </div>
-                    <p className="text-[10px] text-faint mt-1 leading-tight">Как работает: фишка ходит по стрелкам по ОДНОЙ клетке за каждый шаг кубика — и через закоулок проходит пошагово, БЕЗ протаскивания до выхода. Встав на выход, дальше идёт по обычной нумерации.</p>
+                    <p className="text-[10px] text-faint mt-1 leading-tight">ПЕРЕХОД (коралловая стрелка) срабатывает, только когда фишка ОСТАНОВИЛАСЬ на ячейке: выход из круга, штраф-телепорт. Проходом мимо — не срабатывает.</p>
+                  </div>
+
+                  <div>
+                    <p className="text-[10px] text-faint leading-tight">КАК ХОДИТ ФИШКА: по пронумерованным — по порядку номеров, БЕЗНОМЕРНЫЕ перескакивает (№3 → №8). На безномерной — по её стрелке-дороге. Остановилась на ячейке со стрелкой перехода — прыгнула по ней и выполняет ту ячейку, на которой стоит.
+                    Пример круга: путь 1..10, ячейки 4,5,6,7 — «Без номера», стрелки 3→4, 4→5, 5→6, 6→4 (дорога), с №6 переход на №8 (выход).</p>
                   </div>
 
                   <div>
