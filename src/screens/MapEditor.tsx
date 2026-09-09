@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../store';
-import { GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
+import { AnimPreview, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
 import {
-  CELL, mapSize, drawBoard, fitView, cellAtPoint, stampAtPoint, cellBox, cellCenter,
+  CELL, mapSize, drawBoard, fitView, cellAtPoint, stampAtPoint, animAtPoint, cellBox, cellCenter,
   renumberByPath, normCellsLegacy, fixLinksAfterDelete, startCellIdx,
 } from '../render';
+import { extractTilesFromImage } from '../tilecut';
+import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbPut, uid } from '../db';
-import type { CellDef, CellType, GameMap, Stamp, TokenDef, TileGroup, TileImg } from '../types';
+import type { AnimDef, CellDef, CellType, GameMap, PlacedAnim, Stamp, TokenDef, TileGroup, TileImg } from '../types';
 import { sfx } from '../sound';
 
 /* ---------- импорт картинок: сжимаем до разумного размера, чтобы карта не весила десятки МБ ---------- */
@@ -30,342 +32,6 @@ async function importImage(file: File, maxSide: number, jpeg = false): Promise<{
     cx.imageSmoothingEnabled = true;
     cx.drawImage(img, 0, 0, w, h);
     return { url: jpeg ? cv.toDataURL('image/jpeg', 0.85) : cv.toDataURL('image/png'), w, h };
-  } finally {
-    URL.revokeObjectURL(url0);
-  }
-}
-
-/* ---------- ЭКСТРАКТОР ТАЙЛОВ: нарезка спрайт-листов с однотонным фоном ----------
-   Ядро портировано из проверенного отдельного экстрактора (работает на листах
-   вида mariouniverse). Ключевые отличия от прошлой версии:
-   1) пятна ищутся по РАЗДУТОЙ маске (dilate), а не по пересечению раздутых
-      РАМОК — раньше близкие в ряд спрайты сливались всей строкой;
-   2) плашки: почти цельное пятно одного цвета (чёрный/белый квадрат) —
-      содержимое вырезается изнутри заливкой цвета плашки от краёв;
-   3) мелкий ч/б текст (подписи на листе) выбрасывается (можно оставить);
-   4) сортировка результата строками, как глазами по листу. */
-
-export interface ExtractParams {
-  bgMode: 'auto' | 'custom';
-  bg: string;       // цвет фона при bgMode='custom' (#rrggbb)
-  thr: number;      // допуск: |ΔR|+|ΔG|+|ΔB| больше → передний план (0..200)
-  minSize: number;  // минимальная сторона тайла, px
-  mergeGap: number; // склейка частей: раздувание маски, px (0 = выкл)
-  keepText: boolean;// оставить мелкий ч/б текст (подписи на листе)
-}
-
-export interface ExtractInfo { W: number; H: number; data: Uint8ClampedArray }
-
-interface ExTile { x: number; y: number; w: number; h: number; mask: Uint8Array }
-interface ExComp { id: number; x0: number; y0: number; x1: number; y1: number; count: number } // x1/y1 не вкл.
-
-/* раздувание маски на it пикселей: части одного тайла через щель ≤ 2·it сливаются,
-   а спрайты на большем расстоянии остаются раздельными */
-function dilateMask(mask: Uint8Array, w: number, h: number, it: number): Uint8Array {
-  let m = mask;
-  for (let t = 0; t < it; t++) {
-    const m2 = m.slice();
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const p = y * w + x;
-        if (m[p]) {
-          if (y > 0) m2[p - w] = 1;
-          if (y < h - 1) m2[p + w] = 1;
-          if (x > 0) m2[p - 1] = 1;
-          if (x < w - 1) m2[p + 1] = 1;
-        }
-      }
-    }
-    m = m2;
-  }
-  return m;
-}
-
-/* 8-связные компоненты маски */
-function labelComponents(mask: Uint8Array, w: number, h: number): { labels: Int32Array; comps: ExComp[] } {
-  const labels = new Int32Array(w * h);
-  const stack = new Int32Array(w * h);
-  let n = 0;
-  const comps: ExComp[] = [];
-  for (let start = 0; start < mask.length; start++) {
-    if (!mask[start] || labels[start]) continue;
-    n++;
-    let sp = 0;
-    stack[sp++] = start;
-    labels[start] = n;
-    let y0 = h, y1 = 0, x0 = w, x1 = 0, cnt = 0;
-    while (sp) {
-      const p = stack[--sp];
-      cnt++;
-      const py = (p / w) | 0, px = p % w;
-      if (py < y0) y0 = py;
-      if (py + 1 > y1) y1 = py + 1;
-      if (px < x0) x0 = px;
-      if (px + 1 > x1) x1 = px + 1;
-      for (let dy = -1; dy <= 1; dy++) {
-        const ny = py + dy;
-        if (ny < 0 || ny >= h) continue;
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = px + dx;
-          if (nx < 0 || nx >= w) continue;
-          const q = ny * w + nx;
-          if (mask[q] && !labels[q]) { labels[q] = n; stack[sp++] = q; }
-        }
-      }
-    }
-    comps.push({ id: n, x0, y0, x1, y1, count: cnt });
-  }
-  return { labels, comps };
-}
-
-/* заливка цветных пикселей от краёв окна: что достижимо снаружи — внешность плашки */
-function floodBorder(mask: Uint8Array, w: number, h: number): Uint8Array {
-  const vis = new Uint8Array(w * h);
-  const stack: number[] = [];
-  const seed = (x: number, y: number) => { const p = y * w + x; if (mask[p] && !vis[p]) { vis[p] = 1; stack.push(p); } };
-  for (let x = 0; x < w; x++) { seed(x, 0); seed(x, h - 1); }
-  for (let y = 0; y < h; y++) { seed(0, y); seed(w - 1, y); }
-  while (stack.length) {
-    const p = stack.pop()!;
-    const py = (p / w) | 0, px = p % w;
-    for (let dy = -1; dy <= 1; dy++) {
-      const ny = py + dy;
-      if (ny < 0 || ny >= h) continue;
-      for (let dx = -1; dx <= 1; dx++) {
-        const nx = px + dx;
-        if (nx < 0 || nx >= w) continue;
-        const q = ny * w + nx;
-        if (mask[q] && !vis[q]) { vis[q] = 1; stack.push(q); }
-      }
-    }
-  }
-  return vis;
-}
-
-/* мелкий ч/б текст: строка из ≥3 маленьких серых пятнышек подряд = подпись, долой */
-function textFilter(tiles: ExTile[], data: Uint8ClampedArray, W: number): ExTile[] {
-  const gray = (t: ExTile): boolean => {
-    let n = 0, g = 0;
-    for (let y = 0; y < t.h; y++) {
-      for (let x = 0; x < t.w; x++) {
-        if (!t.mask[y * t.w + x]) continue;
-        n++;
-        const s = ((t.y + y) * W + (t.x + x)) * 4;
-        const mx = Math.max(data[s], data[s + 1], data[s + 2]);
-        const mn = Math.min(data[s], data[s + 1], data[s + 2]);
-        if (mx - mn <= 30) g++;
-      }
-    }
-    return n > 0 && g / n > 0.9;
-  };
-  const cand = tiles.filter((t) => t.h <= 16 && t.w <= 16 && gray(t)).sort((a, b) => a.y - b.y || a.x - b.x);
-  const groups: ExTile[][] = [];
-  let cur: ExTile[] = [];
-  for (const t of cand) {
-    const last = cur[cur.length - 1];
-    if (last && Math.abs(t.y - cur[0].y) <= 4 && t.x - (last.x + last.w) <= 12) cur.push(t);
-    else { if (cur.length) groups.push(cur); cur = [t]; }
-  }
-  if (cur.length) groups.push(cur);
-  const drop = new Set<ExTile>();
-  for (const gr of groups) if (gr.length >= 3) gr.forEach((t) => drop.add(t));
-  return tiles.filter((t) => !drop.has(t));
-}
-
-/* сортировка «как на листе»: строки сверху вниз, внутри строки слева направо */
-function sortReadingOrder(tiles: ExTile[]): ExTile[] {
-  const sorted = [...tiles].sort((a, b) => a.y - b.y);
-  const rows: { bottom: number; items: ExTile[] }[] = [];
-  for (const t of sorted) {
-    const r = rows[rows.length - 1];
-    if (r && t.y < r.bottom) { r.items.push(t); r.bottom = Math.max(r.bottom, t.y + t.h); }
-    else rows.push({ bottom: t.y + t.h, items: [t] });
-  }
-  const res: ExTile[] = [];
-  for (const r of rows) { r.items.sort((a, b) => a.x - b.x); res.push(...r.items); }
-  return res;
-}
-
-async function extractTilesFromImage(file: File, p: ExtractParams, infoRef?: { current: ExtractInfo | null }): Promise<{ tiles: TileImg[]; bg: string; hasAlpha: boolean }> {
-  const url0 = URL.createObjectURL(file);
-  try {
-    const img = await new Promise<HTMLImageElement>((res, rej) => {
-      const im = new Image();
-      im.onload = () => res(im);
-      im.onerror = rej;
-      im.src = url0;
-    });
-    const k = Math.min(1, 1400 / Math.max(img.width || 1, img.height || 1));
-    const W = Math.max(1, Math.round(img.width * k));
-    const H = Math.max(1, Math.round(img.height * k));
-    const cv = document.createElement('canvas');
-    cv.width = W; cv.height = H;
-    const cx = cv.getContext('2d', { willReadFrequently: true })!;
-    cx.drawImage(img, 0, 0, W, H);
-    const data = cx.getImageData(0, 0, W, H).data;
-    if (infoRef) infoRef.current = { W, H, data };
-    const N = W * H;
-
-    // 1) прозрачность: если много прозрачных пикселей — фон уже прозрачный
-    let transp = 0;
-    for (let q = 0; q < N; q++) if (data[q * 4 + 3] < 128) transp++;
-    const hasAlpha = transp > N * 0.25;
-
-    // 2) цвет фона: АВТО = самый частый цвет ВСЕЙ картинки (квантование 5 бит/канал —
-    //    шум JPEG не дробит цвет); или выбранный пользователем (пипетка/палитра)
-    let foundBg = '';
-    let br = 0, bgc = 0, bb = 0;
-    if (p.bgMode === 'custom') {
-      const h = p.bg.replace('#', '');
-      br = parseInt(h.slice(0, 2), 16) || 0;
-      bgc = parseInt(h.slice(2, 4), 16) || 0;
-      bb = parseInt(h.slice(4, 6), 16) || 0;
-      foundBg = p.bg;
-    } else {
-      const buckets = new Map<number, { r: number; g: number; b: number; n: number }>();
-      for (let q = 0; q < N; q++) {
-        const i = q * 4;
-        if (data[i + 3] < 128) continue;
-        const key = ((data[i] >> 3) << 10) | ((data[i + 1] >> 3) << 5) | (data[i + 2] >> 3);
-        const b = buckets.get(key);
-        if (b) { b.r += data[i]; b.g += data[i + 1]; b.b += data[i + 2]; b.n++; }
-        else buckets.set(key, { r: data[i], g: data[i + 1], b: data[i + 2], n: 1 });
-      }
-      const list = Array.from(buckets.values());
-      if (!list.length) return { tiles: [], bg: '#000000', hasAlpha };
-      list.sort((a, b) => b.n - a.n);
-      br = Math.round(list[0].r / list[0].n); bgc = Math.round(list[0].g / list[0].n); bb = Math.round(list[0].b / list[0].n);
-      const hex = (v: number) => Math.round(v).toString(16).padStart(2, '0');
-      foundBg = `#${hex(br)}${hex(bgc)}${hex(bb)}`;
-    }
-    const bgK = (br << 16) | (bgc << 8) | bb;
-    const tol = p.thr;
-
-    // 3) маска переднего плана: НЕ прозрачный И НЕ близкий к фону
-    //    (допуск — сумма |ΔR|+|ΔG|+|ΔB|, как в проверенном отдельном экстракторе)
-    const fg = new Uint8Array(N);
-    for (let q = 0; q < N; q++) {
-      const i = q * 4;
-      if (data[i + 3] < 128) continue;
-      if (Math.abs(data[i] - br) + Math.abs(data[i + 1] - bgc) + Math.abs(data[i + 2] - bb) > tol) fg[q] = 1;
-    }
-
-    // 4) пятна ищем по РАЗДУТОЙ маске (склейка частей через щель работает по
-    //    ПИКСЕЛЯМ, а не по рамкам — поэтому близкие в ряд спрайты НЕ сливаются)
-    const { labels, comps } = labelComponents(dilateMask(fg, W, H, p.mergeGap), W, H);
-
-    const min = Math.max(1, p.minSize);
-    const found: ExTile[] = [];
-
-    for (const c of comps) {
-      const w = c.x1 - c.x0, h = c.y1 - c.y0;
-      if (w < min || h < min) continue;
-      const fill = c.count / (w * h);
-      if (fill < 0.1 && Math.max(w, h) > 80) continue; // тонкие рамки/линии
-
-      // цветовая гистограмма пятна → доминирующий цвет (ищем плашки)
-      const compO = new Uint8Array(w * h);
-      const colCnt = new Map<number, number>();
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          const pp = (c.y0 + y) * W + (c.x0 + x);
-          if (labels[pp] !== c.id) continue;
-          if (fg[pp]) compO[y * w + x] = 1;
-          const s = pp * 4;
-          const kk = (data[s] << 16) | (data[s + 1] << 8) | data[s + 2];
-          colCnt.set(kk, (colCnt.get(kk) || 0) + 1);
-        }
-      }
-      let domK = 0, domM = -1;
-      colCnt.forEach((v, kk) => { if (v > domM) { domM = v; domK = kk; } });
-
-      // ПЛАШКА: пятно почти целиком залито одним цветом (≠ фону) — чёрный/белый
-      // квадрат с содержимым. Содержимое вырезаем изнутри: цвет плашки заливаем
-      // от краёв bbox, всё недостижимое И не-фон — содержимое.
-      const localBg = fill > 0.5 && domM / c.count > 0.7 && domK !== bgK ? domK : null;
-
-      if (localBg === null) { found.push({ x: c.x0, y: c.y0, w, h, mask: compO }); continue; }
-
-      const lr = (localBg >> 16) & 255, lg = (localBg >> 8) & 255, lb2 = localBg & 255;
-      const lb = new Uint8Array(w * h), gb = new Uint8Array(w * h);
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          const s = ((c.y0 + y) * W + (c.x0 + x)) * 4;
-          if (Math.abs(data[s] - lr) + Math.abs(data[s + 1] - lg) + Math.abs(data[s + 2] - lb2) <= tol) lb[y * w + x] = 1;
-          if (Math.abs(data[s] - br) + Math.abs(data[s + 1] - bgc) + Math.abs(data[s + 2] - bb) <= tol) gb[y * w + x] = 1;
-        }
-      }
-      const outer = floodBorder(lb, w, h);
-      const content = new Uint8Array(w * h);
-      for (let q = 0; q < content.length; q++) if (!outer[q] && !gb[q]) content[q] = 1;
-
-      const sl = labelComponents(dilateMask(content, w, h, p.mergeGap), w, h);
-      let pushed = 0;
-      for (const sc of sl.comps) {
-        const sw = sc.x1 - sc.x0, sh = sc.y1 - sc.y0;
-        if (sw < min || sh < min) continue;
-        if (sc.count / (sw * sh) < 0.1 && Math.max(sw, sh) > 80) continue;
-        const m = new Uint8Array(sw * sh);
-        for (let y = 0; y < sh; y++) {
-          for (let x = 0; x < sw; x++) {
-            const q = (sc.y0 + y) * w + (sc.x0 + x);
-            if (sl.labels[q] === sc.id && content[q]) m[y * sw + x] = 1;
-          }
-        }
-        found.push({ x: c.x0 + sc.x0, y: c.y0 + sc.y0, w: sw, h: sh, mask: m });
-        pushed++;
-      }
-      // внутри плашки не нашлось содержимого (монолит одного цвета) — берём её целиком
-      if (!pushed) found.push({ x: c.x0, y: c.y0, w, h, mask: compO });
-    }
-    if (!found.length) return { tiles: [], bg: foundBg, hasAlpha };
-
-    // 5) мелкий ч/б текст (подписи на листе) выбрасываем — если не попросили оставить
-    const kept = p.keepText ? found : textFilter(found, data, W);
-
-    // 6) сортировка «как на листе» (строками) + потолок количества
-    const ordered = sortReadingOrder(kept).slice(0, 200);
-    if (!ordered.length) return { tiles: [], bg: foundBg, hasAlpha };
-
-    // 7) вырезаем каждый тайл в PNG с прозрачным фоном; маску обрезаем ТУГО
-    //    (убираем прозрачные поля, оставшиеся от раздувания маски)
-    const out: TileImg[] = [];
-    ordered.forEach((t, ci) => {
-      let bx0 = t.w, by0 = t.h, bx1 = -1, by1 = -1;
-      for (let y = 0; y < t.h; y++) {
-        for (let x = 0; x < t.w; x++) {
-          if (!t.mask[y * t.w + x]) continue;
-          if (x < bx0) bx0 = x;
-          if (y < by0) by0 = y;
-          if (x > bx1) bx1 = x;
-          if (y > by1) by1 = y;
-        }
-      }
-      if (bx1 < 0) return;
-      const w = bx1 - bx0 + 1, h = by1 - by0 + 1;
-      const ox = t.x + bx0, oy = t.y + by0; // тугой bbox в координатах листа
-      const tcv = document.createElement('canvas');
-      tcv.width = w; tcv.height = h;
-      const tcx = tcv.getContext('2d')!;
-      const timg = tcx.createImageData(w, h);
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          if (!t.mask[(by0 + y) * t.w + (bx0 + x)]) continue;
-          const si = ((oy + y) * W + (ox + x)) * 4, di = (y * w + x) * 4;
-          timg.data[di] = data[si];
-          timg.data[di + 1] = data[si + 1];
-          timg.data[di + 2] = data[si + 2];
-          timg.data[di + 3] = 255;
-        }
-      }
-      tcx.putImageData(timg, 0, 0);
-      out.push({
-        id: uid('timg'),
-        name: `${ci + 1}`,
-        dataUrl: tcv.toDataURL('image/png'),
-      });
-    });
-    return { tiles: out, bg: foundBg, hasAlpha };
   } finally {
     URL.revokeObjectURL(url0);
   }
@@ -428,15 +94,16 @@ function migrateMap(m: GameMap, libTiles: { id: string; dataUrl: string; gw: num
 
 /* ---------- инструменты ---------- */
 
-type Tool = 'select' | 'tile' | 'cell' | 'link' | 'hop' | 'erase' | 'pan';
+type Tool = 'select' | 'tile' | 'cell' | 'link' | 'hop' | 'anim' | 'erase' | 'pan';
 
 const TOOLS: { key: Tool; label: string; hint: string }[] = [
-  { key: 'select', label: 'Выбор', hint: 'клик — выбрать тайл/ячейку и тянуть мышью · пустое место — двигать камеру' },
+  { key: 'select', label: 'Выбор', hint: 'клик — выбрать тайл/ячейку/анимацию и тянуть мышью · пустое место — двигать камеру' },
   { key: 'tile', label: 'Тайл', hint: 'клик — поставить выбранный тайл; можно тянуть с зажатой кнопкой' },
   { key: 'cell', label: 'Ячейка', hint: 'клик — новая ячейка В ЛЮБОМ МЕСТЕ (без привязки к сетке), клик по ячейке — выбрать' },
   { key: 'link', label: 'Стрелка', hint: 'клик по ячейке А, затем по Б. У БЕЗНОМЕРНОЙ ячейки стрелка — куда шагает фишка; у ПРОНУМЕРОВАННОЙ — прыжок при остановке. Клик по той же ячейке — убрать' },
   { key: 'hop', label: 'Переход', hint: 'ВТОРАЯ стрелка: клик по ячейке А, затем по Б — когда фишка ОСТАНОВИТСЯ на А, она прыгнет на Б (выход из круга, штраф-телепорт). Клик по той же ячейке — убрать' },
-  { key: 'erase', label: 'Ластик', hint: 'клик или протяни с зажатой кнопкой — убирает ТАЙЛЫ под курсором. Ячейки ластик не трогает: выдели ячейку и нажми Delete' },
+  { key: 'anim', label: 'Анимация', hint: 'выберите анимацию в левой панели, кликните по карте — поставится проигрыватель анимации. Клик по уже стоящей — выбрать и тянуть' },
+  { key: 'erase', label: 'Ластик', hint: 'клик или протяни с зажатой кнопкой — убирает ТАЙЛЫ под курсором. Ячейки и анимации ластик не трогает: выдели и нажми Delete' },
   { key: 'pan', label: 'Рука', hint: 'двигать камеру (колесо — зум под курсором)' },
 ];
 
@@ -460,7 +127,7 @@ const CELL_TYPES: { key: CellType; label: string; cls: string }[] = [
 ];
 
 export default function MapEditor() {
-  const { maps, tiles, tokens, setScreen, refresh, toast } = useApp();
+  const { maps, tiles, tokens, anims, setScreen, refresh, toast } = useApp();
   const [map, setMap] = useState<GameMap | null>(null);
   const [tool, setTool] = useState<Tool>('select');
   const [tileId, setTileId] = useState('');
@@ -474,6 +141,9 @@ export default function MapEditor() {
   const [showGrid, setShowGrid] = useState(true);
   const [snap, setSnap] = useState(false);
   const [tokOpen, setTokOpen] = useState(true); // спойлер «Фишки партии» в левой панели
+  const [animOpen, setAnimOpen] = useState(false); // спойлер «Анимации» в левой панели
+  const [placeAnimId, setPlaceAnimId] = useState(''); // вшитая анимация, выбранная для размещения
+  const [selAnim, setSelAnim] = useState<string | null>(null); // выбранная размещённая анимация
   const [extract, setExtract] = useState<{ file: File; src: string; name: string; busy: boolean; bgMode: 'auto' | 'custom'; bg: string; foundBg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; tiles: TileImg[] } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -482,11 +152,12 @@ export default function MapEditor() {
   const bgRef = useRef<HTMLInputElement>(null);
   const extRef = useRef<HTMLInputElement>(null);
   const ghostRef = useRef<HTMLImageElement | null>(null);
+  const ghostAnimRef = useRef<HTMLImageElement | null>(null); // первый кадр выбранной для размещения анимации (натуральный размер)
   const viewRef = useRef(view); viewRef.current = view;
   const mapRef = useRef(map); mapRef.current = map;
   const dragRef = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
-  const objDragRef = useRef<{ kind: 'cell' | 'stamp'; idx: number; dx: number; dy: number; moved: boolean } | null>(null);
-  const resizeRef = useRef<{ idx: number } | null>(null); // ресайз тайла за уголок
+  const objDragRef = useRef<{ kind: 'cell' | 'stamp' | 'anim'; idx: number; dx: number; dy: number; moved: boolean } | null>(null);
+  const resizeRef = useRef<{ kind: 'stamp' | 'anim'; idx: number } | null>(null); // ресайз тайла/анимации за уголок
   const downRef = useRef<{ x: number; y: number } | null>(null);
   const lastPlaceRef = useRef<{ x: number; y: number } | null>(null);
   const lastCellSize = useRef({ w: CELL, h: CELL }); // размер новых ячеек (запоминается при изменении)
@@ -509,6 +180,15 @@ export default function MapEditor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tileId, map?.tileset]);
 
+  /* первый кадр выбранной для размещения анимации — для натурального размера экземпляра */
+  useEffect(() => {
+    const e = (map?.animLib ?? []).find((x) => x.id === placeAnimId);
+    if (!e || !e.clip.frames.length) { ghostAnimRef.current = null; return; }
+    const img = new Image();
+    img.onload = () => { ghostAnimRef.current = img; };
+    img.src = e.clip.frames[0];
+  }, [placeAnimId, map?.animLib]);
+
   /* ---------- точка в мировых координатах ---------- */
   const toWorld = (e: { clientX: number; clientY: number }) => {
     const cv = canvasRef.current!;
@@ -528,7 +208,8 @@ export default function MapEditor() {
   const updMap = (patch: Partial<GameMap>) => setMap((m) => (m ? { ...m, ...patch } : m));
 
   /* ---------- фишки партии: отмечаем до 6 фишек из библиотеки — они вшиваются в карту
-     и уезжают всем игрокам; после жеребьёвки каждый выберет себе одну (одинаковые нельзя) ---------- */
+     и уезжают всем игрокам; после жеребьёвки каждый выберет себе одну (одинаковые нельзя).
+     АНИМИРОВАННЫЕ фишки вшиваются вместе со своими клипами ---------- */
   const toggleMapToken = (t: TokenDef) => {
     if (!map) return;
     const cur = map.mapTokens ?? [];
@@ -537,10 +218,43 @@ export default function MapEditor() {
       sfx.click();
     } else {
       if (cur.length >= 6) { toast('Максимум 6 фишек на карту — снимите галочку с другой', 'err'); sfx.fail(); return; }
-      updMap({ mapTokens: [...cur, { id: t.id, name: t.name, dataUrl: t.dataUrl, createdAt: t.createdAt }] });
+      updMap({ mapTokens: [...cur, { id: t.id, name: t.name, dataUrl: t.dataUrl, createdAt: t.createdAt, ...(t.anim ? { anim: JSON.parse(JSON.stringify(t.anim)) } : {}) }] });
       sfx.coin();
     }
     dirtyRef.current = true;
+  };
+
+  /* ---------- анимации карты: вшиваем анимацию из библиотеки автора (уедет всем игрокам),
+     после — размещаем экземпляры на поле инструментом «Анимация» ---------- */
+  const toggleMapAnim = (a: AnimDef) => {
+    if (!map) return;
+    const lib = map.animLib ?? [];
+    if (lib.some((x) => x.id === a.id)) {
+      // убираем из карты вместе с экземплярами
+      updMap({ animLib: lib.filter((x) => x.id !== a.id), anims: (map.anims ?? []).filter((pa) => pa.aid !== a.id) });
+      if (placeAnimId === a.id) setPlaceAnimId('');
+      sfx.click();
+    } else {
+      updMap({ animLib: [...lib, { id: a.id, name: a.name, clip: JSON.parse(JSON.stringify(a.clip)) }] });
+      setPlaceAnimId(a.id);
+      setTool('anim');
+      sfx.coin();
+      toast('Анимация вшита в карту — кликните по полю, чтобы разместить', 'ok');
+    }
+    dirtyRef.current = true;
+  };
+  const updAnim = (idx: number, patch: Partial<PlacedAnim>) =>
+    setMap((m) => {
+      if (!m || !m.anims || !m.anims[idx]) return m;
+      const arr = m.anims.slice();
+      arr[idx] = { ...arr[idx], ...patch };
+      return { ...m, anims: arr };
+    });
+  const removeAnim = (aid: string) => {
+    setMap((mm) => (mm ? { ...mm, anims: (mm.anims ?? []).filter((a) => a.id !== aid) } : mm));
+    setSelAnim(null);
+    dirtyRef.current = true;
+    sfx.fail();
   };
   const updCell = (idx: number, patch: Partial<CellDef>) =>
     setMap((m) => {
@@ -584,6 +298,8 @@ export default function MapEditor() {
     setMap(copy);
     setSelCell(null);
     setSelStamp(null);
+    setSelAnim(null);
+    setPlaceAnimId('');
     setLinkFrom(null);
     setTool('select');
     requestAnimationFrame(() => {
@@ -873,19 +589,35 @@ export default function MapEditor() {
     if (!m) return;
     downRef.current = { x: e.clientX, y: e.clientY };
     const w = toWorld(e);
-    // ресайз тайла за жёлтый уголок — работает в «Выборе» и «Тайле»
-    if ((tool === 'select' || tool === 'tile') && selStamp) {
-      const si = (m.stamps ?? []).findIndex((s) => s.id === selStamp);
-      if (si >= 0) {
-        const s = m.stamps![si];
-        const rot = s.rot % 2 === 1;
-        const vw = rot ? s.h : s.w, vh = rot ? s.w : s.h;
-        const grab = 11 / viewRef.current.zoom;
-        const cs: [number, number][] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
-        for (const [ox, oy] of cs) {
-          if (Math.abs(w.x - (s.x + (ox * vw) / 2)) <= grab && Math.abs(w.y - (s.y + (oy * vh) / 2)) <= grab) {
-            resizeRef.current = { idx: si };
-            return;
+    // ресайз тайла/анимации за жёлтый уголок — работает в «Выборе», «Тайле» и «Анимации»
+    if ((tool === 'select' || tool === 'tile' || tool === 'anim') && (selStamp || selAnim)) {
+      if (selStamp) {
+        const si = (m.stamps ?? []).findIndex((s) => s.id === selStamp);
+        if (si >= 0) {
+          const s = m.stamps![si];
+          const rot = s.rot % 2 === 1;
+          const vw = rot ? s.h : s.w, vh = rot ? s.w : s.h;
+          const grab = 11 / viewRef.current.zoom;
+          const cs: [number, number][] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+          for (const [ox, oy] of cs) {
+            if (Math.abs(w.x - (s.x + (ox * vw) / 2)) <= grab && Math.abs(w.y - (s.y + (oy * vh) / 2)) <= grab) {
+              resizeRef.current = { kind: 'stamp', idx: si };
+              return;
+            }
+          }
+        }
+      }
+      if (selAnim) {
+        const ai = (m.anims ?? []).findIndex((a) => a.id === selAnim);
+        if (ai >= 0) {
+          const a = m.anims![ai];
+          const grab = 11 / viewRef.current.zoom;
+          const cs: [number, number][] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+          for (const [ox, oy] of cs) {
+            if (Math.abs(w.x - (a.x + (ox * a.w) / 2)) <= grab && Math.abs(w.y - (a.y + (oy * a.h) / 2)) <= grab) {
+              resizeRef.current = { kind: 'anim', idx: ai };
+              return;
+            }
           }
         }
       }
@@ -896,6 +628,16 @@ export default function MapEditor() {
       return;
     }
     if (tool === 'select') {
+      const ai = animAtPoint(m, w.x, w.y);
+      if (ai >= 0) {
+        const pa = (m.anims ?? [])[ai];
+        objDragRef.current = { kind: 'anim', idx: ai, dx: w.x - pa.x, dy: w.y - pa.y, moved: false };
+        setSelAnim(pa.id);
+        setSelCell(null);
+        setSelStamp(null);
+        sfx.hover();
+        return;
+      }
       const ci = cellAtPoint(m, w.x, w.y);
       if (ci >= 0) {
         const c = cellCenter(m, ci);
@@ -916,6 +658,7 @@ export default function MapEditor() {
       }
       setSelCell(null);
       setSelStamp(null);
+      setSelAnim(null);
       dragRef.current = { sx: e.clientX, sy: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
       return;
     }
@@ -965,6 +708,36 @@ export default function MapEditor() {
       }
       return;
     }
+    if (tool === 'anim') {
+      // клик по уже стоящей анимации — выбрать и тянуть; иначе ставим выбранную в панели
+      const ai = animAtPoint(m, w.x, w.y);
+      if (ai >= 0) {
+        const pa = (m.anims ?? [])[ai];
+        objDragRef.current = { kind: 'anim', idx: ai, dx: w.x - pa.x, dy: w.y - pa.y, moved: false };
+        setSelAnim(pa.id);
+        setSelCell(null);
+        setSelStamp(null);
+        sfx.hover();
+        return;
+      }
+      if (placeAnimId && (m.animLib ?? []).some((x) => x.id === placeAnimId)) {
+        const img = ghostAnimRef.current;
+        const natW = img?.width || 64, natH = img?.height || 64;
+        const maxSide = Math.max(natW, natH);
+        const k = maxSide < 64 ? 64 / maxSide : maxSide > 128 ? 128 / maxSide : 1;
+        const p = snapPt(w.x, w.y);
+        const pa: PlacedAnim = { id: uid('anim'), aid: placeAnimId, x: Math.round(p.x), y: Math.round(p.y), w: Math.round(natW * k), h: Math.round(natH * k) };
+        setMap((mm) => (mm ? { ...mm, anims: [...(mm.anims ?? []), pa] } : mm));
+        setSelAnim(pa.id);
+        setSelCell(null);
+        setSelStamp(null);
+        dirtyRef.current = true;
+        sfx.step();
+      } else {
+        toast('Сначала выберите анимацию в левой панели (спойлер «Анимации»)', 'info');
+      }
+      return;
+    }
     if (tool === 'erase') {
       const si = stampAtPoint(m, w.x, w.y);
       if (si >= 0) {
@@ -999,15 +772,25 @@ export default function MapEditor() {
     }
     if (resizeRef.current) {
       // тянем уголок: новый размер = 2 × расстояние от центра (центр на месте)
-      const s = (m.stamps ?? [])[resizeRef.current.idx];
-      if (s) {
-        const rot = s.rot % 2 === 1;
-        let vw = Math.max(8, Math.abs(w.x - s.x) * 2);
-        let vh = Math.max(8, Math.abs(w.y - s.y) * 2);
-        vw = Math.round(vw / 2) * 2;
-        vh = Math.round(vh / 2) * 2;
-        updStamp(resizeRef.current.idx, rot ? { w: vh, h: vw } : { w: vw, h: vh });
-        dirtyRef.current = true;
+      if (resizeRef.current.kind === 'stamp') {
+        const s = (m.stamps ?? [])[resizeRef.current.idx];
+        if (s) {
+          const rot = s.rot % 2 === 1;
+          let vw = Math.max(8, Math.abs(w.x - s.x) * 2);
+          let vh = Math.max(8, Math.abs(w.y - s.y) * 2);
+          vw = Math.round(vw / 2) * 2;
+          vh = Math.round(vh / 2) * 2;
+          updStamp(resizeRef.current.idx, rot ? { w: vh, h: vw } : { w: vw, h: vh });
+          dirtyRef.current = true;
+        }
+      } else {
+        const a = (m.anims ?? [])[resizeRef.current.idx];
+        if (a) {
+          let vw = Math.max(12, Math.abs(w.x - a.x) * 2);
+          let vh = Math.max(12, Math.abs(w.y - a.y) * 2);
+          updAnim(resizeRef.current.idx, { w: Math.round(vw / 2) * 2, h: Math.round(vh / 2) * 2 });
+          dirtyRef.current = true;
+        }
       }
       return;
     }
@@ -1017,6 +800,7 @@ export default function MapEditor() {
       od.moved = true;
       dirtyRef.current = true;
       if (od.kind === 'cell') updCell(od.idx, { cx: Math.round(p.x), cy: Math.round(p.y) });
+      else if (od.kind === 'anim') updAnim(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
       else updStamp(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
       return;
     }
@@ -1061,7 +845,7 @@ export default function MapEditor() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') return;
-      if (e.key === 'Escape') { setLinkFrom(null); setSelCell(null); setSelStamp(null); return; }
+      if (e.key === 'Escape') { setLinkFrom(null); setSelCell(null); setSelStamp(null); setSelAnim(null); setPlaceAnimId(''); return; }
       if (!map) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selStamp && selStampIdx >= 0) {
@@ -1069,6 +853,8 @@ export default function MapEditor() {
           setSelStamp(null);
           dirtyRef.current = true;
           sfx.fail();
+        } else if (selAnim) {
+          removeAnim(selAnim);
         } else if (selCell !== null) {
           deleteCell(selCell);
         }
@@ -1083,7 +869,7 @@ export default function MapEditor() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [map, selCell, selStamp, selStampIdx]);
+  }, [map, selCell, selStamp, selStampIdx, selAnim]);
 
   /* ---------- цикл отрисовки ---------- */
   useEffect(() => {
@@ -1146,6 +932,26 @@ export default function MapEditor() {
             ctx.strokeRect(hx - hs, hy - hs, hs * 2, hs * 2);
           }
         }
+        // выделенная анимация: рамка + жёлтые угловые ручки (ресайз) — как у тайла
+        const aIdx = (m.anims ?? []).findIndex((a) => a.id === selAnim);
+        if (aIdx >= 0) {
+          const a = m.anims![aIdx];
+          const hs = 6.5 / v.zoom;
+          ctx.strokeStyle = '#ffcf3f';
+          ctx.lineWidth = 2.5 / v.zoom;
+          ctx.setLineDash([6 / v.zoom, 4 / v.zoom]);
+          ctx.strokeRect(a.x - a.w / 2 - 3, a.y - a.h / 2 - 3, a.w + 6, a.h + 6);
+          ctx.setLineDash([]);
+          for (const [ox, oy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as [number, number][]) {
+            const hx = a.x + (ox * (a.w + 6)) / 2;
+            const hy = a.y + (oy * (a.h + 6)) / 2;
+            ctx.fillStyle = '#ffcf3f';
+            ctx.fillRect(hx - hs, hy - hs, hs * 2, hs * 2);
+            ctx.strokeStyle = 'rgba(7,9,18,0.9)';
+            ctx.lineWidth = 1.5 / v.zoom;
+            ctx.strokeRect(hx - hs, hy - hs, hs * 2, hs * 2);
+          }
+        }
         // выделенная ячейка
         if (selCell !== null && m.cells[selCell]) {
           const b = cellBox(m, selCell);
@@ -1179,6 +985,13 @@ export default function MapEditor() {
           ctx.drawImage(gi, hoverW.x - gi.width / 2, hoverW.y - gi.height / 2, gi.width, gi.height);
           ctx.globalAlpha = 1;
         }
+        // призрак анимации под курсором (первый кадр)
+        if (hoverW && toolRef.current === 'anim' && ghostAnimRef.current && !animAtPoint(m, hoverW.x, hoverW.y)) {
+          const gi = ghostAnimRef.current;
+          ctx.globalAlpha = 0.5;
+          ctx.drawImage(gi, hoverW.x - gi.width / 2, hoverW.y - gi.height / 2, gi.width, gi.height);
+          ctx.globalAlpha = 1;
+        }
         // курсор-ластик: крестик под мышью
         if (hoverW && toolRef.current === 'erase') {
           const r = 14 / v.zoom;
@@ -1196,7 +1009,7 @@ export default function MapEditor() {
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [legacyTileById, showGrid, selCell, selStamp, selStampIdx, linkFrom, hoverW, tileId]);
+  }, [legacyTileById, showGrid, selCell, selStamp, selStampIdx, selAnim, linkFrom, hoverW, tileId]);
 
   /* ─── панели ─── */
   const saveMap = async () => {
@@ -1253,6 +1066,9 @@ export default function MapEditor() {
   const selCellDef = map && selCell !== null && selCell < map.cells.length ? map.cells[selCell] : null;
   const selStampDef = map && selStampIdx >= 0 ? map.stamps![selStampIdx] : null;
   const selTileDef = tileImgById.get(selStampDef?.tid ?? '');
+  const selAnimIdx = map ? (map.anims ?? []).findIndex((a) => a.id === selAnim) : -1;
+  const selAnimDef = map && selAnimIdx >= 0 ? map.anims![selAnimIdx] : null;
+  const selAnimLib = map && selAnimDef ? (map.animLib ?? []).find((x) => x.id === selAnimDef.aid) : null;
   const startsCount = map?.cells.filter((c) => c.type === 'start').length ?? 0;
   const taskCells = map?.cells.filter((c) => c.type === 'task').length ?? 0;
   const noTask = map?.cells.filter((c) => c.type === 'task' && !c.task).length ?? 0;
@@ -1439,18 +1255,89 @@ export default function MapEditor() {
                         })}
                       </div>
                     ) : (
-                      <p className="text-[10px] text-faint leading-tight">Фишек пока нет — нарисуйте или загрузите их в «Редакторе фишек» (главное меню), затем вернитесь сюда.</p>
+                      <p className="text-[10px] text-faint leading-tight">Фишек пока нет — нарисуйте или загрузите их в «Редакторе анимаций и фишек» (главное меню), затем вернитесь сюда.</p>
                     )}
                     <p className="text-[10px] text-faint mt-1.5 leading-tight">Отмеченные фишки вшиваются в карту и уезжают всем игрокам. После жеребьёвки каждый игрок выберет себе одну — одинаковые брать нельзя. Максимум 6.</p>
+                  </div>
+                )}
+              </div>
+              <div>
+                <div className="tick-label mb-2">Ход фишек</div>
+                <div className="flex gap-1.5">
+                  <button
+                    onClick={() => { updMap({ smoothMove: false }); sfx.hover(); }}
+                    className={`flex-1 py-1.5 border-2 cursor-pointer font-display text-[9px] uppercase ${!map.smoothMove ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}
+                    title="Фишка перепрыгивает с клетки на клетку с подскоком — как в классических настолках. Для обычных фишек и «прыгающих» анимаций"
+                  >Прыжками</button>
+                  <button
+                    onClick={() => { updMap({ smoothMove: true }); sfx.hover(); }}
+                    className={`flex-1 py-1.5 border-2 cursor-pointer font-display text-[9px] uppercase ${map.smoothMove ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}
+                    title="Фишка скользит между клетками без прыжков — для анимированных фишек с походкой"
+                  >Плавно</button>
+                </div>
+                <p className="text-[10px] text-faint mt-1 leading-tight">Как двигаются фишки на этой карте: прыжками по клеткам (по умолчанию) или плавно, без прыжков — для фишек с анимацией ходьбы.</p>
+              </div>
+
+              <div>
+                <button
+                  onClick={() => setAnimOpen((v) => !v)}
+                  className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
+                  title={animOpen ? 'Свернуть' : 'Развернуть'}
+                >
+                  <span className={`text-[10px] shrink-0 ${animOpen ? 'text-gold' : 'text-faint'}`}>{animOpen ? '▾' : '▸'}</span>
+                  <span className="tick-label">Анимации · вшито {(map.animLib ?? []).length}</span>
+                </button>
+                {animOpen && (
+                  <div>
+                    {anims.length > 0 ? (
+                      <div className="space-y-1 mb-2">
+                        {anims.map((a) => {
+                          const on = (map.animLib ?? []).some((x) => x.id === a.id);
+                          return (
+                            <div key={a.id} className={`flex items-center gap-1.5 border-2 px-1.5 py-1 ${on ? 'border-gold bg-[rgba(255,207,63,0.08)]' : 'border-edge'}`}>
+                              <div className="w-8 h-8 shrink-0 flex items-center justify-center" style={{ background: 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 8px 8px' }}>
+                                <AnimPreview frames={a.clip.frames} fps={a.clip.fps} size={28} />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="font-display text-[10px] uppercase text-paper truncate">{a.name}</div>
+                                <div className="tick-label text-faint">{a.clip.frames.length} кадр. · {a.clip.fps} кадр/с</div>
+                              </div>
+                              <button
+                                onClick={() => toggleMapAnim(a)}
+                                title={on ? 'Убрать из карты (вместе с экземплярами на поле)' : 'Вшить в карту и размещать на поле'}
+                                className={`shrink-0 w-6 h-6 border-2 font-pixel text-[10px] cursor-pointer ${on ? 'border-gold text-gold' : 'border-edge text-dim hover:text-paper'}`}
+                              >{on ? '✓' : '+'}</button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="text-[10px] text-faint leading-tight mb-1.5">Анимаций пока нет — создайте их в «Редакторе анимаций и фишек» (главное меню → Все редакторы), затем вернитесь сюда.</p>
+                    )}
+                    {(map.animLib ?? []).length > 0 && (
+                      <div>
+                        <div className="tick-label mb-1">Разместить (выбери, затем инструмент «Анимация»):</div>
+                        <div className="flex flex-wrap gap-1">
+                          {(map.animLib ?? []).map((e) => (
+                            <button
+                              key={e.id}
+                              onClick={() => { setPlaceAnimId(e.id); setTool('anim'); setSelAnim(null); sfx.hover(); }}
+                              title={`Размещать «${e.name}» на карте`}
+                              className={`px-1.5 py-1 border-2 font-display text-[8px] uppercase cursor-pointer ${placeAnimId === e.id ? 'border-gold text-gold' : 'border-edge text-dim hover:text-paper'}`}
+                            >{e.name.slice(0, 10)}</button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <p className="text-[10px] text-faint mt-1.5 leading-tight">Вшитые анимации уезжают всем игрокам вместе с картой. Экземпляры можно двигать мышью, менять размер за жёлтый угол и слоями.</p>
                   </div>
                 )}
               </div>
             </>
           )}
         </div>
-
-        {/* центр: холст или заглушка */}
         <div className="flex-1 min-w-0 relative">
+          {/* центр: холст или заглушка */}
           {!map ? (
             <div className="h-full flex flex-col items-center justify-center gap-4 text-center p-6">
               <span className="text-teal floaty">{Ic.map(56)}</span>
@@ -1623,7 +1510,7 @@ export default function MapEditor() {
                             />
                           ))}
                         </div>
-                        <div className="flex gap-1.5">
+                    <div className="flex gap-1.5">
                           <GhostBtn small className="flex-1" onClick={() => { updCell(selCell, { nextStyle: { ...selCellDef.nextStyle, dash: !selCellDef.nextStyle?.dash } }); dirtyRef.current = true; sfx.hover(); }}>
                             {selCellDef.nextStyle?.dash ? '✓ Пунктир' : 'Пунктир'}
                           </GhostBtn>
@@ -1631,7 +1518,15 @@ export default function MapEditor() {
                             {selCellDef.nextStyle?.head === false ? 'Без острия' : '✓ Наконечник'}
                           </GhostBtn>
                         </div>
-                        <p className="text-[9.5px] text-faint leading-tight">Стрелка по умолчанию ЖИРНАЯ (6px) с остриём — сразу видно, куда пойдёт фишка.</p>
+                        <GhostBtn
+                          small
+                          className="w-full"
+                          title="ВКЛ — стрелка заходит на клетку: конец утоплен в ячейку, остриё рисуется поверх клеток. ВЫКЛ — стрелка целиком останавливается у границы ячейки, не налезая на неё"
+                          onClick={() => { updCell(selCell, { nextStyle: { ...selCellDef.nextStyle, over: !(selCellDef.nextStyle?.over ?? true) } }); dirtyRef.current = true; sfx.hover(); }}
+                        >
+                          {(selCellDef.nextStyle?.over ?? true) ? '✓ Заходит на клетку' : 'У края клетки'}
+                        </GhostBtn>
+                        <p className="text-[9.5px] text-faint leading-tight">Стрелка по умолчанию ЖИРНАЯ (8px) с остриём — сразу видно, куда пойдёт фишка.</p>
                       </div>
                     )}
                   </div>
@@ -1679,7 +1574,15 @@ export default function MapEditor() {
                             {selCellDef.hopStyle?.head === false ? 'Без острия' : '✓ Наконечник'}
                           </GhostBtn>
                         </div>
-                        <p className="text-[9.5px] text-faint leading-tight">ПЕРЕХОД по умолчанию ЖИРНЫЙ (6px) с остриём — видно, куда прыгнет фишка.</p>
+                        <GhostBtn
+                          small
+                          className="w-full"
+                          title="ВКЛ — стрелка заходит на клетку: конец утоплен в ячейку, остриё рисуется поверх клеток. ВЫКЛ — стрелка целиком останавливается у границы ячейки, не налезая на неё"
+                          onClick={() => { updCell(selCell, { hopStyle: { ...selCellDef.hopStyle, over: !(selCellDef.hopStyle?.over ?? true) } }); dirtyRef.current = true; sfx.hover(); }}
+                        >
+                          {(selCellDef.hopStyle?.over ?? true) ? '✓ Заходит на клетку' : 'У края клетки'}
+                        </GhostBtn>
+                        <p className="text-[9.5px] text-faint leading-tight">ПЕРЕХОД по умолчанию ЖИРНЫЙ (8px) с остриём — видно, куда прыгнет фишка.</p>
                       </div>
                     )}
                     <p className="text-[10px] text-faint mt-1 leading-tight">ПЕРЕХОД (коралловая стрелка) срабатывает, только когда фишка ОСТАНОВИЛАСЬ на ячейке: выход из круга, штраф-телепорт. Проходом мимо — не срабатывает.</p>
@@ -1776,6 +1679,65 @@ export default function MapEditor() {
                     className="w-full py-1.5 border-2 border-coral/60 text-coral font-display text-[10px] uppercase hover:bg-coral/10 transition-colors cursor-pointer"
                   >
                     Удалить тайл
+                  </button>
+                </div>
+              )}
+
+              {/* панель размещённой анимации */}
+              {selAnimDef && !selCellDef && !selStampDef && (
+                <div className="absolute top-14 right-3 w-[264px] pixel-panel pixel-corners p-3.5 space-y-3 pop-in shadow-[0_14px_40px_rgba(0,0,0,0.6)]">
+                  <div className="flex items-center justify-between">
+                    <span className="font-display uppercase text-[12px] text-gold truncate">Анимация · {selAnimLib?.name ?? '?'}</span>
+                    <button onClick={() => { setSelAnim(null); sfx.hover(); }} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <div className="w-14 h-14 shrink-0 flex items-center justify-center border-2 border-edge" style={{ background: 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 10px 10px' }}>
+                      <AnimPreview frames={selAnimLib?.clip.frames ?? []} fps={selAnimLib?.clip.fps} size={48} />
+                    </div>
+                    <div className="text-[10px] text-dim">
+                      {selAnimLib?.clip.frames.length ?? 0} кадр. · {selAnimLib?.clip.fps ?? 0} кадр/с
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between"><span className="text-[10px] text-dim">Ширина</span><Stepper value={Math.round(selAnimDef.w)} onChange={(v) => { updAnim(selAnimIdx, { w: v }); dirtyRef.current = true; }} min={12} max={2048} step={8} /></div>
+                    <div className="flex items-center justify-between"><span className="text-[10px] text-dim">Высота</span><Stepper value={Math.round(selAnimDef.h)} onChange={(v) => { updAnim(selAnimIdx, { h: v }); dirtyRef.current = true; }} min={12} max={2048} step={8} /></div>
+                  </div>
+                  <p className="text-[10px] text-gold leading-tight">Тяните жёлтый УГОЛОК рамки на карте — меняете размер мышью. Центр не двигается.</p>
+
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <GhostBtn small onClick={() => {
+                      const copy: PlacedAnim = { ...selAnimDef, id: uid('anim'), x: selAnimDef.x + 16, y: selAnimDef.y + 16 };
+                      setMap((mm) => (mm ? { ...mm, anims: [...(mm.anims ?? []), copy] } : mm));
+                      setSelAnim(copy.id);
+                      dirtyRef.current = true;
+                      sfx.hover();
+                    }}>Дублировать</GhostBtn>
+                    <GhostBtn small onClick={() => {
+                      const arr = map!.anims!;
+                      if (selAnimIdx >= arr.length - 1) return;
+                      const a2 = arr.slice();
+                      [a2[selAnimIdx], a2[selAnimIdx + 1]] = [a2[selAnimIdx + 1], a2[selAnimIdx]];
+                      updMap({ anims: a2 });
+                      dirtyRef.current = true;
+                    }} title="Выше по слоям (перекрывает соседей)">Слой +</GhostBtn>
+                    <GhostBtn small onClick={() => {
+                      const arr = map!.anims!;
+                      if (selAnimIdx <= 0) return;
+                      const a2 = arr.slice();
+                      [a2[selAnimIdx], a2[selAnimIdx - 1]] = [a2[selAnimIdx - 1], a2[selAnimIdx]];
+                      updMap({ anims: a2 });
+                      dirtyRef.current = true;
+                    }} title="Ниже по слоям (под соседями)">Слой −</GhostBtn>
+                    <GhostBtn small onClick={() => { setPlaceAnimId(selAnimDef.aid); sfx.hover(); toast('Кликайте по полю — поставите ещё экземпляры этой анимации', 'info'); }}>Ставить ещё</GhostBtn>
+                  </div>
+
+                  <button
+                    onClick={() => removeAnim(selAnimDef.id)}
+                    className="w-full py-1.5 border-2 border-coral/60 text-coral font-display text-[10px] uppercase hover:bg-coral/10 transition-colors cursor-pointer"
+                  >
+                    Удалить анимацию
                   </button>
                 </div>
               )}

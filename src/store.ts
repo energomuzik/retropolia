@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { GameMap, GameOptions, GameSession, RomDef, SaveDef, SessionSnapshot, TileDef, TokenDef } from './types';
+import type { AnimDef, GameMap, GameOptions, GameSession, RomDef, SaveDef, SessionSnapshot, TileDef, TileGroup, TileImg, TokenDef } from './types';
 import type { NetInfo, Room } from './net';
 import { idbAll, idbGet, idbPut } from './db';
 import { builtinTiles } from './assets';
@@ -24,6 +24,9 @@ interface AppState {
   roms: RomDef[];
   saves: SaveDef[];
   tokens: TokenDef[];
+  anims: AnimDef[]; // свободные анимации автора (для карт)
+  animTiles: TileImg[]; // библиотека тайлов редактора анимаций (глобальная)
+  animGroups: TileGroup[]; // папки/нарезки в панели редактора анимаций
   refresh: () => Promise<void>;
 
   toasts: Toast[];
@@ -88,13 +91,19 @@ export const useApp = create<AppState>()((set, get) => ({
   roms: [],
   saves: [],
   tokens: [],
+  anims: [],
+  animTiles: [],
+  animGroups: [],
   refresh: async () => {
-    const [tiles, maps, roms, saves, tokens] = await Promise.all([
+    const [tiles, maps, roms, saves, tokens, anims, animTiles, animGroups] = await Promise.all([
       idbAll<TileDef>('tiles'),
       idbAll<GameMap>('maps'),
       idbAll<RomDef>('roms'),
       idbAll<SaveDef>('saves'),
       idbAll<TokenDef>('tokens'),
+      idbAll<AnimDef>('anims'),
+      idbAll<TileImg>('animTiles'),
+      idbAll<TileGroup>('animGroups'),
     ]);
     let tileList = tiles.map((e) => e.value);
     if (tileList.length === 0) {
@@ -109,6 +118,9 @@ export const useApp = create<AppState>()((set, get) => ({
       roms: roms.map((e) => e.value).sort((a, b) => a.name.localeCompare(b.name)),
       saves: saves.map((e) => e.value).sort((a, b) => a.slot - b.slot),
       tokens: tokens.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
+      anims: anims.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
+      animTiles: animTiles.map((e) => e.value),
+      animGroups: animGroups.map((e) => e.value),
     });
   },
 

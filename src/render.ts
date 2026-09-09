@@ -1,4 +1,4 @@
-import type { CellDef, GameMap, TileDef, TileImg } from './types';
+import type { AnimClip, CellDef, GameMap, TileDef, TileImg, TokenAnim, TokenDir } from './types';
 import { getImage } from './assets';
 
 export const CELL = 64;
@@ -37,6 +37,33 @@ export function cellAtPoint(map: GameMap, wx: number, wy: number): number {
     if (wx >= b.x && wx < b.x + b.w && wy >= b.y && wy < b.y + b.h) return i;
   }
   return -1;
+}
+
+/* РАЗМЕЩЁННАЯ АНИМАЦИЯ под точкой: верхняя — та, что позже в массиве */
+export function animAtPoint(map: GameMap, wx: number, wy: number): number {
+  const an = map.anims ?? [];
+  for (let i = an.length - 1; i >= 0; i--) {
+    const a = an[i];
+    if (wx >= a.x - a.w / 2 && wx < a.x + a.w / 2 && wy >= a.y - a.h / 2 && wy < a.y + a.h / 2) return i;
+  }
+  return -1;
+}
+
+/* Текущий кадр клипа по времени (мс): кадр = floor(секунды × fps) по кругу */
+export function clipFrameIdx(clip: AnimClip, timeMs: number): number {
+  const n = clip.frames.length;
+  if (!n) return 0;
+  const fps = Math.max(1, Math.min(24, clip.fps || 6));
+  return Math.floor((timeMs / 1000) * fps) % n;
+}
+
+/* Выбор клипа анимированной фишки: при движении — клип направления (нет — idle), на месте — idle */
+export function clipForToken(anim: TokenAnim, dir: TokenDir | undefined): AnimClip {
+  if (dir) {
+    const c = anim[dir];
+    if (c && c.frames.length) return c;
+  }
+  return anim.idle;
 }
 
 /* ШТАМП под точкой: верхний — тот, что позже в массиве (рисуется последним) */
@@ -193,7 +220,10 @@ export interface TokenDraw {
   active: boolean;
   alive: boolean;
   label: string;
-  img?: string | null; // dataUrl кастомной фишки (PNG с прозрачностью)
+  img?: string | null; // dataUrl кастомной фишки (PNG с прозрачностью); у анимированной — превью-кадр idle
+  anim?: TokenAnim;    // анимированная фишка: играет кадры клипа по направлению/idle
+  dir?: TokenDir;      // текущее направление движения (нет — стоит на месте → idle)
+  phase?: number;      // сдвиг фазы проигрывания (чтобы фишки не мигали синхронно)
 }
 
 export interface BoardDrawOpts {
@@ -315,6 +345,20 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     ctx.restore();
   }
 
+  // РАЗМЕЩЁННЫЕ АНИМАЦИИ: поверх тайлов, под ячейками; кадр выбирается по времени
+  const alib = new Map((map.animLib ?? []).map((a) => [a.id, a]));
+  for (const pa of map.anims ?? []) {
+    const entry = alib.get(pa.aid);
+    if (!entry || !entry.clip.frames.length) continue;
+    const img = getImage(entry.clip.frames[clipFrameIdx(entry.clip, o.time)]);
+    if (!img) continue;
+    ctx.save();
+    ctx.translate(pa.x, pa.y);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(img, -pa.w / 2, -pa.h / 2, pa.w, pa.h);
+    ctx.restore();
+  }
+
   // сетка — только на картах без фона (поверх картинки она мешает)
   if (!map.bg) {
     ctx.strokeStyle = 'rgba(49,60,114,0.28)';
@@ -344,9 +388,10 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const HOP = '#ff6b6b', HOP_H = '#ff9b9b';
     /* стрелка: линия + большое остриё на конце. w — толщина (по умолчанию 8 — ЖИРНАЯ,
       до 24), wantHead — остриё (по умолчанию вкл): сразу видно, куда переместится фишка.
-      headOnTop — остриё рисуется ПОВЕРХ ячеек отдельным проходом: раньше остриё пряталось
-      под крупной клеткой, теперь видно всегда */
-    const seg = (ai: number, bi: number, col: string, head: string, dashed: boolean, label?: string, w = 8, wantHead = true, headOnTop = false) => {
+      headOnTop — остриё рисуется ПОВЕРХ ячеек отдельным проходом; over — «заходит на
+      ячейку» (по умолчанию: конец утоплен в клетку, остриё поверх ячеек) либо «у края» —
+      вся стрелка (линия и остриё) останавливается У ГРАНИЦЫ ячейки, не налезая на неё */
+    const seg = (ai: number, bi: number, col: string, head: string, dashed: boolean, label?: string, w = 8, wantHead = true, headOnTop = false, over = true) => {
       const a = cellCenter(map, ai);
       const c = cellCenter(map, bi);
       const dx = c.x - a.x, dy = c.y - a.y;
@@ -355,8 +400,15 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       const ux = dx / len, uy = dy / len;
       const ba = cellBox(map, ai);
       const bb = cellBox(map, bi);
-      const padA = Math.min(ba.w, ba.h) * 0.32 + 6;
-      const padB = Math.min(bb.w, bb.h) * 0.32 + 6;
+      /* дистанция от ЦЕНТРА ячейки до её границы вдоль направления u (для «у края») */
+      const borderT = (box: { w: number; h: number }) => {
+        const tx = Math.abs(ux) > 1e-6 ? box.w / 2 / Math.abs(ux) : Infinity;
+        const ty = Math.abs(uy) > 1e-6 ? box.h / 2 / Math.abs(uy) : Infinity;
+        return Math.min(tx, ty);
+      };
+      const GAP = 3; // зазор между остриём и клеткой в режиме «у края»
+      const padA = over ? Math.min(ba.w, ba.h) * 0.32 + 6 : borderT(ba) + GAP;
+      const padB = over ? Math.min(bb.w, bb.h) * 0.32 + 6 : borderT(bb) + GAP;
       const sx = a.x + ux * padA, sy = a.y + uy * padA;
       const ex = c.x - ux * padB, ey = c.y - uy * padB;
       ctx.strokeStyle = col;
@@ -400,13 +452,13 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         const st = legacyTag ? TAG_STYLES[legacyTag] : null;
         const nst = ci.nextStyle;
         const col = nst?.col ?? (st ? st.c : GOLD);
-        seg(i, nxt, col, nst?.col ?? (st ? st.h : GOLD_H), nst?.dash ?? false, st ? st.label : undefined, nst?.w ?? 8, nst?.head ?? true, true);
+        seg(i, nxt, col, nst?.col ?? (st ? st.h : GOLD_H), nst?.dash ?? false, st ? st.label : undefined, nst?.w ?? 8, nst?.head ?? true, true, nst?.over ?? true);
       } else if (!isNoNum(ci)) {
         seg(i, (i + 1) % N, AUTO, AUTO_H, true, undefined, 3, true); // авто-порядок у пронумерованных (тонкий белый пунктир)
       }
       const h = ci.hop;
       const hs = ci.hopStyle;
-      if (h !== undefined && h >= 0 && h < N && h !== i) seg(i, h, hs?.col ?? HOP, hs?.col ?? HOP_H, hs?.dash ?? false, 'ПЕРЕХОД', hs?.w ?? 8, hs?.head ?? true, true);
+      if (h !== undefined && h >= 0 && h < N && h !== i) seg(i, h, hs?.col ?? HOP, hs?.col ?? HOP_H, hs?.dash ?? false, 'ПЕРЕХОД', hs?.w ?? 8, hs?.head ?? true, true, hs?.over ?? true);
     }
   }
 
@@ -664,16 +716,23 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     ctx.fill();
 
     const custom = t.img ? getImage(t.img) : null;
-    if (custom) {
+    // АНИМИРОВАННАЯ фишка: кадр клипа по направлению (нет — idle); не загрузился — статичное превью
+    const clip = t.anim ? clipForToken(t.anim, t.dir) : null;
+    let drawn = false;
+    if (clip && clip.frames.length) {
+      const fimg = getImage(clip.frames[clipFrameIdx(clip, o.time + (t.phase ?? 0) * 1000)]);
+      if (fimg) {
+        ctx.imageSmoothingEnabled = false;
+        const sz = 34;
+        ctx.drawImage(fimg, -sz / 2, -sz / 2 - 4, sz, sz);
+        drawn = true;
+      }
+    }
+    if (!drawn && custom) {
       ctx.imageSmoothingEnabled = false;
       const sz = 34;
       ctx.drawImage(custom, -sz / 2, -sz / 2 - 4, sz, sz);
-      if (t.active) {
-        ctx.strokeStyle = '#ffcf3f';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(-sz / 2 - 3, -sz / 2 - 7, sz + 6, sz + 6);
-      }
-    } else {
+    } else if (!drawn) {
       const body = t.alive ? t.color : '#5a628f';
       ctx.fillStyle = body;
       ctx.fillRect(-9, -12, 18, 22);
@@ -690,11 +749,6 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.fillStyle = body;
       ctx.fillRect(-1, -18, 2, 6);
       ctx.fillRect(-3, -21, 6, 4);
-      if (t.active) {
-        ctx.strokeStyle = '#ffcf3f';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(-13, -24, 26, 36);
-      }
     }
     ctx.restore();
   }

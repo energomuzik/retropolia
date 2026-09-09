@@ -1,4 +1,4 @@
-import { type ReactNode, type ButtonHTMLAttributes } from 'react';
+import { useEffect, useState, type ReactNode, type ButtonHTMLAttributes } from 'react';
 import { sfx } from './sound';
 import { useApp } from './store';
 
@@ -529,6 +529,36 @@ export function Field({ label, children }: { label: string; children: ReactNode 
       <span className="tick-label block mb-1.5">{label}</span>
       {children}
     </label>
+  );
+}
+
+/**
+ * Проигрыватель анимации из кадров (dataUrl): показывает кадры по кругу
+ * с заданной скоростью (fps). Используется в редакторе анимаций и фишек,
+ * в превью библиотеки и в окне выбора фишки после жеребьёвки.
+ */
+export function AnimPreview({ frames, fps = 6, size = 48, className, style }: {
+  frames: string[];
+  fps?: number;
+  size?: number;
+  className?: string;
+  style?: React.CSSProperties;
+}) {
+  const n = frames.length;
+  const [i, setI] = useState(0);
+  useEffect(() => {
+    if (n <= 1) { setI(0); return; }
+    const iv = setInterval(() => setI((x) => (x + 1) % n), Math.max(42, 1000 / Math.max(1, Math.min(24, fps))));
+    return () => clearInterval(iv);
+  }, [n, fps]);
+  if (!n) return null;
+  return (
+    <img
+      src={frames[i % n]}
+      alt=""
+      className={className}
+      style={{ width: size, height: size, objectFit: 'contain', imageRendering: 'pixelated', ...style }}
+    />
   );
 }
 

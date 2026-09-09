@@ -14,7 +14,7 @@ import {
 } from '../input';
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
-import { EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
+import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
 import { PLAYER_COLORS, SKIP_COST, CHAOS_LIST, chaosLabel, JOY_LIST } from '../types';
 import type { CardDef, ChaosKind, TaskDef } from '../types';
 import { idbGet } from '../db';
@@ -110,7 +110,8 @@ export default function GameScreen() {
 
   const viewRef = useRef({ x: 0, y: 0, zoom: 1 });
   const dispRef = useRef<Record<string, { x: number; y: number }>>({});
-  const hopRef = useRef<Record<string, { queue: number[]; last: number }>>({});
+  const prevDispRef = useRef<Record<string, { x: number; y: number }>>({}); // позиция фишки в прошлом кадре — для направления анимации
+  const hopRef = useRef<Record<string, { queue: number[]; last: number; lastDir?: 'up' | 'down' | 'left' | 'right' }>>({});
   const arrivedRef = useRef(0);
   const holdStartRef = useRef(0);
   const shakeIntRef = useRef(0);
@@ -333,19 +334,23 @@ export default function GameScreen() {
 
         // токены — медленное, «рукотворное» перемещение по ячейкам
         const act = sess.players[sess.turn % sess.players.length];
+        const smooth = !!m.smoothMove; // плавный ход (без прыжков) задан картой
         let anyoneMoving = false;
-        const tokens = sess.players.map((p) => {
+        const mapToks = m.mapTokens ?? [];
+        const tokens = sess.players.map((p, pi) => {
           const center = cellCenter(m, p.pos);
           let d = dispRef.current[p.id];
           if (!d) { d = { ...center }; dispRef.current[p.id] = d; }
           const hop = hopRef.current[p.id];
-          let lift = 0; // вертикальный «подскок» фишки при движении
+          let lift = 0; // вертикальный «подскок» фишки при движении (в плавном режиме — нет)
+          let movingNow = false;
           // хост уже завершил это движение (moving null или принадлежит другому ходу) —
           // сбрасываем устаревшую очередь, чтобы фишка сошлась с авторитетной позицией
           const mvActive = !!sess.moving && sess.moving.player === p.id;
           if (hop && hop.queue.length && !mvActive) hop.queue.length = 0;
           if (hop && hop.queue.length) {
             anyoneMoving = true;
+            movingNow = true;
             const nextIdx = hop.queue[0];
             const tgt = cellCenter(m, nextIdx);
             const dx = tgt.x - d.x, dy = tgt.y - d.y;
@@ -361,7 +366,7 @@ export default function GameScreen() {
             } else {
               d.x += dx * Math.min(1, 0.085 * dt); // плавный шаг, не зависит от FPS
               d.y += dy * Math.min(1, 0.085 * dt);
-              lift = -Math.abs(Math.sin(t / 110)) * 7; // лёгкое подпрыгивание
+              lift = smooth ? 0 : -Math.abs(Math.sin(t / 110)) * 7; // подскок только в прыжковом режиме
             }
           } else if (!mvActive) {
             // тянем к авторитетной клетке только когда это движение не «висит» в ожидании
@@ -370,10 +375,28 @@ export default function GameScreen() {
           }
           // если mvActive, а очередь пуста — стоим на месте (ждём подтверждения хоста),
           // иначе фишка визуально «отскакивала» назад к старой клетке
+          // НАПРАВЛЕНИЕ для анимации фишки — по фактическому сдвигу за кадр;
+          // между клетками помним последнее направление, на месте — idle
+          const prevD = prevDispRef.current[p.id];
+          let dir: 'up' | 'down' | 'left' | 'right' | undefined;
+          if (movingNow && prevD) {
+            const mdx = d.x - prevD.x, mdy = d.y - prevD.y;
+            if (Math.abs(mdx) + Math.abs(mdy) > 0.4) {
+              dir = Math.abs(mdx) > Math.abs(mdy) ? (mdx > 0 ? 'right' : 'left') : (mdy > 0 ? 'down' : 'up');
+            } else if (hop && hop.lastDir) {
+              dir = hop.lastDir;
+            }
+          }
+          if (dir) { if (hop) hop.lastDir = dir; }
+          prevDispRef.current[p.id] = { x: d.x, y: d.y };
+          const tokDef = p.tokenKey ? mapToks.find((x) => x.id === p.tokenKey) : null;
           return {
             x: d.x, y: d.y + lift, color: PLAYER_COLORS[p.color],
             active: act?.id === p.id, alive: p.alive, label: p.name,
             img: p.tokenImg ?? null,
+            anim: tokDef?.anim,
+            dir,
+            phase: pi * 0.53,
           };
         });
 
@@ -971,7 +994,9 @@ export default function GameScreen() {
                             className={`relative w-14 h-14 border-[3px] p-1 transition-all ${off ? 'border-edge opacity-35 cursor-not-allowed' : mine ? 'border-gold shadow-[0_0_14px_rgba(255,207,63,0.35)] cursor-pointer' : 'border-edge hover:border-edge2 cursor-pointer'}`}
                             style={{ background: 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 12px 12px' }}
                           >
-                            <img src={t.dataUrl} alt={t.name} className="w-full h-full object-contain" style={{ imageRendering: 'pixelated' }} />
+                            {t.anim?.idle?.frames?.length
+                              ? <AnimPreview frames={t.anim.idle.frames} fps={t.anim.idle.fps} size={44} className="w-full h-full" style={{ width: '100%', height: '100%' }} />
+                              : <img src={t.dataUrl} alt={t.name} className="w-full h-full object-contain" style={{ imageRendering: 'pixelated' }} />}
                             {takenBy && <span className="absolute inset-x-0 bottom-0 bg-coral text-abyss font-pixel text-[6px] truncate px-0.5">{takenBy.name}</span>}
                           </button>
                         );

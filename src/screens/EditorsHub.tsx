@@ -7,7 +7,7 @@ const EDITORS: { screen: Screen; label: string; desc: string; color: string; ico
   { screen: 'mapEditor', label: 'Редактор карт', desc: 'фон, тайлы как в Tiled, ячейки в любом месте, стрелки маршрута', color: '#2ee6a8', icon: Ic.map },
   { screen: 'taskEditor', label: 'Редактор заданий', desc: 'ромы, сохранки, картинки, бонусы и ловушки', color: '#ff8b3f', icon: Ic.cart },
   { screen: 'quizEditor', label: 'Редактор квизов', desc: 'вопросы: выбор, текст, музыка, «кот в мешке»', color: '#5aa9ff', icon: Ic.dice },
-  { screen: 'tokenEditor', label: 'Редактор фишек', desc: 'свои фигурки игроков, пиксель-арт, прозрачность', color: '#ff7ad9', icon: Ic.pawn },
+  { screen: 'tokenEditor', label: 'Редактор анимаций и фишек', desc: 'анимации для карт, анимированные фишки, обычные фишки', color: '#ff7ad9', icon: Ic.pawn },
 ];
 
 export default function EditorsHub() {
@@ -46,7 +46,7 @@ export default function EditorsHub() {
         </div>
 
         <p className="text-center text-[11px] text-faint mt-8">
-          Порядок создания: карта с тайлами и ячейками → задания и квизы → фишки
+          Порядок создания: карта с тайлами и ячейками → задания и квизы → анимации и фишки
         </p>
       </div>
     </div>

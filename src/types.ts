@@ -50,6 +50,7 @@ export interface ArrowStyle {
   col?: string;   // свой цвет; нет — стандартный (золотая «дорога» / коралловый «переход»)
   dash?: boolean; // рисовать пунктиром
   head?: boolean; // наконечник-остриё на конце (по умолчанию включён)
+  over?: boolean; // стрелка ЗАХОДИТ на ячейку (по умолчанию да); нет — останавливается У КРАЯ ячейки, не налезая на неё
 }
 
 export type QuizType = 'choice' | 'text' | 'music' | 'mystery';
@@ -285,6 +286,9 @@ export interface GameMap {
   tileGroups?: TileGroup[]; // спойлеры палитры: папки пользователя и нарезки экстрактора
   stamps?: Stamp[]; // размещённые тайлы (слой декора поверх фона, под ячейками)
   mapTokens?: TokenDef[]; // фишки партии (до 6): автор карты выбирает в редакторе, они вшиты в карту и уезжают всем игрокам; после жеребьёвки каждый игрок выбирает себе одну — одинаковые нельзя
+  animLib?: AnimLibEntry[]; // анимации, вшитые в карту (из библиотеки анимаций автора)
+  anims?: PlacedAnim[]; // размещённые анимации-декорации (рисуются поверх тайлов, под ячейками)
+  smoothMove?: boolean; // плавное движение фишек без прыжков (для анимированных фишек); нет — прыжки по клеткам как раньше
   ready: boolean;
   createdAt: number;
   updatedAt: number;
@@ -356,9 +360,59 @@ export interface PlayerState {
 export interface TokenDef {
   id: string;
   name: string;
-  dataUrl: string; // PNG с поддержкой прозрачности
+  dataUrl: string; // PNG с поддержкой прозрачности (у анимированной — кадр idle, превью)
   builtin?: boolean;
   createdAt: number;
+  anim?: TokenAnim; // анимированная фишка: клипы по направлениям + idle
+}
+
+/* ---------- Анимации (редактор анимаций и фишек) ---------- */
+
+/* Один клип анимации: кадры по порядку + скорость (кадров в секунду).
+   Кадры — dataUrl картинки из библиотеки тайлов редактора анимаций. */
+export interface AnimClip {
+  fps: number;       // кадров в секунду (1..24)
+  frames: string[];  // dataUrl кадров по порядку проигрывания
+}
+
+/* Направление движения фишки — для выбора клипа анимации */
+export type TokenDir = 'up' | 'down' | 'left' | 'right';
+
+/* Анимированная фишка: idle обязателен (стоит на месте), направления — по наличии.
+   Нет клипа направления — играет idle. */
+export interface TokenAnim {
+  idle: AnimClip;
+  up?: AnimClip;
+  down?: AnimClip;
+  left?: AnimClip;
+  right?: AnimClip;
+}
+
+/* Свободная анимация автора (библиотека в редакторе анимаций и фишек):
+   её можно вшить в карту и размещать на поле как декорацию */
+export interface AnimDef {
+  id: string;
+  name: string;
+  clip: AnimClip;
+  createdAt: number;
+}
+
+/* Анимация, вшитая в КАРТУ (уезжает всем игрокам вместе с ней) */
+export interface AnimLibEntry {
+  id: string;
+  name: string;
+  clip: AnimClip;
+}
+
+/* Размещённая на карте анимация — как штамп-тайл, но проигрывает кадры.
+   Позиция — ЦЕНТР в пикселях поля; w/h — размер в пикселях. */
+export interface PlacedAnim {
+  id: string;
+  aid: string; // ссылка на AnimLibEntry в map.animLib
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 export interface ChallengeState {
@@ -431,7 +485,7 @@ export interface NetMsg {
   p?: unknown;
 }
 
-export const APP_VERSION = 16; // 16: фишки партии — автор карты выбирает до 6 фишек (вшиты в карту), после жеребьёвки каждый игрок выбирает себе фишку, одинаковые нельзя; стрелки ещё толще (до 24px), наконечники не прячутся под ячейками; старые партии не продолжаются
+export const APP_VERSION = 17; // 17: редактор анимаций и фишек — анимированные фишки (idle+4 направления), свободные анимации для карт (размещение и размер), выбор хода фишек (плавно/прыжки), стрелка «заходит на клетку или у края», жёлтая окантовка фишки убрана; старые партии не продолжаются
 export const START_SEC = 60 * 60;
 export const START_TRIES = 60;
 export const SKIP_COST = 5;
