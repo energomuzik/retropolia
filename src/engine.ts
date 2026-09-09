@@ -16,7 +16,7 @@ export type Action =
   | { t: 'chooseMode'; id: string; mode: 'time' | 'tries' }
   | { t: 'startTask'; id: string }
   | { t: 'togglePause'; id: string }
-  | { t: 'token'; id: string; tokenImg: string | null }
+  | { t: 'token'; id: string; tokenImg: string | null; tokenId?: string }
   | { t: 'reloadSave'; id: string }
   | { t: 'declareDone'; id: string }
   | { t: 'approve'; id: string }
@@ -698,6 +698,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (s.phase !== 'rollOff' || !s.rollOffWinner) break;
       const p = actor();
       if (!p) break;
+      /* фишки партии: пока игрок не взял свою фишку из набора карты — готовым не считается */
+      if ((map.mapTokens?.length ?? 0) > 0 && !p.tokenKey) break;
       if (!s.rollOffReady) s.rollOffReady = [];
       if (!s.rollOffReady.includes(a.id)) {
         s.rollOffReady.push(a.id);
@@ -771,7 +773,20 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     }
     case 'token': {
       const p = s.players.find((x) => x.id === a.id);
-      if (p && (s.phase === 'lobby' || s.phase === 'rollOff')) p.tokenImg = a.tokenImg;
+      if (!p || (s.phase !== 'lobby' && s.phase !== 'rollOff')) break;
+      if (a.tokenId !== undefined) {
+        /* фишка из набора карты (mapTokens): уникальна на партию —
+           если её уже взял другой игрок, повторно взять не выйдет */
+        const tok = (map.mapTokens ?? []).find((t) => t.id === a.tokenId);
+        if (!tok) break;
+        if (s.players.some((x) => x.id !== a.id && x.tokenKey === tok.id)) break;
+        p.tokenKey = tok.id;
+        p.tokenImg = tok.dataUrl;
+        log(`♟ ${p.name} берёт фишку «${tok.name}»`);
+      } else {
+        p.tokenKey = undefined;
+        p.tokenImg = a.tokenImg;
+      }
       break;
     }
     case 'reloadSave': {

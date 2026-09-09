@@ -328,6 +328,8 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
   }
 
   const N = map.cells.length;
+  /* наконечники явных стрелок, рисуемые ПОВЕРХ ячеек отдельным проходом (заполняется ниже) */
+  const topHeads: { x: number; y: number; ux: number; uy: number; hl: number; hw: number; col: string }[] = [];
   if (N > 1) {
     // Стрелки: ЗОЛОТАЯ — явная «дорога» (у безномерной — куда шагает фишка, у
     // пронумерованной — прыжок при остановке); белый ПУНКТИР — авто-порядок у
@@ -340,9 +342,11 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const GOLD = 'rgba(255,207,63,0.85)', GOLD_H = 'rgba(255,207,63,0.95)';
     const AUTO = 'rgba(233,236,255,0.35)', AUTO_H = 'rgba(233,236,255,0.55)';
     const HOP = '#ff6b6b', HOP_H = '#ff9b9b';
-    /* стрелка: линия + большое остриё на конце. w — толщина (по умолчанию 6 — ЖИРНАЯ),
-       wantHead — остриё (по умолчанию вкл): сразу видно, куда переместится фишка */
-    const seg = (ai: number, bi: number, col: string, head: string, dashed: boolean, label?: string, w = 6, wantHead = true) => {
+    /* стрелка: линия + большое остриё на конце. w — толщина (по умолчанию 8 — ЖИРНАЯ,
+      до 24), wantHead — остриё (по умолчанию вкл): сразу видно, куда переместится фишка.
+      headOnTop — остриё рисуется ПОВЕРХ ячеек отдельным проходом: раньше остриё пряталось
+      под крупной клеткой, теперь видно всегда */
+    const seg = (ai: number, bi: number, col: string, head: string, dashed: boolean, label?: string, w = 8, wantHead = true, headOnTop = false) => {
       const a = cellCenter(map, ai);
       const c = cellCenter(map, bi);
       const dx = c.x - a.x, dy = c.y - a.y;
@@ -363,12 +367,17 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       if (wantHead) {
         const hl = 10 + w * 1.9;  // длина острия растёт с толщиной
         const hw = 5.5 + w * 1.1; // полуширина острия
-        ctx.fillStyle = head;
-        ctx.beginPath();
-        ctx.moveTo(ex, ey);
-        ctx.lineTo(ex - ux * hl - uy * hw, ey - uy * hl + ux * hw);
-        ctx.lineTo(ex - ux * hl + uy * hw, ey - uy * hl - ux * hw);
-        ctx.fill();
+        if (headOnTop) {
+          // откладываем: нарисуем ПОСЛЕ ячеек, поверх них — остриё никогда не прячется
+          topHeads.push({ x: ex, y: ey, ux, uy, hl, hw, col: head });
+        } else {
+          ctx.fillStyle = head;
+          ctx.beginPath();
+          ctx.moveTo(ex, ey);
+          ctx.lineTo(ex - ux * hl - uy * hw, ey - uy * hl + ux * hw);
+          ctx.lineTo(ex - ux * hl + uy * hw, ey - uy * hl - ux * hw);
+          ctx.fill();
+        }
       }
       // подпись у середины стрелки (чуть сбоку, чтобы не сливалась с линией)
       if (label) {
@@ -391,13 +400,13 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         const st = legacyTag ? TAG_STYLES[legacyTag] : null;
         const nst = ci.nextStyle;
         const col = nst?.col ?? (st ? st.c : GOLD);
-        seg(i, nxt, col, nst?.col ?? (st ? st.h : GOLD_H), nst?.dash ?? false, st ? st.label : undefined, nst?.w ?? 6, nst?.head ?? true);
+        seg(i, nxt, col, nst?.col ?? (st ? st.h : GOLD_H), nst?.dash ?? false, st ? st.label : undefined, nst?.w ?? 8, nst?.head ?? true, true);
       } else if (!isNoNum(ci)) {
         seg(i, (i + 1) % N, AUTO, AUTO_H, true, undefined, 3, true); // авто-порядок у пронумерованных (тонкий белый пунктир)
       }
       const h = ci.hop;
       const hs = ci.hopStyle;
-      if (h !== undefined && h >= 0 && h < N && h !== i) seg(i, h, hs?.col ?? HOP, hs?.col ?? HOP_H, hs?.dash ?? false, 'ПЕРЕХОД', hs?.w ?? 6, hs?.head ?? true);
+      if (h !== undefined && h >= 0 && h < N && h !== i) seg(i, h, hs?.col ?? HOP, hs?.col ?? HOP_H, hs?.dash ?? false, 'ПЕРЕХОД', hs?.w ?? 8, hs?.head ?? true, true);
     }
   }
 
@@ -614,6 +623,17 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.strokeRect(-W / 2 - 6, -H / 2 - 6, W + 12, H + 12);
     }
     ctx.restore();
+  }
+
+  // наконечники явных стрелок — ПОВЕРХ ячеек: остриё всегда видно, даже когда клетка
+  // крупная или стоит вплотную (раньше остриё закрашивалось ячейкой и терялось)
+  for (const th of topHeads) {
+    ctx.fillStyle = th.col;
+    ctx.beginPath();
+    ctx.moveTo(th.x, th.y);
+    ctx.lineTo(th.x - th.ux * th.hl - th.uy * th.hw, th.y - th.uy * th.hl + th.ux * th.hw);
+    ctx.lineTo(th.x - th.ux * th.hl + th.uy * th.hw, th.y - th.uy * th.hl - th.ux * th.hw);
+    ctx.fill();
   }
 
   // флаг старта — над стартовой ячейкой (или над первой, если старой разметки нет)

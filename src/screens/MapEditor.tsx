@@ -6,7 +6,7 @@ import {
   renumberByPath, normCellsLegacy, fixLinksAfterDelete, startCellIdx,
 } from '../render';
 import { idbDel, idbPut, uid } from '../db';
-import type { CellDef, CellType, GameMap, Stamp, TileGroup, TileImg } from '../types';
+import type { CellDef, CellType, GameMap, Stamp, TokenDef, TileGroup, TileImg } from '../types';
 import { sfx } from '../sound';
 
 /* ---------- импорт картинок: сжимаем до разумного размера, чтобы карта не весила десятки МБ ---------- */
@@ -460,7 +460,7 @@ const CELL_TYPES: { key: CellType; label: string; cls: string }[] = [
 ];
 
 export default function MapEditor() {
-  const { maps, tiles, setScreen, refresh, toast } = useApp();
+  const { maps, tiles, tokens, setScreen, refresh, toast } = useApp();
   const [map, setMap] = useState<GameMap | null>(null);
   const [tool, setTool] = useState<Tool>('select');
   const [tileId, setTileId] = useState('');
@@ -473,6 +473,7 @@ export default function MapEditor() {
   const [linkFrom, setLinkFrom] = useState<number | null>(null);
   const [showGrid, setShowGrid] = useState(true);
   const [snap, setSnap] = useState(false);
+  const [tokOpen, setTokOpen] = useState(true); // спойлер «Фишки партии» в левой панели
   const [extract, setExtract] = useState<{ file: File; src: string; name: string; busy: boolean; bgMode: 'auto' | 'custom'; bg: string; foundBg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; tiles: TileImg[] } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -525,6 +526,22 @@ export default function MapEditor() {
 
   /* ---------- правки карты (без глубокого клонирования — карта может весить МБ) ---------- */
   const updMap = (patch: Partial<GameMap>) => setMap((m) => (m ? { ...m, ...patch } : m));
+
+  /* ---------- фишки партии: отмечаем до 6 фишек из библиотеки — они вшиваются в карту
+     и уезжают всем игрокам; после жеребьёвки каждый выберет себе одну (одинаковые нельзя) ---------- */
+  const toggleMapToken = (t: TokenDef) => {
+    if (!map) return;
+    const cur = map.mapTokens ?? [];
+    if (cur.some((x) => x.id === t.id)) {
+      updMap({ mapTokens: cur.filter((x) => x.id !== t.id) });
+      sfx.click();
+    } else {
+      if (cur.length >= 6) { toast('Максимум 6 фишек на карту — снимите галочку с другой', 'err'); sfx.fail(); return; }
+      updMap({ mapTokens: [...cur, { id: t.id, name: t.name, dataUrl: t.dataUrl, createdAt: t.createdAt }] });
+      sfx.coin();
+    }
+    dirtyRef.current = true;
+  };
   const updCell = (idx: number, patch: Partial<CellDef>) =>
     setMap((m) => {
       if (!m || !m.cells[idx]) return m;
@@ -1391,6 +1408,43 @@ export default function MapEditor() {
                   <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><Stepper value={map.startTries ?? 60} onChange={(v) => updMap({ startTries: v })} min={5} max={180} step={5} /></div>
                 </div>
               </div>
+
+              <div>
+                <button
+                  onClick={() => setTokOpen((v) => !v)}
+                  className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
+                  title={tokOpen ? 'Свернуть' : 'Развернуть'}
+                >
+                  <span className={`text-[10px] shrink-0 ${tokOpen ? 'text-gold' : 'text-faint'}`}>{tokOpen ? '▾' : '▸'}</span>
+                  <span className="tick-label">Фишки партии · {(map.mapTokens ?? []).length}/6</span>
+                </button>
+                {tokOpen && (
+                  <div>
+                    {tokens.length > 0 ? (
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {tokens.map((t) => {
+                          const on = (map.mapTokens ?? []).some((x) => x.id === t.id);
+                          return (
+                            <button
+                              key={t.id}
+                              title={t.name}
+                              onClick={() => toggleMapToken(t)}
+                              className={`relative aspect-square border-2 overflow-hidden cursor-pointer transition-transform hover:scale-105 ${on ? 'border-gold' : 'border-edge'}`}
+                              style={{ background: 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 10px 10px' }}
+                            >
+                              <img src={t.dataUrl} alt={t.name} className="w-full h-full object-contain" style={{ imageRendering: 'pixelated' }} />
+                              {on && <span className="absolute top-0 right-0 w-4 h-4 bg-gold text-abyss font-pixel text-[8px] flex items-center justify-center">✓</span>}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="text-[10px] text-faint leading-tight">Фишек пока нет — нарисуйте или загрузите их в «Редакторе фишек» (главное меню), затем вернитесь сюда.</p>
+                    )}
+                    <p className="text-[10px] text-faint mt-1.5 leading-tight">Отмеченные фишки вшиваются в карту и уезжают всем игрокам. После жеребьёвки каждый игрок выберет себе одну — одинаковые брать нельзя. Максимум 6.</p>
+                  </div>
+                )}
+              </div>
             </>
           )}
         </div>
@@ -1555,7 +1609,7 @@ export default function MapEditor() {
                       <div className="mt-2 pt-2 border-t border-edge space-y-1.5">
                         <div className="flex items-center justify-between">
                           <span className="text-[10px] text-dim">Толщина</span>
-                          <Stepper value={selCellDef.nextStyle?.w ?? 6} min={2} max={12} suffix=" px" onChange={(v) => { updCell(selCell, { nextStyle: { ...selCellDef.nextStyle, w: v } }); dirtyRef.current = true; }} />
+                          <Stepper value={selCellDef.nextStyle?.w ?? 8} min={2} max={24} suffix=" px" onChange={(v) => { updCell(selCell, { nextStyle: { ...selCellDef.nextStyle, w: v } }); dirtyRef.current = true; }} />
                         </div>
                         <div className="flex items-center gap-1 flex-wrap">
                           <span className="text-[10px] text-dim mr-0.5">Цвет</span>
@@ -1603,7 +1657,7 @@ export default function MapEditor() {
                       <div className="mt-2 pt-2 border-t border-edge space-y-1.5">
                         <div className="flex items-center justify-between">
                           <span className="text-[10px] text-dim">Толщина</span>
-                          <Stepper value={selCellDef.hopStyle?.w ?? 6} min={2} max={12} suffix=" px" onChange={(v) => { updCell(selCell, { hopStyle: { ...selCellDef.hopStyle, w: v } }); dirtyRef.current = true; }} />
+                          <Stepper value={selCellDef.hopStyle?.w ?? 8} min={2} max={24} suffix=" px" onChange={(v) => { updCell(selCell, { hopStyle: { ...selCellDef.hopStyle, w: v } }); dirtyRef.current = true; }} />
                         </div>
                         <div className="flex items-center gap-1 flex-wrap">
                           <span className="text-[10px] text-dim mr-0.5">Цвет</span>

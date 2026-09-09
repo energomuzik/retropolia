@@ -905,11 +905,15 @@ export default function GameScreen() {
           </div>
         )}
 
-        {/* ---------- победитель жеребьёвки: каждый подтверждает старт ---------- */}
+        {/* ---------- победитель жеребьёвки: каждый подтверждает старт (и берёт фишку) ---------- */}
         {s.phase === 'rollOff' && s.rollOffWinner && (() => {
           const readyList = s.rollOffReady ?? [];
           const winnerP = s.players.find((p) => p.id === s.rollOffWinner);
           const allReady = s.players.every((p) => readyList.includes(p.id));
+          const mapToks = map.mapTokens ?? [];
+          const needToken = mapToks.length > 0; // фишки заданы картой — выбор обязателен
+          const myTokenKey = s.players.find((p) => p.id === me)?.tokenKey;
+          const tokenTakenBy = (tid: string) => s.players.find((p) => p.id !== me && p.tokenKey === tid);
           return (
             <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.6)] z-10">
               <div className="pixel-panel pixel-corners pop-in p-7 max-w-lg w-full mx-4 text-center">
@@ -932,13 +936,14 @@ export default function GameScreen() {
                 <div className="mt-5 space-y-2 text-left">
                   {s.players.map((p) => {
                     const isReady = readyList.includes(p.id);
+                    const pTok = needToken && p.tokenKey ? mapToks.find((t) => t.id === p.tokenKey) : null;
                     return (
-                      <div key={p.id} className={`flex items-center justify-between hud-chip pixel-corners px-3 py-2 ${p.id === me && !isReady ? 'border-gold pulse-ring' : ''}`}>
-                        <span className="font-display text-[11px] uppercase tracking-wide" style={{ color: PLAYER_COLORS[p.color] }}>{p.name}</span>
+                      <div key={p.id} className={`flex items-center justify-between gap-2 hud-chip pixel-corners px-3 py-2 ${p.id === me && !isReady ? 'border-gold pulse-ring' : ''}`}>
+                        <span className="font-display text-[11px] uppercase tracking-wide truncate" style={{ color: PLAYER_COLORS[p.color] }}>{p.name}</span>
                         {isReady ? (
-                          <span className="font-pixel text-[8px] text-teal">ГОТОВ ✓</span>
+                          <span className="font-pixel text-[8px] text-teal shrink-0 text-right">ГОТОВ ✓{pTok ? <span className="text-dim"> · {pTok.name}</span> : ''}</span>
                         ) : p.id === me ? (
-                          <PxBtn small color="teal" onClick={() => { sfx.start(); dispatch({ t: 'rollOffReady', id: me }); }}>{Ic.play(12)} Старт игры</PxBtn>
+                          <PxBtn small color="teal" disabled={needToken && !myTokenKey} onClick={() => { sfx.start(); dispatch({ t: 'rollOffReady', id: me }); }}>{Ic.play(12)} Старт игры</PxBtn>
                         ) : (
                           <span className="font-pixel text-[8px] text-faint">ЖДЁМ…</span>
                         )}
@@ -946,6 +951,37 @@ export default function GameScreen() {
                     );
                   })}
                 </div>
+
+                {needToken && !readyList.includes(me) && (
+                  <div className="mt-4 text-left">
+                    <div className="font-display uppercase text-[11px] tracking-wider text-sky mb-2 flex items-center gap-1.5">
+                      <span>{Ic.pawn(13)}</span> Выберите свою фишку
+                    </div>
+                    <div className="flex gap-2 flex-wrap justify-center">
+                      {mapToks.map((t) => {
+                        const takenBy = tokenTakenBy(t.id);
+                        const mine = myTokenKey === t.id;
+                        const off = !!takenBy;
+                        return (
+                          <button
+                            key={t.id}
+                            disabled={off}
+                            onClick={() => { sfx.click(); dispatch({ t: 'token', id: me, tokenImg: t.dataUrl, tokenId: t.id }); }}
+                            title={takenBy ? `${t.name} — уже у ${takenBy.name}` : t.name}
+                            className={`relative w-14 h-14 border-[3px] p-1 transition-all ${off ? 'border-edge opacity-35 cursor-not-allowed' : mine ? 'border-gold shadow-[0_0_14px_rgba(255,207,63,0.35)] cursor-pointer' : 'border-edge hover:border-edge2 cursor-pointer'}`}
+                            style={{ background: 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 12px 12px' }}
+                          >
+                            <img src={t.dataUrl} alt={t.name} className="w-full h-full object-contain" style={{ imageRendering: 'pixelated' }} />
+                            {takenBy && <span className="absolute inset-x-0 bottom-0 bg-coral text-abyss font-pixel text-[6px] truncate px-0.5">{takenBy.name}</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {!myTokenKey && <p className="font-pixel text-[8px] text-gold mt-2">СНАЧАЛА ФИШКА — ПОТОМ «СТАРТ ИГРЫ»</p>}
+                    {mapToks.length < s.players.length && <p className="font-pixel text-[8px] text-coral mt-1">ФИШЕК ({mapToks.length}) МЕНЬШЕ, ЧЕМ ИГРОКОВ ({s.players.length}) — ХОСТУ НУЖНО ДОБАВИТЬ В РЕДАКТОРЕ!</p>}
+                  </div>
+                )}
+
                 <div className={`font-pixel text-[9px] mt-4 ${allReady ? 'text-teal' : 'text-dim blink-hard'}`}>
                   {allReady ? 'СТАРТ!' : `ГОТОВЫ ${readyList.length} ИЗ ${s.players.length}`}
                 </div>

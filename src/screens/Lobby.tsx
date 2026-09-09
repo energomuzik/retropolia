@@ -713,7 +713,29 @@ export function LobbyScreen() {
           })}
         </div>
 
-        {/* выбор фишки */}
+        {/* выбор фишки: если карта задаёт фишки партии — предпросмотр, выбор будет после жеребьёвки */}
+        {sessionMap?.mapTokens?.length ? (
+          <div className="mt-5 pixel-panel pixel-corners p-3.5">
+            <div className="flex items-center gap-2 mb-2.5">
+              <span className="text-sky">{Ic.pawn(16)}</span>
+              <span className="font-display uppercase text-[12px] tracking-wider text-paper">Фишки этой карты</span>
+              <span className="tick-label text-faint ml-auto">задал автор карты · {(sessionMap.mapTokens ?? []).length}</span>
+            </div>
+            <div className="flex items-center gap-2.5 flex-wrap">
+              {(sessionMap.mapTokens ?? []).map((t) => (
+                <div
+                  key={t.id}
+                  className="w-12 h-12 border-2 border-edge p-1"
+                  style={{ background: 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 12px 12px' }}
+                  title={t.name}
+                >
+                  <img src={t.dataUrl} alt={t.name} className="w-full h-full object-contain" style={{ imageRendering: 'pixelated' }} />
+                </div>
+              ))}
+            </div>
+            <p className="text-[10.5px] text-faint mt-2">Фишки вшиты в карту и уже у всех игроков. После жеребьёвки каждый игрок выберет себе одну — одинаковые брать нельзя.</p>
+          </div>
+        ) : (
         <div className="mt-5 pixel-panel pixel-corners p-3.5">
           <div className="flex items-center gap-2 mb-2.5">
             <span className="text-sky">{Ic.pawn(16)}</span>
@@ -743,6 +765,7 @@ export function LobbyScreen() {
             {tokens.length === 0 && <span className="text-[11px] text-faint">Своих фишек нет — в «Редакторе фишек» можно нарисовать или загрузить PNG с прозрачностью</span>}
           </div>
         </div>
+        )}
 
         <div className="mt-6 flex items-center justify-center gap-3 flex-wrap">
           <GhostBtn onClick={() => { leaveRoom(); setScreen('menu'); }}>{Ic.back(14)} Покинуть</GhostBtn>
