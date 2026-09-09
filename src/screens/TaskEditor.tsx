@@ -30,6 +30,15 @@ const EFFECTS: { key: EffectType; label: string; hasValue?: boolean; hasTarget?:
   { key: 'immuneNes', label: 'Радость: иммунитет к NES-заданию (в инвентарь)', def: 0 },
 ];
 
+/* Перемещения (сдвиг на N, телепорт на №N, «поворот не туда») убраны из ЛОВУШЕК —
+   вместо них рисуются стрелки «ПЕРЕХОД» в редакторе карт. Карточки со старыми
+   эффектами из прежних сохранений работают по-прежнему. */
+const TRAP_NO_EFFECTS: EffectType[] = ['move', 'teleport', 'wrongway'];
+const effListFor = (cellType: CellType | undefined) =>
+  cellType === 'trap' ? EFFECTS.filter((ef) => !TRAP_NO_EFFECTS.includes(ef.key)) : EFFECTS;
+const effResolve = (cellType: CellType | undefined, cur: EffectType): EffectType =>
+  effListFor(cellType).some((ef) => ef.key === cur) ? cur : 'jail';
+
 export const effectLabel = (e: CardEffect): string => {
   const meta = EFFECTS.find((x) => x.key === e.type);
   if (!meta) return e.type;
@@ -199,13 +208,15 @@ export default function TaskEditor() {
 
   const addCard = async () => {
     if (!map || selCell === null) return;
-    const kind = map.cells[selCell].type === 'trap' ? 'trap' : 'bonus';
+    const cellType = map.cells[selCell].type;
+    const kind = cellType === 'trap' ? 'trap' : 'bonus';
+    const effT = effResolve(cellType, cType); // у ловушек убранные эффекты подменяются на «Отпуск»
     if (!cName.trim()) { sfx.fail(); toast('Назовите карточку', 'err'); return; }
     let imageId: string | undefined = cImg || undefined;
     const card: CardDef = {
       id: uid('card'), kind, name: cName.trim(),
-      desc: cDesc.trim() || effectLabel({ type: cType, value: cValue, target: cTarget }),
-      imageId, effect: { type: cType, value: cValue, target: cTarget },
+      desc: cDesc.trim() || effectLabel({ type: effT, value: cValue, target: cTarget }),
+      imageId, effect: { type: effT, value: cValue, target: cTarget },
     };
     const nextMap = JSON.parse(JSON.stringify(map)) as GameMap;
     (kind === 'bonus' ? nextMap.bonusCards : nextMap.trapCards).push(card);
@@ -333,6 +344,8 @@ export default function TaskEditor() {
   }
 
   const deck = cell ? (cell.type === 'trap' ? map.trapCards : map.bonusCards) : [];
+  const effList = effListFor(cell?.type);
+  const effSel: EffectType = effList.some((ef) => ef.key === cType) ? cType : 'jail';
 
   return (
     <div className="h-full crt-grid-bg flex flex-col">
@@ -349,7 +362,7 @@ export default function TaskEditor() {
           <option value="">Ячейка: выберите…</option>
           {map.cells.map((c, i) => (
             <option key={i} value={i}>
-              {`${c.nonumber || c.n === 0 ? 'БЕЗ №' : '№' + c.n} · ${c.type === 'start' ? 'Старт' : c.type === 'task' ? 'Задание' : c.type === 'bonus' ? 'Бонус' : c.type === 'trap' ? 'Ловушка' : 'Квиз'}${c.label ? ' · ' + c.label : ''}${c.task ? ' ✓' : ''}`}
+              {`${c.nonumber || c.n === 0 ? 'БЕЗ №' : '№' + c.n} · ${c.type === 'start' ? 'Старт' : c.type === 'task' ? 'Задание' : c.type === 'rest' ? 'Отдых' : c.type === 'bonus' ? 'Бонус' : c.type === 'trap' ? 'Ловушка' : 'Квиз'}${c.label ? ' · ' + c.label : ''}${c.task ? ' ✓' : ''}`}
             </option>
           ))}
         </select>
@@ -406,18 +419,21 @@ export default function TaskEditor() {
               <Panel title={!(cell.nonumber || cell.n === 0) ? `Ячейка №${cell.n}` : 'Ячейка без номера (на круге)'} icon={Ic.target(16)} accent={cell.type === 'bonus' ? 'var(--color-teal)' : cell.type === 'trap' ? 'var(--color-coral)' : 'var(--color-gold)'}>
                 <div className="p-3 space-y-3">
                   <div className="flex gap-1 flex-wrap">
-                    {(['start', 'task', 'bonus', 'trap', 'quiz'] as const).map((t) => (
+                    {(['start', 'task', 'rest', 'bonus', 'trap', 'quiz'] as const).map((t) => (
                       <button
                         key={t}
                         onClick={() => void setCellType(t)}
-                        className={`flex-1 py-1.5 font-display text-[9px] uppercase tracking-wide border-2 transition-colors cursor-pointer ${cell.type === t ? (t === 'bonus' ? 'border-teal text-teal bg-teal/10' : t === 'trap' ? 'border-coral text-coral bg-coral/10' : t === 'quiz' ? 'border-sky text-sky bg-sky/10' : 'border-gold text-gold bg-gold/10') : 'border-edge text-faint hover:text-dim'}`}
+                        className={`flex-1 py-1.5 font-display text-[9px] uppercase tracking-wide border-2 transition-colors cursor-pointer ${cell.type === t ? (t === 'bonus' ? 'border-teal text-teal bg-teal/10' : t === 'trap' ? 'border-coral text-coral bg-coral/10' : t === 'quiz' ? 'border-sky text-sky bg-sky/10' : t === 'rest' ? 'border-dim text-dim bg-dim/10' : 'border-gold text-gold bg-gold/10') : 'border-edge text-faint hover:text-dim'}`}
                       >
-                        {t === 'start' ? 'Старт' : t === 'task' ? 'Задание' : t === 'bonus' ? 'Бонус' : t === 'trap' ? 'Ловушка' : 'Квиз'}
+                        {t === 'start' ? 'Старт' : t === 'task' ? 'Задание' : t === 'rest' ? 'Отдых' : t === 'bonus' ? 'Бонус' : t === 'trap' ? 'Ловушка' : 'Квиз'}
                       </button>
                     ))}
                   </div>
                   {cell.type === 'start' && (
                     <p className="text-[10px] text-teal leading-tight">Стартовая ячейка: игроки начнут партию с неё, задание не нужно.</p>
+                  )}
+                  {cell.type === 'rest' && (
+                    <p className="text-[10px] text-dim leading-tight">Пустая клетка-передышка: ничего не происходит. Ром и карточки не нужны — в «без заданий» она не считается.</p>
                   )}
                   <GhostBtn className="w-full" onClick={() => void delCell()}>{Ic.trash(13)} Удалить ячейку из маршрута</GhostBtn>
                 </div>
@@ -541,6 +557,15 @@ export default function TaskEditor() {
                     )}
                   </div>
                 </Panel>
+              ) : cell.type === 'rest' ? (
+                <Panel title="Передышка" icon={Ic.dice(16)} accent="var(--color-dim)">
+                  <div className="p-3 space-y-2">
+                    <p className="text-[12px] text-dim leading-relaxed">
+                      Пустая ячейка: игрок, вставший сюда, просто отдыхает — задание не запускается, карточка не выпадает,
+                      ход переходит дальше. Удобно ставить «перекур» между делами и цеплять с неё стрелки «ПЕРЕХОД» в редакторе карт.
+                    </p>
+                  </div>
+                </Panel>
               ) : (
                 <Panel
                   title={`Колода «${cell.type === 'bonus' ? 'Бонусы' : 'Ловушки'}» · ${deck.length}`}
@@ -587,22 +612,25 @@ export default function TaskEditor() {
                     <div className="border-t-2 border-edge pt-3 space-y-2.5">
                       <div className="tick-label text-gold">Новая карточка</div>
                       <Field label="Эффект">
-                        <select className="field-in w-full px-2 py-2 text-[12px]" value={cType} onChange={(e) => {
+                        <select className="field-in w-full px-2 py-2 text-[12px]" value={effSel} onChange={(e) => {
                           const t = e.target.value as EffectType;
                           setCType(t);
                           const meta = EFFECTS.find((x) => x.key === t)!;
                           setCValue(meta.def || 1);
                         }}>
-                          {EFFECTS.map((ef) => <option key={ef.key} value={ef.key}>{ef.label}</option>)}
+                          {effList.map((ef) => <option key={ef.key} value={ef.key}>{ef.label}</option>)}
                         </select>
                       </Field>
-                      {EFFECTS.find((x) => x.key === cType)?.hasValue && (
+                      {cell.type === 'trap' && (
+                        <p className="text-[10px] text-faint leading-tight">Перемещения (сдвиг на N, телепорт на №N, «не туда») убраны из ловушек — рисуйте их стрелками «ПЕРЕХОД» в редакторе карт.</p>
+                      )}
+                      {EFFECTS.find((x) => x.key === effSel)?.hasValue && (
                         <div className="flex items-center justify-between">
-                          <span className="text-[11px] text-dim">{EFFECTS.find((x) => x.key === cType)?.unit}</span>
+                          <span className="text-[11px] text-dim">{EFFECTS.find((x) => x.key === effSel)?.unit}</span>
                           <Stepper value={cValue} onChange={setCValue} min={-20} max={60} />
                         </div>
                       )}
-                      {EFFECTS.find((x) => x.key === cType)?.hasTarget && (
+                      {EFFECTS.find((x) => x.key === effSel)?.hasTarget && (
                         <div className="flex items-center justify-between">
                           <span className="text-[11px] text-dim">Номер игрока</span>
                           <Stepper value={cTarget} onChange={setCTarget} min={1} max={4} suffix=" иг." />

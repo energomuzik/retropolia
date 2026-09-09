@@ -223,6 +223,7 @@ const STAR = ['..1..', '.111.', '11111', '.111.', '1.1.1'];
 const SKULL = ['.111.', '11111', '10101', '11111', '.1.1.'];
 const PAD = ['.111.', '11111', '11111', '.111.'];
 const QUIZ = ['.111.', '1..11', '..11.', '..1..', '.....', '..1..'];
+const REST = ['11111', '...1.', '..1..', '.1...', '11111']; // буква Z — «передышка»
 const FLAG = ['1....', '1111.', '11111', '1111.', '1....'];
 const flagIcon = (ctx: CanvasRenderingContext2D, s: number, color: string) => {
   px(ctx, -2 * s, -2.5 * s, s, FLAG, color);
@@ -339,7 +340,9 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const GOLD = 'rgba(255,207,63,0.85)', GOLD_H = 'rgba(255,207,63,0.95)';
     const AUTO = 'rgba(233,236,255,0.35)', AUTO_H = 'rgba(233,236,255,0.55)';
     const HOP = '#ff6b6b', HOP_H = '#ff9b9b';
-    const seg = (ai: number, bi: number, col: string, head: string, dashed: boolean, label?: string) => {
+    /* стрелка: линия + большое остриё на конце. w — толщина (по умолчанию 6 — ЖИРНАЯ),
+       wantHead — остриё (по умолчанию вкл): сразу видно, куда переместится фишка */
+    const seg = (ai: number, bi: number, col: string, head: string, dashed: boolean, label?: string, w = 6, wantHead = true) => {
       const a = cellCenter(map, ai);
       const c = cellCenter(map, bi);
       const dx = c.x - a.x, dy = c.y - a.y;
@@ -353,16 +356,20 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       const sx = a.x + ux * padA, sy = a.y + uy * padA;
       const ex = c.x - ux * padB, ey = c.y - uy * padB;
       ctx.strokeStyle = col;
-      ctx.lineWidth = dashed ? 3 : 3.5;
-      if (dashed) ctx.setLineDash([7, 7]);
+      ctx.lineWidth = w;
+      if (dashed) ctx.setLineDash([w * 2.4, w * 1.8]);
       ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
       if (dashed) ctx.setLineDash([]);
-      ctx.fillStyle = head;
-      ctx.beginPath();
-      ctx.moveTo(ex, ey);
-      ctx.lineTo(ex - ux * 11 - uy * 6.5, ey - uy * 11 + ux * 6.5);
-      ctx.lineTo(ex - ux * 11 + uy * 6.5, ey - uy * 11 - ux * 6.5);
-      ctx.fill();
+      if (wantHead) {
+        const hl = 10 + w * 1.9;  // длина острия растёт с толщиной
+        const hw = 5.5 + w * 1.1; // полуширина острия
+        ctx.fillStyle = head;
+        ctx.beginPath();
+        ctx.moveTo(ex, ey);
+        ctx.lineTo(ex - ux * hl - uy * hw, ey - uy * hl + ux * hw);
+        ctx.lineTo(ex - ux * hl + uy * hw, ey - uy * hl - ux * hw);
+        ctx.fill();
+      }
       // подпись у середины стрелки (чуть сбоку, чтобы не сливалась с линией)
       if (label) {
         const mx = (sx + ex) / 2 - uy * 13;
@@ -382,12 +389,15 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       const nxt = ci.next;
       if (nxt !== undefined && nxt >= 0 && nxt < N && nxt !== i) {
         const st = legacyTag ? TAG_STYLES[legacyTag] : null;
-        seg(i, nxt, st ? st.c : GOLD, st ? st.h : GOLD_H, false, st ? st.label : undefined);
+        const nst = ci.nextStyle;
+        const col = nst?.col ?? (st ? st.c : GOLD);
+        seg(i, nxt, col, nst?.col ?? (st ? st.h : GOLD_H), nst?.dash ?? false, st ? st.label : undefined, nst?.w ?? 6, nst?.head ?? true);
       } else if (!isNoNum(ci)) {
-        seg(i, (i + 1) % N, AUTO, AUTO_H, true); // авто-порядок у пронумерованных
+        seg(i, (i + 1) % N, AUTO, AUTO_H, true, undefined, 3, true); // авто-порядок у пронумерованных (тонкий белый пунктир)
       }
       const h = ci.hop;
-      if (h !== undefined && h >= 0 && h < N && h !== i) seg(i, h, HOP, HOP_H, false, 'ПЕРЕХОД');
+      const hs = ci.hopStyle;
+      if (h !== undefined && h >= 0 && h < N && h !== i) seg(i, h, hs?.col ?? HOP, hs?.col ?? HOP_H, hs?.dash ?? false, 'ПЕРЕХОД', hs?.w ?? 6, hs?.head ?? true);
     }
   }
 
@@ -440,9 +450,9 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     }
 
     const base = isStart ? '#12351f'
-      : cell.type === 'bonus' ? '#0d3f2e' : cell.type === 'trap' ? '#43101c' : '#232741';
+      : cell.type === 'bonus' ? '#0d3f2e' : cell.type === 'trap' ? '#43101c' : cell.type === 'rest' ? '#1a2032' : '#232741';
     const edge = cell.color || (isStart ? '#ffcf3f'
-      : cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : '#8f97c9');
+      : cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : cell.type === 'rest' ? '#7c86b8' : '#8f97c9');
     ctx.fillStyle = base;
     ctx.fillRect(-W / 2, -H / 2, W, H);
 
@@ -499,8 +509,8 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
           ctx.fillText('!', W / 2 - 9, -H / 2 + (cell.color ? 30 : 16));
         }
       } else {
-        const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : QUIZ;
-        const iconColor = cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : '#5aa9ff';
+        const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : cell.type === 'rest' ? REST : QUIZ;
+        const iconColor = cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : cell.type === 'rest' ? '#7c86b8' : '#5aa9ff';
         const cimg = cell.imageId ? getImage(cell.imageId) : null;
         if (cimg) {
           // картинка на бонусе/ловушке/квизе — как на заданиях; иконка типа в углу, чтобы ячейка читалась
@@ -526,7 +536,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         ctx.fillStyle = '#e9ecff';
         ctx.font = '8px "Press Start 2P", monospace';
         ctx.textAlign = 'center';
-        const name = cell.label || (cell.type === 'bonus' ? 'БОНУС' : cell.type === 'trap' ? 'ЛОВУШКА' : 'КВИЗ');
+        const name = cell.label || (cell.type === 'bonus' ? 'БОНУС' : cell.type === 'trap' ? 'ЛОВУШКА' : cell.type === 'rest' ? 'ОТДЫХ' : 'КВИЗ');
         ctx.fillText(name.slice(0, Math.floor((W - 10) / 8)).toUpperCase(), 0, H / 2 - 8);
       }
       if (o.showNumbers && cell.n > 0 && !cell.nonumber) {
@@ -557,8 +567,8 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(cellImg, -11, -13, 22, 22);
       } else {
-        const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : cell.type === 'quiz' ? QUIZ : PAD;
-        const iconColor = cell.type === 'task' ? '#ffcf3f' : cell.type === 'quiz' ? '#5aa9ff' : edge;
+        const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : cell.type === 'quiz' ? QUIZ : cell.type === 'rest' ? REST : PAD;
+        const iconColor = cell.type === 'task' ? '#ffcf3f' : cell.type === 'quiz' ? '#5aa9ff' : cell.type === 'rest' ? '#7c86b8' : edge;
         px(ctx, -icon[0].length * 2, -14, 4, icon, iconColor);
       }
       if (cell.label) {

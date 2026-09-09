@@ -449,9 +449,11 @@ const SIZE_PRESETS: { w: number; h: number; label: string }[] = [
 ];
 
 const CELL_COLORS = ['', '#ffcf3f', '#ff5d73', '#5aa9ff', '#2ee6a8', '#ff8b3f', '#9be84d', '#c07aff', '#e9ecff'];
+const ARROW_COLORS = ['', '#ffcf3f', '#ff6b6b', '#5aa9ff', '#2ee6a8', '#c07aff', '#ff8b3f', '#e9ecff']; // '' — обычный (золотая дорога / коралловый переход)
 const CELL_TYPES: { key: CellType; label: string; cls: string }[] = [
   { key: 'start', label: 'Старт', cls: 'border-gold text-gold bg-gold/10' },
   { key: 'task', label: 'Зад.', cls: 'border-gold text-gold bg-gold/10' },
+  { key: 'rest', label: 'Отдых', cls: 'border-dim text-dim bg-dim/10' },
   { key: 'bonus', label: 'Бон.', cls: 'border-teal text-teal bg-teal/10' },
   { key: 'trap', label: 'Лов.', cls: 'border-coral text-coral bg-coral/10' },
   { key: 'quiz', label: 'Квиз', cls: 'border-sky text-sky bg-sky/10' },
@@ -1237,6 +1239,7 @@ export default function MapEditor() {
   const startsCount = map?.cells.filter((c) => c.type === 'start').length ?? 0;
   const taskCells = map?.cells.filter((c) => c.type === 'task').length ?? 0;
   const noTask = map?.cells.filter((c) => c.type === 'task' && !c.task).length ?? 0;
+  const restCells = map?.cells.filter((c) => c.type === 'rest').length ?? 0;
   const msz = map ? mapSize(map) : { w: 0, h: 0 };
 
   return (
@@ -1448,7 +1451,7 @@ export default function MapEditor() {
                   Ячейки: {map.cells.length} / мин. 10 · стартовых: {startsCount} / нужна 1
                 </div>
                 <div className="text-dim">
-                  Задания: {taskCells}{noTask > 0 ? <span className="text-magma"> (без рома: {noTask})</span> : ''} · Тайлов: {(map.stamps ?? []).length} · {msz.w}×{msz.h}
+                  Задания: {taskCells}{noTask > 0 ? <span className="text-magma"> (без рома: {noTask})</span> : ''}{restCells > 0 ? <span className="text-sky"> · передышек: {restCells}</span> : ''} · Тайлов: {(map.stamps ?? []).length} · {msz.w}×{msz.h}
                 </div>
                 {tool === 'link' && <div className="text-gold font-pixel text-[8px]">СТРЕЛКА: клик по ячейке А, затем по Б · Esc — отмена{linkFrom !== null ? ' · выбрана А, жмите Б' : ''}</div>}
                 {tool === 'hop' && <div className="text-coral font-pixel text-[8px]">ПЕРЕХОД: клик по ячейке А, затем по Б — при остановке на А фишка прыгнет на Б · Esc — отмена{linkFrom !== null ? ' · выбрана А, жмите Б' : ''}</div>}
@@ -1468,7 +1471,7 @@ export default function MapEditor() {
 
                   <div>
                     <div className="tick-label mb-1.5">Тип</div>
-                    <div className="grid grid-cols-5 gap-1">
+                    <div className="grid grid-cols-6 gap-1">
                       {CELL_TYPES.map((t) => (
                         <button
                           key={t.key}
@@ -1481,6 +1484,9 @@ export default function MapEditor() {
                     </div>
                     {selCellDef.type === 'start' && (
                       <p className="text-[10px] text-teal mt-1 leading-tight">Игроки начнут партию с этой ячейки. Задание ей не нужно.</p>
+                    )}
+                    {selCellDef.type === 'rest' && (
+                      <p className="text-[10px] text-sky mt-1 leading-tight">Пустая клетка-передышка: ничего не происходит, ход просто переходит дальше. Ром не нужен — «без рома» не считается.</p>
                     )}
                     <button
                       onClick={() => {
@@ -1545,6 +1551,35 @@ export default function MapEditor() {
                         <GhostBtn small onClick={() => setLink(selCell, null)}>Авто</GhostBtn>
                       )}
                     </div>
+                    {selCellDef.next !== undefined && (
+                      <div className="mt-2 pt-2 border-t border-edge space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] text-dim">Толщина</span>
+                          <Stepper value={selCellDef.nextStyle?.w ?? 6} min={2} max={12} suffix=" px" onChange={(v) => { updCell(selCell, { nextStyle: { ...selCellDef.nextStyle, w: v } }); dirtyRef.current = true; }} />
+                        </div>
+                        <div className="flex items-center gap-1 flex-wrap">
+                          <span className="text-[10px] text-dim mr-0.5">Цвет</span>
+                          {ARROW_COLORS.map((cc) => (
+                            <button
+                              key={cc || 'def'}
+                              onClick={() => { updCell(selCell, { nextStyle: { ...selCellDef.nextStyle, col: cc || undefined } }); dirtyRef.current = true; sfx.hover(); }}
+                              className={`w-[18px] h-[18px] border-2 cursor-pointer ${((selCellDef.nextStyle?.col ?? '') === cc) ? 'border-gold' : 'border-edge'}`}
+                              style={cc ? { background: cc } : { background: 'repeating-conic-gradient(#313c72 0 25%, #0b0e1c 0 50%) 0 0/6px 6px' }}
+                              title={cc ? 'Цвет стрелки' : 'Обычный (золотая)'}
+                            />
+                          ))}
+                        </div>
+                        <div className="flex gap-1.5">
+                          <GhostBtn small className="flex-1" onClick={() => { updCell(selCell, { nextStyle: { ...selCellDef.nextStyle, dash: !selCellDef.nextStyle?.dash } }); dirtyRef.current = true; sfx.hover(); }}>
+                            {selCellDef.nextStyle?.dash ? '✓ Пунктир' : 'Пунктир'}
+                          </GhostBtn>
+                          <GhostBtn small className="flex-1" onClick={() => { updCell(selCell, { nextStyle: { ...selCellDef.nextStyle, head: !(selCellDef.nextStyle?.head ?? true) } }); dirtyRef.current = true; sfx.hover(); }}>
+                            {selCellDef.nextStyle?.head === false ? 'Без острия' : '✓ Наконечник'}
+                          </GhostBtn>
+                        </div>
+                        <p className="text-[9.5px] text-faint leading-tight">Стрелка по умолчанию ЖИРНАЯ (6px) с остриём — сразу видно, куда пойдёт фишка.</p>
+                      </div>
+                    )}
                   </div>
 
                   <div>
@@ -1564,6 +1599,35 @@ export default function MapEditor() {
                         <GhostBtn small onClick={() => setHop(selCell, null)}>Убрать</GhostBtn>
                       )}
                     </div>
+                    {selCellDef.hop !== undefined && (
+                      <div className="mt-2 pt-2 border-t border-edge space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] text-dim">Толщина</span>
+                          <Stepper value={selCellDef.hopStyle?.w ?? 6} min={2} max={12} suffix=" px" onChange={(v) => { updCell(selCell, { hopStyle: { ...selCellDef.hopStyle, w: v } }); dirtyRef.current = true; }} />
+                        </div>
+                        <div className="flex items-center gap-1 flex-wrap">
+                          <span className="text-[10px] text-dim mr-0.5">Цвет</span>
+                          {ARROW_COLORS.map((cc) => (
+                            <button
+                              key={cc || 'def'}
+                              onClick={() => { updCell(selCell, { hopStyle: { ...selCellDef.hopStyle, col: cc || undefined } }); dirtyRef.current = true; sfx.hover(); }}
+                              className={`w-[18px] h-[18px] border-2 cursor-pointer ${((selCellDef.hopStyle?.col ?? '') === cc) ? 'border-gold' : 'border-edge'}`}
+                              style={cc ? { background: cc } : { background: 'repeating-conic-gradient(#313c72 0 25%, #0b0e1c 0 50%) 0 0/6px 6px' }}
+                              title={cc ? 'Цвет стрелки' : 'Обычный (коралловая)'}
+                            />
+                          ))}
+                        </div>
+                        <div className="flex gap-1.5">
+                          <GhostBtn small className="flex-1" onClick={() => { updCell(selCell, { hopStyle: { ...selCellDef.hopStyle, dash: !selCellDef.hopStyle?.dash } }); dirtyRef.current = true; sfx.hover(); }}>
+                            {selCellDef.hopStyle?.dash ? '✓ Пунктир' : 'Пунктир'}
+                          </GhostBtn>
+                          <GhostBtn small className="flex-1" onClick={() => { updCell(selCell, { hopStyle: { ...selCellDef.hopStyle, head: !(selCellDef.hopStyle?.head ?? true) } }); dirtyRef.current = true; sfx.hover(); }}>
+                            {selCellDef.hopStyle?.head === false ? 'Без острия' : '✓ Наконечник'}
+                          </GhostBtn>
+                        </div>
+                        <p className="text-[9.5px] text-faint leading-tight">ПЕРЕХОД по умолчанию ЖИРНЫЙ (6px) с остриём — видно, куда прыгнет фишка.</p>
+                      </div>
+                    )}
                     <p className="text-[10px] text-faint mt-1 leading-tight">ПЕРЕХОД (коралловая стрелка) срабатывает, только когда фишка ОСТАНОВИЛАСЬ на ячейке: выход из круга, штраф-телепорт. Проходом мимо — не срабатывает.</p>
                   </div>
 

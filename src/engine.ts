@@ -364,6 +364,13 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         endTurnNow();
         return;
     }
+    if (cell.type === 'rest') {
+      // пустая клетка-передышка: задание/карточка/квиз не нужны вообще
+      log(`${p.name} отдыхает на ячейке ${posName(p.pos)} — передышка`);
+      s.notice = { text: `Передышка: ячейка ${posName(p.pos)} пустая — здесь ничего не происходит.`, ts: Date.now() };
+      endTurnNow();
+      return;
+    }
     const task = cellTaskOf(s, map, p.pos);
     if (!task) {
       log(`Ячейка ${posName(p.pos)} без задания — передышка`);

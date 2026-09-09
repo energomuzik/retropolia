@@ -1882,8 +1882,8 @@ function CellInspectModal({ idx, onClose }: { idx: number; onClose: () => void }
   const revealed = (s.revealed ?? []).includes(idx) || !!ownerId;
   const hidden = !!st.options.hideUnrevealed && !revealed;
   const rom = task ? st.roms.find((r) => r.id === task.romId) : undefined;
-  const typeLabel = cell.type === 'task' ? 'Задание' : cell.type === 'bonus' ? 'Бонус (шанс)' : cell.type === 'trap' ? 'Ловушка' : 'Квиз';
-  const typeColor = cell.type === 'task' ? 'text-gold' : cell.type === 'bonus' ? 'text-teal' : cell.type === 'trap' ? 'text-coral' : 'text-sky';
+  const typeLabel = cell.type === 'task' ? 'Задание' : cell.type === 'rest' ? 'Передышка' : cell.type === 'bonus' ? 'Бонус (шанс)' : cell.type === 'trap' ? 'Ловушка' : 'Квиз';
+  const typeColor = cell.type === 'task' ? 'text-gold' : cell.type === 'rest' ? 'text-dim' : cell.type === 'bonus' ? 'text-teal' : cell.type === 'trap' ? 'text-coral' : 'text-sky';
   const joyMeta = task?.joy ? JOY_LIST.find((j) => j.id === task.joy) : null;
   return (
     <Modal title={`${cell.nonumber || cell.n === 0 ? 'Ячейка без номера' : `Ячейка №${cell.n}`}${cell.label ? ` · ${cell.label}` : ''}`} icon={Ic.target(16)} w="max-w-md" onClose={onClose}>
@@ -1933,6 +1933,9 @@ function CellInspectModal({ idx, onClose }: { idx: number; onClose: () => void }
           )}
           {cell.type === 'task' && !task && (
             <p className="text-[12px] text-dim">Задания на этой ячейке нет — передышка (пока игрок не создаст своё).</p>
+          )}
+          {cell.type === 'rest' && (
+            <p className="text-[12px] text-dim">Пустая клетка-передышка: здесь ничего не происходит — фишка просто отдыхает, ход переходит дальше.</p>
           )}
           {cell.type === 'bonus' && (
             <p className="text-[12px] text-dim">Ячейка-шанс: выпадает случайная карточка из колоды бонусов ({map.bonusCards.length} шт., включая пакости).</p>
