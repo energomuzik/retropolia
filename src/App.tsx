@@ -29,6 +29,14 @@ export default function App() {
     setVolume(volume);
   }, [volume]);
 
+  /* ПКМ больше НЕ открывает контекстное меню браузера — нигде в игре.
+     Правая кнопка остаётся свободной для своих нужд (панорамирование карты и т.п.) */
+  useEffect(() => {
+    const off = (e: MouseEvent) => e.preventDefault();
+    document.addEventListener('contextmenu', off);
+    return () => document.removeEventListener('contextmenu', off);
+  }, []);
+
   useEffect(() => {
     const on = (e: GamepadEvent) => useApp.getState().toast(`Джойстик подключён: ${e.gamepad.id.slice(0, 40)}`, 'ok');
     const off = () => useApp.getState().toast('Джойстик отключён', 'info');

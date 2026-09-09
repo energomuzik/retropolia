@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../store';
 import { AnimPreview, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
 import PixelPaint, { emptyGrid, gridToDataUrl, imageToGrid } from '../PixelPaint';
-import { fileToDataUrl } from '../assets';
 import { extractTilesFromImage } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbPut, uid } from '../db';
@@ -113,9 +112,10 @@ export default function TokenEditor() {
   const { tokens, anims, animTiles, animGroups, setScreen, refresh, toast } = useApp();
   const [tab, setTab] = useState<'anims' | 'atokens' | 'tokens'>('anims');
 
-  /* ---------- пиксель-арт редактор ОБЫЧНОЙ фишки: создание И правка существующей ---------- */
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [editor, setEditor] = useState<{ grid: (string | null)[]; w: number; h: number; name: string; editId?: string; createdAt?: number; tokenSize?: number } | null>(null);
+  /* ---------- пиксель-арт редактор ОБЫЧНОЙ фишки: создание И правка существующей.
+     srcDataUrl — откуда взята картинка (тайл левой панели / прежняя фишка):
+     если её ДОРАБОТАЛИ — результат уезжает в библиотеку, группу «Изменённые» ---------- */
+  const [editor, setEditor] = useState<{ grid: (string | null)[]; w: number; h: number; name: string; editId?: string; createdAt?: number; tokenSize?: number; srcDataUrl?: string; touched?: boolean } | null>(null);
 
   /* ---------- черновики создателей ---------- */
   const [animDraft, setAnimDraft] = useState<AnimDraft | null>(null); // свободная анимация для карт
@@ -287,8 +287,13 @@ export default function TokenEditor() {
     toast('Вырезанные тайлы добавлены в библиотеку', 'ok');
   };
 
-  /* ---------- клик по тайлу левой панели = ДОБАВИТЬ КАДР в открытый черновик ---------- */
+  /* ---------- клик по тайлу левой панели = ДОБАВИТЬ КАДР в открытый черновик,
+     а на вкладке «Обычные фишки» (без черновика) — открыть тайл в пиксель-редакторе ---------- */
   const onTileClick = (t: TileImg) => {
+    if (!animDraft && !tokDraft && tab === 'tokens') {
+      openTileAsToken(t);
+      return;
+    }
     const add = async () => {
       let src = t.dataUrl;
       if (mirrorMode) src = await flipDataUrl(src); // ЗЕРКАЛО по горизонтали
@@ -306,6 +311,47 @@ export default function TokenEditor() {
       toast('Сначала откройте «Новая анимация» или «Новая анимированная фишка» — тайлы станут кадрами', 'info');
     };
     void add();
+  };
+
+  /* тайл из левой панели → фишка: открываем пиксель-редактор с этой картинкой;
+     пока ничего не дорисовано, фишка сохраняет ОРИГИНАЛЬНУЮ картинку тайла (без прореживания) */
+  const openTileAsToken = (t: TileImg) => {
+    const img = new Image();
+    img.onload = () => {
+      const size = SIZES.find((s) => s >= Math.max(img.width, img.height)) ?? 32;
+      const grid = imageToGrid(img, Math.min(img.width, size), Math.min(img.height, size));
+      setEditor({
+        grid,
+        w: Math.min(img.width, size),
+        h: Math.min(img.height, size),
+        name: t.name.replace(/\.[^.]+$/, '').slice(0, 16).toUpperCase() || 'ФИШКА',
+        tokenSize: DEF_TOKEN_SIZE,
+        srcDataUrl: t.dataUrl,
+      });
+      sfx.hover();
+    };
+    img.src = t.dataUrl;
+  };
+
+  /* ДОРАБОТАННЫЙ тайл → библиотека, группа «Изменённые» (спойлер).
+     Дубликаты по картинке не плодим; true — добавлен новый тайл */
+  const addEditedTile = async (dataUrl: string, name: string): Promise<boolean> => {
+    const g = animGroups.find((gr) => gr.kind === 'edited');
+    if (g) {
+      for (const tid of g.tids) {
+        const ex = tileById.get(tid);
+        if (ex && ex.dataUrl === dataUrl) return false;
+      }
+    }
+    const id = uid('atimg');
+    const t: TileImg = { id, name: (name.trim() || 'изменённый').slice(0, 24), dataUrl };
+    await idbPut('animTiles', id, t);
+    if (g) await idbPut('animGroups', g.id, { ...g, tids: [...g.tids, id] });
+    else {
+      const ng: TileGroup = { id: uid('ag'), name: 'Изменённые', tids: [id], kind: 'edited', collapsed: true };
+      await idbPut('animGroups', ng.id, ng);
+    }
+    return true;
   };
 
   /* ---------- сохранение/удаление сущностей ---------- */
@@ -368,33 +414,12 @@ export default function TokenEditor() {
     sfx.click();
   };
 
-  const onFile = async (files: FileList | null) => {
-    const f = files?.[0];
-    if (!f || !f.type.startsWith('image/')) return;
-    const dataUrl = await fileToDataUrl(f);
-    const img = new Image();
-    img.onload = () => {
-      const size = SIZES.find((s) => s >= Math.max(img.width, img.height)) ?? 32;
-      const grid = imageToGrid(img, Math.min(img.width, size), Math.min(img.height, size));
-      setEditor({
-        grid,
-        w: Math.min(img.width, size),
-        h: Math.min(img.height, size),
-        name: f.name.replace(/\.[^.]+$/, '').slice(0, 16).toUpperCase(),
-        tokenSize: DEF_TOKEN_SIZE,
-      });
-      sfx.coin();
-      toast('Картинка загружена в редактор — прозрачность сохранена, дорисуйте детали', 'ok');
-    };
-    img.src = dataUrl;
-  };
-
   const editToken = (t: TokenDef) => {
     const img = new Image();
     img.onload = () => {
       const size = SIZES.find((s) => s >= Math.max(img.width, img.height)) ?? 32;
       const grid = imageToGrid(img, Math.min(img.width, size), Math.min(img.height, size));
-      setEditor({ grid, w: Math.min(img.width, size), h: Math.min(img.height, size), name: t.name, editId: t.id, createdAt: t.createdAt, tokenSize: t.size ?? DEF_TOKEN_SIZE });
+      setEditor({ grid, w: Math.min(img.width, size), h: Math.min(img.height, size), name: t.name, editId: t.id, createdAt: t.createdAt, tokenSize: t.size ?? DEF_TOKEN_SIZE, srcDataUrl: t.dataUrl });
       sfx.hover();
     };
     img.src = t.dataUrl;
@@ -404,18 +429,25 @@ export default function TokenEditor() {
     if (!editor) return;
     const hasPixels = editor.grid.some(Boolean);
     if (!hasPixels) { toast('Нарисуйте что-нибудь — пустая фишка не сохранится', 'err'); return; }
+    /* ничего не дорисовано (взяли готовый тайл) — сохраняем ОРИГИНАЛЬНУЮ картинку целиком;
+       дорисовали — сохраняем результат пиксель-редактора */
+    const finalUrl = editor.touched || !editor.srcDataUrl ? gridToDataUrl(editor.grid, editor.w, editor.h, 4) : editor.srcDataUrl;
     const t: TokenDef = {
       id: editor.editId ?? uid('tok'),
       name: editor.name.trim() || 'ФИШКА',
-      dataUrl: gridToDataUrl(editor.grid, editor.w, editor.h, 4),
+      dataUrl: finalUrl,
       createdAt: editor.createdAt ?? Date.now(),
       size: Math.max(16, Math.min(320, editor.tokenSize ?? DEF_TOKEN_SIZE)),
     };
     await idbPut('tokens', t.id, t);
+    let edited = false;
+    if (editor.srcDataUrl && finalUrl !== editor.srcDataUrl) {
+      edited = await addEditedTile(finalUrl, editor.name); // доработанный тайл — в библиотеку, «Изменённые»
+    }
     await refresh();
     setEditor(null);
     sfx.success();
-    toast(`Фишка «${t.name}» сохранена`, 'ok');
+    toast(`Фишка «${t.name}» сохранена${edited ? ' · доработанный тайл добавлен в панель → «Изменённые»' : ''}`, 'ok');
   };
 
   const staticToks = tokens.filter((t) => !t.anim);
@@ -430,10 +462,7 @@ export default function TokenEditor() {
         </h1>
         <div className="ml-auto flex gap-2 flex-wrap">
           {tab === 'tokens' && (
-            <>
-              <GhostBtn onClick={() => newBlank(16)}>{Ic.plus(14)} Нарисовать</GhostBtn>
-              <PxBtn color="sky" onClick={() => fileRef.current?.click()}>{Ic.upload(15)} Загрузить PNG</PxBtn>
-            </>
+            <GhostBtn onClick={() => newBlank(16)}>{Ic.plus(14)} Нарисовать</GhostBtn>
           )}
           {tab === 'anims' && <PxBtn color="sky" onClick={() => { setAnimDraft({ name: '', fps: 6, frames: [] }); sfx.click(); }}>{Ic.plus(14)} Новая анимация</PxBtn>}
           {tab === 'atokens' && <PxBtn color="sky" onClick={() => { setTokDraft({ name: '', size: DEF_TOKEN_SIZE, clips: emptyClips() }); setActiveClip('idle'); sfx.click(); }}>{Ic.plus(14)} Новая анимированная фишка</PxBtn>}
@@ -459,7 +488,7 @@ export default function TokenEditor() {
             >⇋ Зеркало кадров: {mirrorMode ? 'ВКЛ' : 'ВЫКЛ'}</button>
             {(animGroups ?? []).map((g) => {
               const inG = g.tids.map((tid) => tileById.get(tid)).filter(Boolean) as TileImg[];
-              const tag = g.kind === 'extract' ? '✂' : g.kind === 'folder' ? '›' : '+';
+              const tag = g.kind === 'extract' ? '✂' : g.kind === 'edited' ? '✎' : g.kind === 'folder' ? '›' : '+';
               return (
                 <div key={g.id} className="mb-2">
                   <div className="flex items-center gap-1 mb-1">
@@ -501,7 +530,7 @@ export default function TokenEditor() {
             {animGroups.length === 0 && (
               <p className="text-[10px] text-faint leading-tight">Загрузите папку с картинками-кадрами, отдельные файлы или нарежьте кадры из спрайт-листа («✂ Нарезать»). Библиотека одна для всех анимаций и фишек.</p>
             )}
-            <p className="text-[10px] text-gold leading-tight mt-2">Откройте создание анимации или фишки — и кликайте тайлы здесь: они встанут КАДРАМИ по порядку.</p>
+            <p className="text-[10px] text-gold leading-tight mt-2">Откройте создание анимации или фишки — и кликайте тайлы здесь: они встанут КАДРАМИ по порядку. На вкладке «Обычные фишки» клик по тайлу откроет его в пиксель-редакторе, а доработанные варианты сами лягут в группу «✎ Изменённые».</p>
           </div>
         </div>
 
@@ -681,7 +710,7 @@ export default function TokenEditor() {
                   ))}
                   {staticToks.length === 0 && (
                     <div className="pixel-corners border-[3px] border-dashed border-edge p-6 text-center text-dim text-sm col-span-full">
-                      Обычных фишек нет — нарисуйте пиксель-арт или загрузите PNG. Фишки БЕЗ анимации остаются полноценными: их можно выбирать в партиях.
+                      Обычных фишек нет — нарисуйте пиксель-арт или кликните тайл в ЛЕВОЙ панели (он откроется в редакторе). Фишки БЕЗ анимации остаются полноценными: их можно выбирать в партиях.
                     </div>
                   )}
                 </div>
@@ -695,7 +724,6 @@ export default function TokenEditor() {
       <input ref={folderRef} type="file" multiple accept="image/*" style={{ display: 'none' }} {...({ webkitdirectory: 'true', directory: 'true' } as Record<string, string>)} onChange={(e) => { void addTileFiles(e.target.files, 'folder'); e.currentTarget.value = ''; }} />
       <input ref={filesRef} type="file" multiple accept="image/*" style={{ display: 'none' }} onChange={(e) => { void addTileFiles(e.target.files, 'files'); e.currentTarget.value = ''; }} />
       <input ref={extRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => { void openExtract(e.target.files?.[0]); e.currentTarget.value = ''; }} />
-      <input ref={fileRef} type="file" accept="image/png,image/webp,image/gif" className="hidden" onChange={(e) => { void onFile(e.target.files); e.target.value = ''; }} />
 
       {extract && (
         <Modal title="Нарезка кадров из картинки" icon={Ic.pawn(16)} onClose={closeExtract} w="max-w-2xl">
@@ -772,7 +800,7 @@ export default function TokenEditor() {
               </div>
             </div>
             <p className="text-[11px] text-faint leading-tight">Размер на карте — сколько фишка занимает на поле (по умолчанию 64 = размер тайла). Картинка фишки впишется в этот размер целиком, пропорции сохранятся.</p>
-            <PixelPaint grid={editor.grid} w={editor.w} h={editor.h} onChange={(g) => setEditor({ ...editor, grid: g })} />
+            <PixelPaint grid={editor.grid} w={editor.w} h={editor.h} onChange={(g) => setEditor({ ...editor, grid: g, touched: true })} />
             <div className="flex justify-end gap-2">
               <GhostBtn onClick={() => setEditor(null)}>Отмена</GhostBtn>
               <PxBtn color="sky" onClick={() => void save()}>{Ic.check(14)} Сохранить фишку</PxBtn>

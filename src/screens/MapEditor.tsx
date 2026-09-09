@@ -207,7 +207,7 @@ export default function MapEditor() {
   /* ---------- правки карты (без глубокого клонирования — карта может весить МБ) ---------- */
   const updMap = (patch: Partial<GameMap>) => setMap((m) => (m ? { ...m, ...patch } : m));
 
-  /* ---------- фишки партии: отмечаем до 8 фишек из библиотеки — они вшиваются в карту
+  /* ---------- фишки партии: отмечаем до 12 фишек из библиотеки — они вшиваются в карту
      и уезжают всем игрокам; после жеребьёвки каждый выберет себе одну (одинаковые нельзя).
      АНИМИРОВАННЫЕ фишки вшиваются вместе со своими клипами и размером ---------- */
   const toggleMapToken = (t: TokenDef) => {
@@ -217,7 +217,7 @@ export default function MapEditor() {
       updMap({ mapTokens: cur.filter((x) => x.id !== t.id) });
       sfx.click();
     } else {
-      if (cur.length >= 8) { toast('Максимум 8 фишек на карту — снимите галочку с другой', 'err'); sfx.fail(); return; }
+      if (cur.length >= 12) { toast('Максимум 12 фишек на карту — снимите галочку с другой', 'err'); sfx.fail(); return; }
       updMap({ mapTokens: [...cur, { id: t.id, name: t.name, dataUrl: t.dataUrl, createdAt: t.createdAt, ...(t.anim ? { anim: JSON.parse(JSON.stringify(t.anim)) } : {}), ...(t.size !== undefined ? { size: t.size } : {}) }] });
       sfx.coin();
     }
@@ -1237,7 +1237,7 @@ export default function MapEditor() {
                   title={tokOpen ? 'Свернуть' : 'Развернуть'}
                 >
                   <span className={`text-[10px] shrink-0 ${tokOpen ? 'text-gold' : 'text-faint'}`}>{tokOpen ? '▾' : '▸'}</span>
-                  <span className="tick-label">Фишки партии · {(map.mapTokens ?? []).length}/8</span>
+                  <span className="tick-label">Фишки партии · {(map.mapTokens ?? []).length}/12</span>
                 </button>
                 {tokOpen && (
                   <div>
@@ -1262,7 +1262,7 @@ export default function MapEditor() {
                     ) : (
                       <p className="text-[10px] text-faint leading-tight">Фишек пока нет — нарисуйте или загрузите их в «Редакторе анимаций и фишек» (главное меню), затем вернитесь сюда.</p>
                     )}
-                    <p className="text-[10px] text-faint mt-1.5 leading-tight">Отмеченные фишки вшиваются в карту и уезжают всем игрокам. После жеребьёвки каждый игрок выберет себе одну — одинаковые брать нельзя. Максимум 8.</p>
+                    <p className="text-[10px] text-faint mt-1.5 leading-tight">Отмеченные фишки вшиваются в карту и уезжают всем игрокам. После жеребьёвки каждый игрок выберет себе одну — одинаковые брать нельзя. Максимум 12.</p>
                   </div>
                 )}
               </div>
@@ -1280,7 +1280,11 @@ export default function MapEditor() {
                     title="Фишка идёт с постоянной скоростью по всему пути сразу — без прыжков и без остановок у каждой клетки. Для анимированных фишек с походкой"
                   >Плавно</button>
                 </div>
-                <p className="text-[10px] text-faint mt-1 leading-tight">Как двигаются фишки на этой карте: прыжками по клеткам (по умолчанию) или плавно — одним непрерывным движением от клетки до клетки назначения.</p>
+                <div className="flex items-center justify-between mt-2">
+                  <span className="text-[10px] text-dim">Скорость хода</span>
+                  <Stepper value={map.moveSpeed ?? 1.2} onChange={(v) => updMap({ moveSpeed: Math.round(v * 10) / 10 })} min={0.5} max={6} step={0.1} suffix=" кл/с" />
+                </div>
+                <p className="text-[10px] text-faint mt-1 leading-tight">Как двигаются фишки на этой карте: прыжками по клеткам (по умолчанию) или плавно — одним непрерывным движением от клетки до клетки назначения. Скорость — одна для ВСЕХ фишек карты, в клетках в секунду: подбирается автором карты и работает в обоих режимах.</p>
               </div>
 
               <div>

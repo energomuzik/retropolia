@@ -39,6 +39,26 @@ export function cellAtPoint(map: GameMap, wx: number, wy: number): number {
   return -1;
 }
 
+/* ---------- Скорость хода фишек ----------
+   Скорость задаёт АВТОР КАРТЫ в «клетках в секунду» (GameMap.moveSpeed, 0.5..6),
+   одна на все фишки карты; нет значения — спокойный дефолт 1.2 кл/с. */
+
+export const DEF_MOVE_SPEED = 1.2;
+export const clampMoveSpeed = (v: number) => Math.min(6, Math.max(0.5, v));
+
+/* ПЛАВНЫЙ режим: постоянная скорость по всему пути → px за кадр 60fps.
+   seg0 — длина первого отрезка пути (пиксели поля): скорость одинаково ощущается
+   на картах с любым размером клетки. */
+export const smoothPxPerFrame = (seg0: number, cps: number) => {
+  const s = clampMoveSpeed(cps);
+  return Math.min(60, Math.max(0.1, (seg0 * s) / 60));
+};
+
+/* ПРЫЖКОВЫЙ режим: коэффициент подхода к цели за кадр — фишка закрывает 95% клетки
+   за 1/cps секунд, затем клетка «щёлкается» (как раньше, но скорость из карты). */
+export const jumpFrameFactor = (cps: number) => Math.min(0.5, 1 - Math.pow(0.05, clampMoveSpeed(cps) / 60));
+
+
 /* РАЗМЕЩЁННАЯ АНИМАЦИЯ под точкой: верхняя — та, что позже в массиве */
 export function animAtPoint(map: GameMap, wx: number, wy: number): number {
   const an = map.anims ?? [];

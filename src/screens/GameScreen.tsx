@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp, getRomData, useBlobImage } from '../store';
 import { dispatch, streamBus, type StreamPacket } from '../useGame';
-import { CELL, cellAtPoint, cellCenter, drawBoard, fitView, mapSize } from '../render';
+import { CELL, cellAtPoint, cellCenter, drawBoard, fitView, mapSize, smoothPxPerFrame, jumpFrameFactor, DEF_MOVE_SPEED, clampMoveSpeed } from '../render';
 import { cellTaskOf, fmtClock, spentInfo } from '../engine';
 import { effectLabel } from './TaskEditor';
 import { cardArt, cartridgeArt } from '../assets';
@@ -335,6 +335,7 @@ export default function GameScreen() {
         // токены — медленное, «рукотворное» перемещение по ячейкам
         const act = sess.players[sess.turn % sess.players.length];
         const smooth = !!m.smoothMove; // плавный ход (без прыжков) задан картой
+        const cps = clampMoveSpeed(m.moveSpeed ?? DEF_MOVE_SPEED); // клеток в секунду — подобрал автор карты
         let anyoneMoving = false;
         const mapToks = m.mapTokens ?? [];
         const tokens = sess.players.map((p, pi) => {
@@ -354,11 +355,12 @@ export default function GameScreen() {
             if (smooth) {
               /* ПЛАВНЫЙ ХОД БЕЗ ОСТАНОВОК: фишка идёт с ПОСТОЯННОЙ скоростью по всему
                  пути сразу — не тормозит у каждой клетки и не «отсчитывает» их;
-                 излишек шага переносится на следующий отрезок, повороты пути = смена направления */
+                 излишек шага переносится на следующий отрезок, повороты пути = смена направления.
+                 Скорость — в клетках в секунду, задаёт автор карты (moveSpeed) */
               if (hop.speed === undefined) {
                 const t0 = cellCenter(m, hop.queue[0]);
                 const seg0 = Math.hypot(t0.x - d.x, t0.y - d.y);
-                hop.speed = Math.min(9, Math.max(2.8, seg0 * 0.085)); // px за кадр 60fps
+                hop.speed = smoothPxPerFrame(seg0, cps); // px за кадр 60fps
               }
               let remain = hop.speed * dt;
               while (remain > 0 && hop.queue.length) {
@@ -393,8 +395,9 @@ export default function GameScreen() {
                   dispatch({ t: 'arrived', id: me });
                 }
               } else {
-                d.x += dx * Math.min(1, 0.085 * dt); // плавный шаг, не зависит от FPS
-                d.y += dy * Math.min(1, 0.085 * dt);
+                const hf = jumpFrameFactor(cps); // 95% клетки за 1/cps сек — скорость из карты
+                d.x += dx * Math.min(1, hf * dt); // плавный шаг, не зависит от FPS
+                d.y += dy * Math.min(1, hf * dt);
                 lift = -Math.abs(Math.sin(t / 110)) * 7; // подскок — только в прыжковом режиме
               }
             }
@@ -450,9 +453,12 @@ export default function GameScreen() {
           };
         }
         const v = viewRef.current;
-        v.x += (goal.x - v.x) * 0.07;
-        v.y += (goal.y - v.y) * 0.07;
-        v.zoom += (goal.zoom - v.zoom) * 0.07;
+        /* пока фишку передвигают — камера держит фокус ПЛОТНЕЕ (жёстче догоняет цель):
+           иначе на быстром ходу фишка уезжала из центра кадра, и слежение «сдвигалось» */
+        const camK = anyoneMoving ? 0.2 : 0.07;
+        v.x += (goal.x - v.x) * camK;
+        v.y += (goal.y - v.y) * camK;
+        v.zoom += (goal.zoom - v.zoom) * camK;
 
         const colorById: Record<string, string> = {};
         sess.players.forEach((p) => { colorById[p.id] = PLAYER_COLORS[p.color]; });
