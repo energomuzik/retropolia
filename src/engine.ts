@@ -16,7 +16,7 @@ export type Action =
   | { t: 'chooseMode'; id: string; mode: 'time' | 'tries' }
   | { t: 'startTask'; id: string }
   | { t: 'togglePause'; id: string }
-  | { t: 'token'; id: string; tokenImg: string | null; tokenId?: string }
+  | { t: 'token'; id: string; tokenImg: string | null; tokenId?: string; tokenSize?: number }
   | { t: 'reloadSave'; id: string }
   | { t: 'declareDone'; id: string }
   | { t: 'approve'; id: string }
@@ -782,10 +782,12 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         if (s.players.some((x) => x.id !== a.id && x.tokenKey === tok.id)) break;
         p.tokenKey = tok.id;
         p.tokenImg = tok.dataUrl;
+        p.tokenSize = tok.size ?? (tok.anim ? 64 : 34);
         log(`♟ ${p.name} берёт фишку «${tok.name}»`);
       } else {
         p.tokenKey = undefined;
         p.tokenImg = a.tokenImg;
+        p.tokenSize = a.tokenSize;
       }
       break;
     }

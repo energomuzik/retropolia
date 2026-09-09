@@ -207,9 +207,9 @@ export default function MapEditor() {
   /* ---------- правки карты (без глубокого клонирования — карта может весить МБ) ---------- */
   const updMap = (patch: Partial<GameMap>) => setMap((m) => (m ? { ...m, ...patch } : m));
 
-  /* ---------- фишки партии: отмечаем до 6 фишек из библиотеки — они вшиваются в карту
+  /* ---------- фишки партии: отмечаем до 8 фишек из библиотеки — они вшиваются в карту
      и уезжают всем игрокам; после жеребьёвки каждый выберет себе одну (одинаковые нельзя).
-     АНИМИРОВАННЫЕ фишки вшиваются вместе со своими клипами ---------- */
+     АНИМИРОВАННЫЕ фишки вшиваются вместе со своими клипами и размером ---------- */
   const toggleMapToken = (t: TokenDef) => {
     if (!map) return;
     const cur = map.mapTokens ?? [];
@@ -217,8 +217,8 @@ export default function MapEditor() {
       updMap({ mapTokens: cur.filter((x) => x.id !== t.id) });
       sfx.click();
     } else {
-      if (cur.length >= 6) { toast('Максимум 6 фишек на карту — снимите галочку с другой', 'err'); sfx.fail(); return; }
-      updMap({ mapTokens: [...cur, { id: t.id, name: t.name, dataUrl: t.dataUrl, createdAt: t.createdAt, ...(t.anim ? { anim: JSON.parse(JSON.stringify(t.anim)) } : {}) }] });
+      if (cur.length >= 8) { toast('Максимум 8 фишек на карту — снимите галочку с другой', 'err'); sfx.fail(); return; }
+      updMap({ mapTokens: [...cur, { id: t.id, name: t.name, dataUrl: t.dataUrl, createdAt: t.createdAt, ...(t.anim ? { anim: JSON.parse(JSON.stringify(t.anim)) } : {}), ...(t.size !== undefined ? { size: t.size } : {}) }] });
       sfx.coin();
     }
     dirtyRef.current = true;
@@ -865,6 +865,11 @@ export default function MapEditor() {
         dirtyRef.current = true;
         sfx.hover();
       }
+      if (e.key.toLowerCase() === 'f' && selStamp && selStampIdx >= 0) {
+        updStamp(selStampIdx, { flip: !(map.stamps?.[selStampIdx].flip ?? false) });
+        dirtyRef.current = true;
+        sfx.hover();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -1232,7 +1237,7 @@ export default function MapEditor() {
                   title={tokOpen ? 'Свернуть' : 'Развернуть'}
                 >
                   <span className={`text-[10px] shrink-0 ${tokOpen ? 'text-gold' : 'text-faint'}`}>{tokOpen ? '▾' : '▸'}</span>
-                  <span className="tick-label">Фишки партии · {(map.mapTokens ?? []).length}/6</span>
+                  <span className="tick-label">Фишки партии · {(map.mapTokens ?? []).length}/8</span>
                 </button>
                 {tokOpen && (
                   <div>
@@ -1257,7 +1262,7 @@ export default function MapEditor() {
                     ) : (
                       <p className="text-[10px] text-faint leading-tight">Фишек пока нет — нарисуйте или загрузите их в «Редакторе анимаций и фишек» (главное меню), затем вернитесь сюда.</p>
                     )}
-                    <p className="text-[10px] text-faint mt-1.5 leading-tight">Отмеченные фишки вшиваются в карту и уезжают всем игрокам. После жеребьёвки каждый игрок выберет себе одну — одинаковые брать нельзя. Максимум 6.</p>
+                    <p className="text-[10px] text-faint mt-1.5 leading-tight">Отмеченные фишки вшиваются в карту и уезжают всем игрокам. После жеребьёвки каждый игрок выберет себе одну — одинаковые брать нельзя. Максимум 8.</p>
                   </div>
                 )}
               </div>
@@ -1272,10 +1277,10 @@ export default function MapEditor() {
                   <button
                     onClick={() => { updMap({ smoothMove: true }); sfx.hover(); }}
                     className={`flex-1 py-1.5 border-2 cursor-pointer font-display text-[9px] uppercase ${map.smoothMove ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}
-                    title="Фишка скользит между клетками без прыжков — для анимированных фишек с походкой"
+                    title="Фишка идёт с постоянной скоростью по всему пути сразу — без прыжков и без остановок у каждой клетки. Для анимированных фишек с походкой"
                   >Плавно</button>
                 </div>
-                <p className="text-[10px] text-faint mt-1 leading-tight">Как двигаются фишки на этой карте: прыжками по клеткам (по умолчанию) или плавно, без прыжков — для фишек с анимацией ходьбы.</p>
+                <p className="text-[10px] text-faint mt-1 leading-tight">Как двигаются фишки на этой карте: прыжками по клеткам (по умолчанию) или плавно — одним непрерывным движением от клетки до клетки назначения.</p>
               </div>
 
               <div>
@@ -1644,6 +1649,7 @@ export default function MapEditor() {
 
                   <div className="grid grid-cols-2 gap-1.5">
                     <GhostBtn small onClick={() => { updStamp(selStampIdx, { rot: (selStampDef.rot + 1) % 4 }); dirtyRef.current = true; sfx.hover(); }}>Повернуть 90°</GhostBtn>
+                    <GhostBtn small onClick={() => { updStamp(selStampIdx, { flip: !selStampDef.flip }); dirtyRef.current = true; sfx.hover(); }} title="Отразить по горизонтали — для тайлов, нарисованных только в одну сторону (клавиша F)">Зеркало {selStampDef.flip ? '✓' : ''}</GhostBtn>
                     <GhostBtn small onClick={() => {
                       const copy: Stamp = { ...selStampDef, id: uid('st'), x: selStampDef.x + 16, y: selStampDef.y + 16 };
                       setMap((mm) => (mm ? { ...mm, stamps: [...(mm.stamps ?? []), copy] } : mm));

@@ -224,6 +224,7 @@ export interface TokenDraw {
   anim?: TokenAnim;    // анимированная фишка: играет кадры клипа по направлению/idle
   dir?: TokenDir;      // текущее направление движения (нет — стоит на месте → idle)
   phase?: number;      // сдвиг фазы проигрывания (чтобы фишки не мигали синхронно)
+  size?: number;       // размер на поле в px по большей стороне (нет: анимированная 64, обычная 34)
 }
 
 export interface BoardDrawOpts {
@@ -332,6 +333,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     ctx.save();
     ctx.translate(st.x, st.y);
     ctx.rotate((st.rot * Math.PI) / 2);
+    if (st.flip) ctx.scale(-1, 1); // ЗЕРКАЛО по горизонтали — для тайлов, нарисованных только в одну сторону
     if (img) {
       ctx.imageSmoothingEnabled = true;
       ctx.drawImage(img, -st.w / 2, -st.h / 2, st.w, st.h);
@@ -710,11 +712,21 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const s = t.active ? 1.12 : 1;
     ctx.scale(s, s);
     ctx.globalAlpha = t.alive ? 1 : 0.35;
+    /* размер фишки задаётся автором фишки (px по большей стороне);
+       старые фишки без размера — 34, анимированные без размера — 64 (как тайл на карте) */
+    const sz = Math.max(10, Math.min(320, t.size ?? (t.anim ? 64 : 34)));
     ctx.fillStyle = 'rgba(0,0,0,0.45)';
     ctx.beginPath();
-    ctx.ellipse(0, 16 - bob / s, 11, 4.5, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, sz * 0.47 - bob / s, sz * 0.32, sz * 0.13, 0, 0, Math.PI * 2);
     ctx.fill();
 
+    /* картинка фишки: большая сторона = sz, пропорции сохранены, чуть приподнята над тенью */
+    const drawFit = (img: HTMLImageElement) => {
+      const iw = img.width || 1, ih = img.height || 1;
+      const k = sz / Math.max(iw, ih);
+      const dw = iw * k, dh = ih * k;
+      ctx.drawImage(img, -dw / 2, -dh / 2 - sz * 0.12, dw, dh);
+    };
     const custom = t.img ? getImage(t.img) : null;
     // АНИМИРОВАННАЯ фишка: кадр клипа по направлению (нет — idle); не загрузился — статичное превью
     const clip = t.anim ? clipForToken(t.anim, t.dir) : null;
@@ -723,15 +735,13 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       const fimg = getImage(clip.frames[clipFrameIdx(clip, o.time + (t.phase ?? 0) * 1000)]);
       if (fimg) {
         ctx.imageSmoothingEnabled = false;
-        const sz = 34;
-        ctx.drawImage(fimg, -sz / 2, -sz / 2 - 4, sz, sz);
+        drawFit(fimg);
         drawn = true;
       }
     }
     if (!drawn && custom) {
       ctx.imageSmoothingEnabled = false;
-      const sz = 34;
-      ctx.drawImage(custom, -sz / 2, -sz / 2 - 4, sz, sz);
+      drawFit(custom);
     } else if (!drawn) {
       const body = t.alive ? t.color : '#5a628f';
       ctx.fillStyle = body;

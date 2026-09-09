@@ -754,7 +754,7 @@ export function LobbyScreen() {
             {tokens.map((t) => (
               <button
                 key={t.id}
-                onClick={() => dispatch({ t: 'token', id: selfId, tokenImg: t.dataUrl })}
+                onClick={() => dispatch({ t: 'token', id: selfId, tokenImg: t.dataUrl, tokenSize: t.size ?? (t.anim ? 64 : 34) })}
                 className={`w-14 h-14 border-[3px] p-1 transition-all cursor-pointer ${me?.tokenImg === t.dataUrl ? 'border-gold shadow-[0_0_14px_rgba(255,207,63,0.35)]' : 'border-edge hover:border-edge2'}`}
                 style={{ background: `repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 12px 12px` }}
                 title={t.name}

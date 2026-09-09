@@ -32,6 +32,24 @@ const shrinkFrame = (dataUrl: string): Promise<string> =>
     img.src = dataUrl;
   });
 
+/* ЗЕРКАЛО кадра по горизонтали (dataUrl → dataUrl) — для тайлов, нарисованных только в одну сторону */
+const flipDataUrl = (dataUrl: string): Promise<string> =>
+  new Promise((res) => {
+    const img = new Image();
+    img.onload = () => {
+      const cv = document.createElement('canvas');
+      cv.width = Math.max(1, img.width || 1);
+      cv.height = Math.max(1, img.height || 1);
+      const cx = cv.getContext('2d')!;
+      cx.translate(cv.width, 0);
+      cx.scale(-1, 1);
+      cx.drawImage(img, 0, 0);
+      res(cv.toDataURL('image/png'));
+    };
+    img.onerror = () => res(dataUrl);
+    img.src = dataUrl;
+  });
+
 /* Клипы анимированной фишки: idle обязателен, направления — по наличии */
 type ClipKey = 'idle' | 'up' | 'down' | 'left' | 'right';
 const CLIP_META: { key: ClipKey; label: string; hint: string }[] = [
@@ -44,7 +62,7 @@ const CLIP_META: { key: ClipKey; label: string; hint: string }[] = [
 
 interface ClipDraft { fps: number; frames: string[] }
 interface AnimDraft { id?: string; name: string; fps: number; frames: string[]; createdAt?: number }
-interface TokDraft { id?: string; name: string; clips: Record<ClipKey, ClipDraft>; createdAt?: number }
+interface TokDraft { id?: string; name: string; size: number; clips: Record<ClipKey, ClipDraft>; createdAt?: number }
 
 const emptyClips = (): Record<ClipKey, ClipDraft> => ({
   idle: { fps: 6, frames: [] },
@@ -53,6 +71,8 @@ const emptyClips = (): Record<ClipKey, ClipDraft> => ({
   left: { fps: 6, frames: [] },
   right: { fps: 6, frames: [] },
 });
+
+const DEF_TOKEN_SIZE = 64; // размер фишки на карте по умолчанию = оригинальный размер тайла (клетка)
 
 const checker = { background: 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 10px 10px' } as React.CSSProperties;
 
@@ -95,12 +115,13 @@ export default function TokenEditor() {
 
   /* ---------- пиксель-арт редактор ОБЫЧНОЙ фишки: создание И правка существующей ---------- */
   const fileRef = useRef<HTMLInputElement>(null);
-  const [editor, setEditor] = useState<{ grid: (string | null)[]; w: number; h: number; name: string; editId?: string; createdAt?: number } | null>(null);
+  const [editor, setEditor] = useState<{ grid: (string | null)[]; w: number; h: number; name: string; editId?: string; createdAt?: number; tokenSize?: number } | null>(null);
 
   /* ---------- черновики создателей ---------- */
   const [animDraft, setAnimDraft] = useState<AnimDraft | null>(null); // свободная анимация для карт
   const [tokDraft, setTokDraft] = useState<TokDraft | null>(null); // анимированная фишка
   const [activeClip, setActiveClip] = useState<ClipKey>('idle'); // клип фишки, куда падают кадры
+  const [mirrorMode, setMirrorMode] = useState(false); // ЗЕРКАЛО: следующий клик по тайлу добавит отражённый кадр
 
   /* ---------- нарезка тайлов (общий экстрактор из tilecut.ts) ---------- */
   const folderRef = useRef<HTMLInputElement>(null);
@@ -268,21 +289,23 @@ export default function TokenEditor() {
 
   /* ---------- клик по тайлу левой панели = ДОБАВИТЬ КАДР в открытый черновик ---------- */
   const onTileClick = (t: TileImg) => {
-    if (animDraft) {
-      void shrinkFrame(t.dataUrl).then((url) => {
+    const add = async () => {
+      let src = t.dataUrl;
+      if (mirrorMode) src = await flipDataUrl(src); // ЗЕРКАЛО по горизонтали
+      const url = await shrinkFrame(src);
+      if (animDraft) {
         setAnimDraft((d) => (d ? { ...d, frames: [...d.frames, url] } : d));
         sfx.coin();
-      });
-      return;
-    }
-    if (tokDraft) {
-      void shrinkFrame(t.dataUrl).then((url) => {
+        return;
+      }
+      if (tokDraft) {
         setTokDraft((d) => (d ? { ...d, clips: { ...d.clips, [activeClip]: { ...d.clips[activeClip], frames: [...d.clips[activeClip].frames, url] } } } : d));
         sfx.coin();
-      });
-      return;
-    }
-    toast('Сначала откройте «Новая анимация» или «Новая анимированная фишка» — тайлы станут кадрами', 'info');
+        return;
+      }
+      toast('Сначала откройте «Новая анимация» или «Новая анимированная фишка» — тайлы станут кадрами', 'info');
+    };
+    void add();
   };
 
   /* ---------- сохранение/удаление сущностей ---------- */
@@ -324,6 +347,7 @@ export default function TokenEditor() {
       dataUrl: tokDraft.clips.idle.frames[0], // превью = первый кадр idle
       createdAt: tokDraft.createdAt ?? Date.now(),
       anim,
+      size: Math.max(16, Math.min(320, tokDraft.size)),
     };
     await idbPut('tokens', t.id, t);
     await refresh();
@@ -340,7 +364,7 @@ export default function TokenEditor() {
 
   /* ---------- обычные фишки: пиксель-арт / PNG / правка ---------- */
   const newBlank = (size: number) => {
-    setEditor({ grid: emptyGrid(size, size), w: size, h: size, name: 'ФИШКА' });
+    setEditor({ grid: emptyGrid(size, size), w: size, h: size, name: 'ФИШКА', tokenSize: DEF_TOKEN_SIZE });
     sfx.click();
   };
 
@@ -357,6 +381,7 @@ export default function TokenEditor() {
         w: Math.min(img.width, size),
         h: Math.min(img.height, size),
         name: f.name.replace(/\.[^.]+$/, '').slice(0, 16).toUpperCase(),
+        tokenSize: DEF_TOKEN_SIZE,
       });
       sfx.coin();
       toast('Картинка загружена в редактор — прозрачность сохранена, дорисуйте детали', 'ok');
@@ -369,7 +394,7 @@ export default function TokenEditor() {
     img.onload = () => {
       const size = SIZES.find((s) => s >= Math.max(img.width, img.height)) ?? 32;
       const grid = imageToGrid(img, Math.min(img.width, size), Math.min(img.height, size));
-      setEditor({ grid, w: Math.min(img.width, size), h: Math.min(img.height, size), name: t.name, editId: t.id, createdAt: t.createdAt });
+      setEditor({ grid, w: Math.min(img.width, size), h: Math.min(img.height, size), name: t.name, editId: t.id, createdAt: t.createdAt, tokenSize: t.size ?? DEF_TOKEN_SIZE });
       sfx.hover();
     };
     img.src = t.dataUrl;
@@ -384,6 +409,7 @@ export default function TokenEditor() {
       name: editor.name.trim() || 'ФИШКА',
       dataUrl: gridToDataUrl(editor.grid, editor.w, editor.h, 4),
       createdAt: editor.createdAt ?? Date.now(),
+      size: Math.max(16, Math.min(320, editor.tokenSize ?? DEF_TOKEN_SIZE)),
     };
     await idbPut('tokens', t.id, t);
     await refresh();
@@ -410,7 +436,7 @@ export default function TokenEditor() {
             </>
           )}
           {tab === 'anims' && <PxBtn color="sky" onClick={() => { setAnimDraft({ name: '', fps: 6, frames: [] }); sfx.click(); }}>{Ic.plus(14)} Новая анимация</PxBtn>}
-          {tab === 'atokens' && <PxBtn color="sky" onClick={() => { setTokDraft({ name: '', clips: emptyClips() }); setActiveClip('idle'); sfx.click(); }}>{Ic.plus(14)} Новая анимированная фишка</PxBtn>}
+          {tab === 'atokens' && <PxBtn color="sky" onClick={() => { setTokDraft({ name: '', size: DEF_TOKEN_SIZE, clips: emptyClips() }); setActiveClip('idle'); sfx.click(); }}>{Ic.plus(14)} Новая анимированная фишка</PxBtn>}
         </div>
       </div>
 
@@ -426,6 +452,11 @@ export default function TokenEditor() {
               <GhostBtn small className="flex-1" onClick={() => folderRef.current?.click()}>{Ic.upload(12)} Папка</GhostBtn>
               <GhostBtn small className="flex-1" onClick={() => extRef.current?.click()}>✂ Нарезать</GhostBtn>
             </div>
+            <button
+              onClick={() => { setMirrorMode((v) => !v); sfx.hover(); }}
+              title="ЗЕРКАЛО по горизонтали: пока включено, каждый клик по тайлу добавляет ОТРАЖЁННУЮ копию кадра — для тайлов, нарисованных только в одну сторону"
+              className={`w-full py-1 mb-2 border-2 font-display text-[9px] uppercase cursor-pointer ${mirrorMode ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}
+            >⇋ Зеркало кадров: {mirrorMode ? 'ВКЛ' : 'ВЫКЛ'}</button>
             {(animGroups ?? []).map((g) => {
               const inG = g.tids.map((tid) => tileById.get(tid)).filter(Boolean) as TileImg[];
               const tag = g.kind === 'extract' ? '✂' : g.kind === 'folder' ? '›' : '+';
@@ -517,10 +548,19 @@ export default function TokenEditor() {
                 <span className="font-display uppercase text-paper text-sm">Анимированная фишка</span>
               </div>
               <div className="pixel-panel pixel-corners p-4 space-y-3">
-                <Field label="Название">
-                  <input className="field-in w-full px-3 py-2 text-sm" maxLength={20} value={tokDraft.name} onChange={(e) => setTokDraft({ ...tokDraft, name: e.target.value.toUpperCase() })} placeholder="ГЕРОЙ" />
-                </Field>
-                <p className="text-[11px] text-gold leading-tight">Пять клипов: IDLE — фишка стоит на месте (обязателен), и четыре направления движения. Выберите клип (клик по его плашке), затем кликайте тайлы в ЛЕВОЙ панели — кадры встанут по порядку. Нет кадров у направления — при движении играет IDLE.</p>
+              <div className="flex items-end gap-3 flex-wrap">
+                <div className="flex-1 min-w-[180px]">
+                  <Field label="Название">
+                    <input className="field-in w-full px-3 py-2 text-sm" maxLength={20} value={tokDraft.name} onChange={(e) => setTokDraft({ ...tokDraft, name: e.target.value.toUpperCase() })} placeholder="ГЕРОЙ" />
+                  </Field>
+                </div>
+                <div>
+                  <span className="tick-label block mb-1.5">Размер на карте</span>
+                  <Stepper value={tokDraft.size} onChange={(v) => setTokDraft({ ...tokDraft, size: v })} min={16} max={320} step={2} suffix=" px" />
+                </div>
+              </div>
+              <p className="text-[11px] text-gold leading-tight">Размер — это сколько фишка занимает на поле в пикселях по большей стороне. По умолчанию 64 — ОРИГИНАЛЬНЫЙ размер тайла (клетки). Клетки на карте можно укрупнить под большие фишки.</p>
+              <p className="text-[11px] text-gold leading-tight">Пять клипов: IDLE — фишка стоит на месте (обязателен), и четыре направления движения. Выберите клип (клик по его плашке), затем кликайте тайлы в ЛЕВОЙ панели — кадры встанут по порядку. Нет кадров у направления — при движении играет IDLE.</p>
                 {CLIP_META.map((cm) => {
                   const c = tokDraft.clips[cm.key];
                   const on = activeClip === cm.key;
@@ -595,7 +635,7 @@ export default function TokenEditor() {
               {tab === 'atokens' && (
                 <div>
                   <p className="text-[12px] text-dim mb-3 max-w-2xl">
-                    Анимированная фишка — это пять клипов: IDLE (стоит) и движения вверх/вниз/влево/вправо. Отметьте её в редакторе карты («Фишки партии») — после жеребьёвки игроки увидят её в списке и игра будет проигрывать кадры походки. Чтобы фишка шла без прыжков, включите в карте ход «Плавно».
+                    Анимированная фишка — это пять клипов: IDLE (стоит) и движения вверх/вниз/влево/вправо. Отметьте её в редакторе карты («Фишки партии») — после жеребьёвки игроки увидят её в списке и игра будет проигрывать кадры походки. Чтобы фишка шла без прыжков, включите в карте ход «Плавно». Размер фишки на поле задаётся при создании (по умолчанию — как тайл).
                   </p>
                   <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
                     {animToks.map((t) => (
@@ -608,7 +648,7 @@ export default function TokenEditor() {
                         <div className="flex justify-center gap-2 mt-2">
                           <GhostBtn small onClick={() => {
                             const a = JSON.parse(JSON.stringify(t.anim)) as TokenAnim;
-                            setTokDraft({ id: t.id, name: t.name, createdAt: t.createdAt, clips: { idle: a.idle, up: a.up ?? { fps: 6, frames: [] }, down: a.down ?? { fps: 6, frames: [] }, left: a.left ?? { fps: 6, frames: [] }, right: a.right ?? { fps: 6, frames: [] } } });
+                            setTokDraft({ id: t.id, name: t.name, createdAt: t.createdAt, size: t.size ?? DEF_TOKEN_SIZE, clips: { idle: a.idle, up: a.up ?? { fps: 6, frames: [] }, down: a.down ?? { fps: 6, frames: [] }, left: a.left ?? { fps: 6, frames: [] }, right: a.right ?? { fps: 6, frames: [] } } });
                             setActiveClip('idle');
                             sfx.hover();
                           }} className="!px-2">Изменить</GhostBtn>
@@ -719,6 +759,10 @@ export default function TokenEditor() {
                 </Field>
               </div>
               <div>
+                <span className="tick-label block mb-1.5">Размер на карте</span>
+                <Stepper value={editor.tokenSize ?? 64} onChange={(v) => setEditor({ ...editor, tokenSize: v })} min={16} max={320} step={2} suffix=" px" />
+              </div>
+              <div>
                 <span className="tick-label block mb-1.5">Новый холст</span>
                 <div className="flex gap-1.5">
                   {SIZES.map((sz) => (
@@ -727,6 +771,7 @@ export default function TokenEditor() {
                 </div>
               </div>
             </div>
+            <p className="text-[11px] text-faint leading-tight">Размер на карте — сколько фишка занимает на поле (по умолчанию 64 = размер тайла). Картинка фишки впишется в этот размер целиком, пропорции сохранятся.</p>
             <PixelPaint grid={editor.grid} w={editor.w} h={editor.h} onChange={(g) => setEditor({ ...editor, grid: g })} />
             <div className="flex justify-end gap-2">
               <GhostBtn onClick={() => setEditor(null)}>Отмена</GhostBtn>

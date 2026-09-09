@@ -111,7 +111,7 @@ export default function GameScreen() {
   const viewRef = useRef({ x: 0, y: 0, zoom: 1 });
   const dispRef = useRef<Record<string, { x: number; y: number }>>({});
   const prevDispRef = useRef<Record<string, { x: number; y: number }>>({}); // позиция фишки в прошлом кадре — для направления анимации
-  const hopRef = useRef<Record<string, { queue: number[]; last: number; lastDir?: 'up' | 'down' | 'left' | 'right' }>>({});
+  const hopRef = useRef<Record<string, { queue: number[]; last: number; lastDir?: 'up' | 'down' | 'left' | 'right'; speed?: number }>>({});
   const arrivedRef = useRef(0);
   const holdStartRef = useRef(0);
   const shakeIntRef = useRef(0);
@@ -351,22 +351,52 @@ export default function GameScreen() {
           if (hop && hop.queue.length) {
             anyoneMoving = true;
             movingNow = true;
-            const nextIdx = hop.queue[0];
-            const tgt = cellCenter(m, nextIdx);
-            const dx = tgt.x - d.x, dy = tgt.y - d.y;
-            const dist = Math.hypot(dx, dy);
-            if (dist < 3) {
-              hop.queue.shift();
-              d.x = tgt.x; d.y = tgt.y;
-              sfx.step();
-              if (hop.queue.length === 0 && sess.moving && sess.moving.player === p.id && p.id === me && arrivedRef.current !== sess.moving.ts) {
-                arrivedRef.current = sess.moving.ts;
-                dispatch({ t: 'arrived', id: me });
+            if (smooth) {
+              /* ПЛАВНЫЙ ХОД БЕЗ ОСТАНОВОК: фишка идёт с ПОСТОЯННОЙ скоростью по всему
+                 пути сразу — не тормозит у каждой клетки и не «отсчитывает» их;
+                 излишек шага переносится на следующий отрезок, повороты пути = смена направления */
+              if (hop.speed === undefined) {
+                const t0 = cellCenter(m, hop.queue[0]);
+                const seg0 = Math.hypot(t0.x - d.x, t0.y - d.y);
+                hop.speed = Math.min(9, Math.max(2.8, seg0 * 0.085)); // px за кадр 60fps
+              }
+              let remain = hop.speed * dt;
+              while (remain > 0 && hop.queue.length) {
+                const tgt = cellCenter(m, hop.queue[0]);
+                const dx = tgt.x - d.x, dy = tgt.y - d.y;
+                const dist = Math.hypot(dx, dy);
+                if (dist <= remain) {
+                  d.x = tgt.x; d.y = tgt.y; remain -= dist;
+                  hop.queue.shift();
+                  sfx.step();
+                  if (hop.queue.length === 0 && sess.moving && sess.moving.player === p.id && p.id === me && arrivedRef.current !== sess.moving.ts) {
+                    arrivedRef.current = sess.moving.ts;
+                    dispatch({ t: 'arrived', id: me });
+                  }
+                } else {
+                  d.x += (dx / dist) * remain;
+                  d.y += (dy / dist) * remain;
+                  remain = 0;
+                }
               }
             } else {
-              d.x += dx * Math.min(1, 0.085 * dt); // плавный шаг, не зависит от FPS
-              d.y += dy * Math.min(1, 0.085 * dt);
-              lift = smooth ? 0 : -Math.abs(Math.sin(t / 110)) * 7; // подскок только в прыжковом режиме
+              const nextIdx = hop.queue[0];
+              const tgt = cellCenter(m, nextIdx);
+              const dx = tgt.x - d.x, dy = tgt.y - d.y;
+              const dist = Math.hypot(dx, dy);
+              if (dist < 3) {
+                hop.queue.shift();
+                d.x = tgt.x; d.y = tgt.y;
+                sfx.step();
+                if (hop.queue.length === 0 && sess.moving && sess.moving.player === p.id && p.id === me && arrivedRef.current !== sess.moving.ts) {
+                  arrivedRef.current = sess.moving.ts;
+                  dispatch({ t: 'arrived', id: me });
+                }
+              } else {
+                d.x += dx * Math.min(1, 0.085 * dt); // плавный шаг, не зависит от FPS
+                d.y += dy * Math.min(1, 0.085 * dt);
+                lift = -Math.abs(Math.sin(t / 110)) * 7; // подскок — только в прыжковом режиме
+              }
             }
           } else if (!mvActive) {
             // тянем к авторитетной клетке только когда это движение не «висит» в ожидании
@@ -390,6 +420,7 @@ export default function GameScreen() {
           if (dir) { if (hop) hop.lastDir = dir; }
           prevDispRef.current[p.id] = { x: d.x, y: d.y };
           const tokDef = p.tokenKey ? mapToks.find((x) => x.id === p.tokenKey) : null;
+          const tokSize = tokDef ? (tokDef.size ?? (tokDef.anim ? 64 : 34)) : (p.tokenSize ?? 34);
           return {
             x: d.x, y: d.y + lift, color: PLAYER_COLORS[p.color],
             active: act?.id === p.id, alive: p.alive, label: p.name,
@@ -397,6 +428,7 @@ export default function GameScreen() {
             anim: tokDef?.anim,
             dir,
             phase: pi * 0.53,
+            size: tokSize,
           };
         });
 
