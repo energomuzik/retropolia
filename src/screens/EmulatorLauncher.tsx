@@ -50,6 +50,24 @@ export default function EmulatorLauncher() {
   const [emptyFolders, setEmptyFolders] = useState<string[]>(loadEmptyRomFolders);
   const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({});
 
+  /* ---------- полный экран эмулятора — как в задании в игре ----------
+     Кнопка «Во весь экран» рядом с эмулятором разворачивает ТОЛЬКО экран игры,
+     выход — Esc (или кнопка «Свернуть» до ухода в полный экран). */
+  const [isFs, setIsFs] = useState(false);
+  const fsWrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const fn = () => setIsFs(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', fn);
+    return () => document.removeEventListener('fullscreenchange', fn);
+  }, []);
+  const toggleFs = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => undefined);
+    } else {
+      fsWrapRef.current?.requestFullscreen().catch(() => toast('Браузер запретил полный экран', 'err'));
+    }
+  };
+
   const setEmptyFoldersSaved = (updater: (prev: string[]) => string[]) => {
     setEmptyFolders((prev) => {
       const next = updater(prev);
@@ -429,18 +447,26 @@ export default function EmulatorLauncher() {
                   </div>
                 ) : (
                   <div className="max-w-[640px] mx-auto">
-                    <SegaBox
-                      key={runKey}
-                      romData={romBuf}
-                      ext={isNes ? 'nes' : segExt(rom?.fileName ?? '')}
-                      core={isNes ? 'nes' : undefined}
-                      remapSpec={remapSpec}
-                      initialState={(runState as string | null) ?? null}
-                      onApi={(a: SegaApi) => { ejsApiRef.current = a; }}
-                    />
+                    <div ref={fsWrapRef} className={`relative ${isFs ? 'bg-[#05070f] h-full w-full flex items-center justify-center p-4' : ''}`}>
+                      <div style={isFs ? { width: isNes ? 'min(92vw, calc(88vh * 1.0667))' : 'min(92vw, calc(88vh * 1.3333))' } : undefined}>
+                        <SegaBox
+                          key={runKey}
+                          romData={romBuf}
+                          ext={isNes ? 'nes' : segExt(rom?.fileName ?? '')}
+                          core={isNes ? 'nes' : undefined}
+                          remapSpec={remapSpec}
+                          initialState={(runState as string | null) ?? null}
+                          onApi={(a: SegaApi) => { ejsApiRef.current = a; }}
+                        />
+                      </div>
+                      {isFs && (
+                        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 tick-label text-faint opacity-70 pointer-events-none">ESC — выход из полного экрана</div>
+                      )}
+                    </div>
                     <div className="flex gap-2 mt-3 flex-wrap">
                       <PxBtn color="gold" onClick={() => void createSave()}>{Ic.save(14)} Сохранить состояние</PxBtn>
                       <GhostBtn onClick={() => { setControlsOpen(true); sfx.click(); }}>{Ic.gear(13)} Управление</GhostBtn>
+                      <GhostBtn onClick={toggleFs} title="Развернуть экран игры на весь монитор (выход — Esc)">{isFs ? Ic.cross(12) : Ic.map(12)} {isFs ? 'Свернуть' : 'Во весь экран'}</GhostBtn>
                       <GhostBtn onClick={() => resetEmu()}>{Ic.rotate(13)} Сброс (с начала)</GhostBtn>
                       <GhostBtn onClick={() => { setRunning(false); launchedRomRef.current = null; }}>{Ic.pause(13)} Выключить</GhostBtn>
                     </div>

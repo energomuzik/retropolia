@@ -639,6 +639,53 @@ export default function MapEditor() {
     dirtyRef.current = true;
   };
 
+  /* ---------- УДАЛЕНИЕ ТАЙЛОВОГО СЛОЯ (крестик в спойлере «Слои карты») ----------
+     Слой уходит ВМЕСТЕ со всеми тайлами на нём; слои выше сдвигаются вниз на один,
+     фон и «Ячейки и стрелки» не трогаем. Подчиняется режиму удаления (сразу/окно/
+     удержание) — крестик это HoldDeleteButton, и Ctrl+Z возвращает слой и тайлы.
+     Минимум остаётся один тайловый слой: на последнем крестик просто не рисуем. */
+  const deleteLayerNow = (layerIdx: number) => {
+    const m = mapRef.current;
+    if (!m) return;
+    const before = Math.max(1, m.tileLayers ?? 2);
+    if (before <= 1 || layerIdx < 0 || layerIdx >= before) return;
+    const removed = (m.stamps ?? [])
+      .map((s, idx) => ({ s, idx }))
+      .filter((x) => (x.s.layer ?? 0) === layerIdx);
+    const selSt = selStamp ? (m.stamps ?? []).find((s) => s.id === selStamp) : null;
+    rememberDeleted({
+      label: `слой ${layerIdx + 1}${removed.length ? ` (тайлов: ${removed.length})` : ' (пустой)'}`,
+      restore: async () => {
+        // сдвинутым слоям возвращаем старые номера, удалённые тайлы — на прежние места
+        setMap((mm) => {
+          if (!mm || mm.id !== m.id) return mm;
+          const stamps = (mm.stamps ?? []).map((s) => ((s.layer ?? 0) >= layerIdx ? { ...s, layer: (s.layer ?? 0) + 1 } : s));
+          for (const { s, idx } of removed) stamps.splice(Math.min(idx, stamps.length), 0, s);
+          return { ...mm, tileLayers: before, stamps };
+        });
+        const cur = await idbGet<GameMap>('maps', m.id);
+        if (cur) {
+          const stamps = (cur.stamps ?? []).map((s) => ((s.layer ?? 0) >= layerIdx ? { ...s, layer: (s.layer ?? 0) + 1 } : s));
+          for (const { s, idx } of removed) stamps.splice(Math.min(idx, stamps.length), 0, s);
+          await idbPut('maps', m.id, { ...cur, tileLayers: before, stamps, updatedAt: Date.now() });
+          await useApp.getState().refresh();
+        }
+        setActiveLayer((a) => Math.max(0, Math.min(a, before - 1)));
+      },
+    });
+    if (selSt && (selSt.layer ?? 0) === layerIdx) setSelStamp(null); // выбранный тайл уходит вместе со слоем
+    setMap((mm) => {
+      if (!mm) return mm;
+      const stamps = (mm.stamps ?? [])
+        .filter((s) => (s.layer ?? 0) !== layerIdx)
+        .map((s) => ((s.layer ?? 0) > layerIdx ? { ...s, layer: (s.layer ?? 0) - 1 } : s));
+      return { ...mm, tileLayers: before - 1, stamps };
+    });
+    setActiveLayer((a) => Math.max(0, Math.min(a > layerIdx ? a - 1 : a, before - 2)));
+    dirtyRef.current = true;
+    toast(`Слой ${layerIdx + 1} удалён${removed.length ? ` (тайлов: ${removed.length})` : ''} — Ctrl+Z вернёт`, 'err');
+  };
+
   const deleteCell = (idx: number) => {
     const m = mapRef.current;
     const cell = m?.cells[idx];
@@ -1304,21 +1351,35 @@ export default function MapEditor() {
                         <span className="font-display text-[10px] uppercase text-dim flex-1 min-w-0 truncate">Фон</span>
                         <span className="tick-label text-faint">{map.bg ? 'есть' : 'нет'} · низ</span>
                       </div>
-                      {/* тайловые слои: клик — выбрать для рисования */}
+                      {/* тайловые слои: клик — выбрать для рисования, крестик — удалить слой (кроме последнего) */}
                       {Array.from({ length: map.tileLayers ?? 2 }, (_, i) => i).map((i) => {
                         const cnt = (map.stamps ?? []).filter((s) => (s.layer ?? 0) === i).length;
                         const active = activeLayer === i;
+                        const canDel = (map.tileLayers ?? 2) > 1; // минимум один тайловый слой остаётся всегда
                         return (
-                          <button
+                          <div
                             key={i}
-                            onClick={() => { setActiveLayer(i); sfx.hover(); }}
-                            className={`w-full flex items-center gap-1.5 border-2 px-2 py-1.5 cursor-pointer transition-colors ${active ? 'border-gold bg-gold/10' : 'border-edge bg-panel hover:border-edge2'}`}
-                            title={active ? 'Активный слой — новые тайлы встанут сюда' : `Рисовать на слое ${i + 1}`}
+                            className={`w-full flex items-center gap-0.5 border-2 px-2 py-1.5 transition-colors ${active ? 'border-gold bg-gold/10' : 'border-edge bg-panel hover:border-edge2'}`}
                           >
-                            <span className={`text-[10px] shrink-0 ${active ? 'text-gold' : 'text-faint'}`}>{active ? '✏' : '·'}</span>
-                            <span className={`font-display text-[10px] uppercase flex-1 min-w-0 text-left truncate ${active ? 'text-gold' : 'text-dim'}`}>Слой {i + 1}</span>
-                            <span className="tick-label text-faint">{cnt} шт.</span>
-                          </button>
+                            <button
+                              onClick={() => { setActiveLayer(i); sfx.hover(); }}
+                              className="flex-1 min-w-0 flex items-center gap-1.5 cursor-pointer text-left"
+                              title={active ? 'Активный слой — новые тайлы встанут сюда' : `Рисовать на слое ${i + 1}`}
+                            >
+                              <span className={`text-[10px] shrink-0 ${active ? 'text-gold' : 'text-faint'}`}>{active ? '✏' : '·'}</span>
+                              <span className={`font-display text-[10px] uppercase flex-1 min-w-0 text-left truncate ${active ? 'text-gold' : 'text-dim'}`}>Слой {i + 1}</span>
+                              <span className="tick-label text-faint">{cnt} шт.</span>
+                            </button>
+                            {canDel && (
+                              <HoldDeleteButton
+                                onFire={() => deleteLayerNow(i)}
+                                label={`слой ${i + 1}${cnt ? ` (тайлов: ${cnt})` : ' (пустой)'}`}
+                                ariaLabel="Удалить слой"
+                                title="Удалить слой вместе с тайлами на нём"
+                                className="text-faint hover:text-coral cursor-pointer shrink-0 px-0.5"
+                              >{Ic.cross(10)}</HoldDeleteButton>
+                            )}
+                          </div>
                         );
                       })}
                       {/* ячейки и стрелки — всегда самый верх */}
@@ -1328,7 +1389,7 @@ export default function MapEditor() {
                         <span className="tick-label text-faint">всегда верх</span>
                       </div>
                       <div className="flex items-center justify-between pt-0.5">
-                        <p className="text-[10px] text-faint leading-tight flex-1 min-w-0">Активный слой помечен ✏ — новые тайлы встанут на него. «Слой ±» в панели тайла переносит его между слоями.</p>
+                        <p className="text-[10px] text-faint leading-tight flex-1 min-w-0">Активный слой помечен ✏ — новые тайлы встанут на него. «Слой ±» в панели тайла переносит его между слоями. Крестик справа удаляет слой вместе с его тайлами (последний слой не удаляется) — Ctrl+Z вернёт.</p>
                         {(map.tileLayers ?? 2) < 6 && (
                           <GhostBtn small className="ml-2 shrink-0" onClick={() => {
                             const n = (map.tileLayers ?? 2) + 1;
