@@ -2,8 +2,9 @@ import { useRef, useState } from 'react';
 import { useApp } from '../store';
 import { Field, GhostBtn, Ic, Panel, PxBtn, Stepper, Toggle } from '../ui';
 import { fileToDataUrl } from '../assets';
-import { idbPut, uid } from '../db';
-import type { GameMap, QuizDef, QuizType } from '../types';
+import { idbGet, idbPut, uid } from '../db';
+import type { GameMap, QuizDef, QuizOrderItem, QuizType } from '../types';
+import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import { sfx } from '../sound';
 
 const TYPE_META: { key: QuizType; label: string; hint: string; color: string }[] = [
@@ -11,7 +12,10 @@ const TYPE_META: { key: QuizType; label: string; hint: string; color: string }[]
   { key: 'text', label: 'Свой ответ', hint: 'вопрос + несколько верных написаний', color: 'var(--color-teal)' },
   { key: 'music', label: 'Музыкальный', hint: 'мелодия + вопрос + 4 варианта', color: 'var(--color-coral)' },
   { key: 'mystery', label: 'Кот в мешке', hint: 'вопрос передаётся случайному игроку', color: 'var(--color-sky)' },
+  { key: 'order', label: 'По порядку', hint: '4 пункта с текстом и картинкой — игрок расставит их сверху вниз', color: 'var(--color-magma)' },
 ];
+
+const emptyItems = (): QuizOrderItem[] => [{ text: '' }, { text: '' }, { text: '' }, { text: '' }];
 
 export default function QuizEditor() {
   const { maps, setScreen, refresh, toast } = useApp();
@@ -61,8 +65,40 @@ export default function QuizEditor() {
 
   const setType = (t: QuizType) => {
     if (!draft) return;
-    setDraft({ ...draft, type: t, options: draft.options ?? ['', '', '', ''], answers: draft.answers ?? [] });
+    setDraft({
+      ...draft, type: t,
+      options: draft.options ?? ['', '', '', ''],
+      answers: draft.answers ?? [],
+      items: draft.items ?? emptyItems(),
+    });
     sfx.hover();
+  };
+
+  /* ---------- квиз «По порядку»: пункты с текстом и картинкой ---------- */
+  const setItem = (i: number, patch: Partial<QuizOrderItem>) => {
+    if (!draft) return;
+    const items = [...(draft.items ?? emptyItems())];
+    items[i] = { ...items[i], ...patch };
+    setDraft({ ...draft, items });
+  };
+
+  const moveItem = (i: number, dir: -1 | 1) => {
+    if (!draft) return;
+    const items = [...(draft.items ?? emptyItems())];
+    const j = i + dir;
+    if (j < 0 || j >= items.length) return;
+    [items[i], items[j]] = [items[j], items[i]];
+    setDraft({ ...draft, items });
+    sfx.hover();
+  };
+
+  const onItemImg = async (i: number, files: FileList | null) => {
+    const f = files?.[0];
+    if (!f || !f.type.startsWith('image/')) return;
+    if (f.size > 1.5 * 1024 * 1024) { toast('Картинка слишком большая (до 1.5 МБ)', 'err'); return; }
+    const url = await fileToDataUrl(f);
+    setItem(i, { image: url });
+    sfx.coin();
   };
 
   const onImg = async (files: FileList | null) => {
@@ -93,6 +129,9 @@ export default function QuizEditor() {
     if ((draft.type === 'text' || draft.type === 'music') && (draft.answers ?? []).filter((a) => a.trim()).length === 0) {
       sfx.fail(); toast('Добавьте хотя бы один верный ответ', 'err'); return;
     }
+    if (draft.type === 'order' && (draft.items ?? []).filter((it) => it.text.trim()).length < 4) {
+      sfx.fail(); toast('Заполните текст всех 4 пунктов (картинка — по желанию)', 'err'); return;
+    }
     if (draft.type === 'music' && !draft.audioId) { sfx.fail(); toast('Загрузите мелодию', 'err'); return; }
     const clean: QuizDef = { ...draft, question: draft.question.trim() };
     const nextMap = JSON.parse(JSON.stringify(map)) as GameMap;
@@ -110,11 +149,21 @@ export default function QuizEditor() {
 
   const delQuiz = async (id: string) => {
     if (!map) return;
+    const victim = (map.quizzes ?? []).find((q) => q.id === id);
+    const patch = { quizzes: map.quizzes ?? [] };
+    rememberDeleted({
+      label: `квиз «${(victim?.question ?? id).slice(0, 28)}»`,
+      restore: async () => {
+        setMap((m) => (m && m.id === map.id ? { ...m, ...patch } : m)); // если эта карта всё ещё открыта
+        const cur = await idbGet<GameMap>('maps', map.id);
+        if (cur) { await idbPut('maps', map.id, { ...cur, ...patch, updatedAt: Date.now() }); await useApp.getState().refresh(); }
+      },
+    });
     const nextMap = JSON.parse(JSON.stringify(map)) as GameMap;
     nextMap.quizzes = (nextMap.quizzes ?? []).filter((q) => q.id !== id);
     setMap(nextMap);
     await persist(nextMap);
-    toast('Квиз удалён', 'err');
+    toast('Квиз удалён (Ctrl+Z вернёт)', 'err');
   };
 
   const typeMeta = (t: QuizType) => TYPE_META.find((x) => x.key === t)!;
@@ -191,13 +240,13 @@ export default function QuizEditor() {
                   <div className="min-w-0 flex-1">
                     <div className="font-display text-[12px] uppercase text-paper truncate">{q.question}</div>
                     <div className="tick-label text-faint mt-0.5">
-                      ⏱ {q.timeLimit} сек · {q.type === 'text' ? `${(q.answers ?? []).length} отв.` : `верный: ${(q.options ?? [])[q.correct ?? 0] ?? '—'}`}
+                      ⏱ {q.timeLimit} сек · {q.type === 'text' ? `${(q.answers ?? []).length} отв.` : q.type === 'order' ? 'собери порядок' : `верный: ${(q.options ?? [])[q.correct ?? 0] ?? '—'}`}
                       {q.continueOnCorrect && <span className="text-teal"> · марафон</span>}
                       {q.noPenalty && <span className="text-sky"> · без штрафа</span>}
                     </div>
                   </div>
                   <button onClick={() => editQuiz(q)} className="text-faint hover:text-sky cursor-pointer" aria-label="Редактировать">{Ic.pen(15)}</button>
-                  <button onClick={() => void delQuiz(q.id)} className="text-faint hover:text-coral cursor-pointer" aria-label="Удалить">{Ic.trash(15)}</button>
+                  <HoldDeleteButton onFire={() => void delQuiz(q.id)} label={`квиз «${q.question.slice(0, 28)}»`} ariaLabel="Удалить квиз">{Ic.trash(15)}</HoldDeleteButton>
                 </div>
               ))}
               {quizzes.length === 0 && (
@@ -282,6 +331,34 @@ export default function QuizEditor() {
                       onChange={(e) => setDraft({ ...draft, answers: e.target.value.split('\n') })}
                       placeholder={'Гейтмен\nGate Man\nGateMan'}
                     />
+                  </Field>
+                ) : draft.type === 'order' ? (
+                  <Field label="Пункты в ПРАВИЛЬНОМ порядке (сверху вниз — так и должен расставить игрок)">
+                    <div className="space-y-2">
+                      {(draft.items ?? emptyItems()).map((it, i) => {
+                        const last = (draft.items ?? emptyItems()).length - 1;
+                        return (
+                          <div key={i} className="flex items-center gap-2">
+                            <span className="w-8 h-8 shrink-0 border-2 border-gold text-gold font-display text-[11px] flex items-center justify-center">{i + 1}</span>
+                            <label className="relative shrink-0 cursor-pointer" title="Картинка пункта (необязательно)">
+                              {it.image
+                                ? <img src={it.image} alt="" className="w-10 h-10 object-cover border-2 border-edge" />
+                                : <span className="w-10 h-10 border-2 border-dashed border-edge text-faint flex items-center justify-center">{Ic.upload(12)}</span>}
+                              <input type="file" accept="image/*" className="hidden" onChange={(e) => { void onItemImg(i, e.target.files); e.target.value = ''; }} />
+                            </label>
+                            <input className="field-in flex-1 min-w-0 px-3 py-2 text-sm" value={it.text} maxLength={80} onChange={(e) => setItem(i, { text: e.target.value })} placeholder={`Пункт ${i + 1}`} />
+                            {it.image && (
+                              <button onClick={() => setItem(i, { image: undefined })} className="text-faint hover:text-coral cursor-pointer shrink-0" aria-label="Убрать картинку">{Ic.trash(13)}</button>
+                            )}
+                            <div className="flex flex-col shrink-0">
+                              <button onClick={() => moveItem(i, -1)} disabled={i === 0} aria-label="Выше" title="Поднять пункт" className={`leading-none px-1 text-[10px] ${i === 0 ? 'text-edge' : 'text-dim hover:text-gold cursor-pointer'}`}>▲</button>
+                              <button onClick={() => moveItem(i, 1)} disabled={i === last} aria-label="Ниже" title="Опустить пункт" className={`leading-none px-1 text-[10px] ${i === last ? 'text-edge' : 'text-dim hover:text-gold cursor-pointer'}`}>▼</button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[10px] text-gold leading-tight mt-2">Порядок здесь = верный ответ. Игрок получит пункты ПЕРЕМЕШАННЫМИ и должен перетащить их мышью (или стрелками) в этот порядок, затем нажать «Подтвердить». Картинка пункта — необязательна (до 1.5 МБ).</p>
                   </Field>
                 ) : (
                   <Field label="Варианты ответа (отметьте верный)">

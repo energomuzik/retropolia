@@ -53,7 +53,13 @@ export interface ArrowStyle {
   over?: boolean; // стрелка ЗАХОДИТ на ячейку (по умолчанию да); нет — останавливается У КРАЯ ячейки, не налезая на неё
 }
 
-export type QuizType = 'choice' | 'text' | 'music' | 'mystery';
+export type QuizType = 'choice' | 'text' | 'music' | 'mystery' | 'order';
+
+/* Пункт квиза «расставь по порядку»: в items лежат пункты в ПРАВИЛЬНОМ порядке (сверху вниз) */
+export interface QuizOrderItem {
+  text: string;
+  image?: string; // dataUrl картинки пункта (необязательно)
+}
 
 export interface QuizDef {
   id: string;
@@ -63,6 +69,7 @@ export interface QuizDef {
   options?: string[]; // 4 варианта для choice/music/mystery
   correct?: number; // индекс правильного варианта
   answers?: string[]; // допустимые написания ответа (text)
+  items?: QuizOrderItem[]; // для order: 4 пункта в ПРАВИЛЬНОМ порядке сверху вниз; игрок расставляет их сам
   audioId?: string; // dataURL мелодии (music)
   timeLimit: number; // секунды на ответ
   continueOnCorrect?: boolean; // верный ответ не завершает квиз — остальные тоже отвечают
@@ -481,6 +488,7 @@ export interface GameOptions {
   relay: string; // свой сигнальный сервер «IP:порт» (пусто = облако 0.peerjs.com)
   relayHub: string; // игровой хаб (WebSocket): весь трафик через сервер; приоритетнее PeerJS
   turn: string; // TURN для жёсткого NAT: «user:pass@host:port», несколько — через запятую (пусто = только STUN)
+  delMode: 'instant' | 'confirm' | 'hold'; // защита от случайного удаления в редакторах: сразу / с окошком / долгим нажатием
 }
 
 export interface NetMsg {
@@ -490,7 +498,7 @@ export interface NetMsg {
   p?: unknown;
 }
 
-export const APP_VERSION = 20; // 20: движение не обрывается на скоростях ниже 1 (бюджет страховки хоста = длина пути / скорость карты), вкладка «Изменённые тайлы» вверху левой панели, удалённые фишки/анимации убираются из всех карт; старые партии не продолжаются
+export const APP_VERSION = 21; // 21: защита от случайного удаления (опция: сразу / с окошком / долгим нажатием), Ctrl+Z возвращает последнюю удалённую вещь, новый тип квиза «Расставь по порядку» (4 пункта с текстом и картинкой, перетаскивание); старые партии не продолжаются
 export const START_SEC = 60 * 60;
 export const START_TRIES = 60;
 export const SKIP_COST = 5;

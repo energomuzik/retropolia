@@ -6,6 +6,12 @@ import { STORES } from '../db';
 import { sfx } from '../sound';
 import { downloadHostBat } from '../host/hostPackage';
 
+const DEL_MODES: { key: 'instant' | 'confirm' | 'hold'; label: string; hint: string }[] = [
+  { key: 'instant', label: 'Сразу', hint: 'клик по крестику удаляет сразу, как раньше' },
+  { key: 'confirm', label: 'С окошком', hint: 'сначала окно-предупреждение (по умолчанию)' },
+  { key: 'hold', label: 'Долгое нажатие', hint: 'удалит, только если держать крестик ~1 секунду' },
+];
+
 export default function OptionsScreen() {
   const { options, setOptions, setScreen, toast, refresh } = useApp();
   const [wipe, setWipe] = useState(false);
@@ -142,6 +148,31 @@ export default function OptionsScreen() {
                 label="Номера ячеек на поле"
                 hint="Нумерация нужна карточкам-телепортам"
               />
+            </div>
+          </Panel>
+
+          <Panel title="Редакторы" icon={Ic.pen(16)} accent="var(--color-gold)" className="slide-up md:col-span-2">
+            <div className="p-4 space-y-3">
+              <div>
+                <span className="font-display text-[12px] uppercase text-paper">Удаление в редакторах</span>
+                <div className="text-[10px] text-faint mt-0.5 mb-2">Как работают крестики ✕ и урны 🗑 у тайлов, папок, фишек, анимаций и квизов</div>
+                <div className="grid sm:grid-cols-3 gap-2">
+                  {DEL_MODES.map((m) => (
+                    <button
+                      key={m.key}
+                      onClick={() => { setOptions({ delMode: m.key }); sfx.hover(); }}
+                      className={`text-left px-3 py-2 border-2 transition-colors cursor-pointer ${options.delMode === m.key ? 'border-gold bg-gold/10' : 'border-edge hover:border-edge2'}`}
+                    >
+                      <div className={`font-display text-[11px] uppercase ${options.delMode === m.key ? 'text-gold' : 'text-paper'}`}>{m.label}</div>
+                      <div className="text-[10px] text-dim mt-0.5 leading-snug">{m.hint}</div>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-faint mt-2 leading-relaxed">
+                  Случайно удалили не то? Нажмите Ctrl+Z — вернётся последняя удалённая вещь (на один шаг назад).
+                  Ластик в пиксель-редакторе работает как раньше — на него настройка не влияет.
+                </p>
+              </div>
             </div>
           </Panel>
 

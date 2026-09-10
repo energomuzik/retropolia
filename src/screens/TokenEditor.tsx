@@ -4,8 +4,9 @@ import { AnimPreview, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
 import PixelPaint, { emptyGrid, gridToDataUrl, imageToGrid } from '../PixelPaint';
 import { extractTilesFromImage } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
-import { idbAll, idbDel, idbPut, uid } from '../db';
+import { idbAll, idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimClip, AnimDef, GameMap, TokenAnim, TokenDef, TileGroup, TileImg } from '../types';
+import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import { sfx } from '../sound';
 
 const SIZES = [12, 16, 24, 32];
@@ -263,15 +264,47 @@ export default function TokenEditor() {
   };
 
   const delGroup = async (g: TileGroup) => {
-    const tset = new Set(g.tids);
+    const tiles = g.tids.map((tid) => tileById.get(tid)).filter(Boolean) as TileImg[];
+    rememberDeleted({
+      label: `папку «${g.name}»`,
+      restore: async () => {
+        for (const t of tiles) await idbPut('animTiles', t.id, JSON.parse(JSON.stringify(t)));
+        const cur = await idbGet<TileGroup>('animGroups', g.id);
+        if (cur) {
+          const tids = [...new Set([...cur.tids, ...g.tids])];
+          await idbPut('animGroups', cur.id, { ...cur, tids });
+        } else {
+          await idbPut('animGroups', g.id, JSON.parse(JSON.stringify(g)));
+        }
+        await refresh();
+      },
+    });
     for (const tid of g.tids) await idbDel('animTiles', tid);
     await idbDel('animGroups', g.id);
     await refresh();
     sfx.fail();
-    void tset;
   };
 
   const delTile = async (tid: string) => {
+    const tile = tileById.get(tid);
+    const groupsWith = animGroups.filter((g) => g.tids.includes(tid)).map((g) => ({ id: g.id, name: g.name, tids: [...g.tids] }));
+    rememberDeleted({
+      label: `тайл «${tile?.name ?? tid}»`,
+      restore: async () => {
+        if (tile) await idbPut('animTiles', tile.id, JSON.parse(JSON.stringify(tile)));
+        for (const g0 of groupsWith) {
+          const cur = await idbGet<TileGroup>('animGroups', g0.id);
+          if (cur) {
+            const tids = cur.tids.includes(tid) ? cur.tids : [...cur.tids, tid];
+            await idbPut('animGroups', cur.id, { ...cur, tids });
+          } else {
+            // группа исчезла — возвращаем её как была, с этим тайлом
+            await idbPut('animGroups', g0.id, { ...g0, collapsed: false });
+          }
+        }
+        await refresh();
+      },
+    });
     await idbDel('animTiles', tid);
     for (const g of animGroups) {
       if (g.tids.includes(tid)) await idbPut('animGroups', g.id, { ...g, tids: g.tids.filter((x) => x !== tid) });
@@ -383,35 +416,55 @@ export default function TokenEditor() {
   };
 
   /* УДАЛЁННАЯ фишка не должна оставаться вшитой в карты: чистим mapTokens всех карт,
-     иначе при запуске карты удалённую фишку всё ещё можно выбрать */
-  const purgeTokFromMaps = async (tokId: string) => {
+     иначе при запуске карты удалённую фишку всё ещё можно выбрать.
+     Возвращает снимки прежних списков — для отмены через Ctrl+Z */
+  const purgeTokFromMaps = async (tokId: string): Promise<Array<{ key: string; mapTokens: TokenDef[] }>> => {
     const all = await idbAll<GameMap>('maps');
+    const snapshots: Array<{ key: string; mapTokens: TokenDef[] }> = [];
     for (const { key, value: mp } of all) {
-      const next = (mp.mapTokens ?? []).filter((x) => x.id !== tokId);
-      if (next.length !== (mp.mapTokens ?? []).length) {
+      const cur = mp.mapTokens ?? [];
+      const next = cur.filter((x) => x.id !== tokId);
+      if (next.length !== cur.length) {
+        snapshots.push({ key, mapTokens: cur.map((x) => ({ ...x })) });
         await idbPut('maps', key, { ...mp, mapTokens: next, updatedAt: Date.now() });
       }
     }
+    return snapshots;
   };
 
   /* УДАЛЁННАЯ анимация: чистим animLib всех карт И снятые с карты анимации с этой ссылкой
-     (иначе в редакторе карт остаются битые записи, а анимация — «жива» внутри карты) */
-  const purgeAnimFromMaps = async (animId: string) => {
+     (иначе в редакторе карт остаются битые записи, а анимация — «жива» внутри карты).
+     Возвращает снимки прежних списков — для отмены через Ctrl+Z */
+  const purgeAnimFromMaps = async (animId: string): Promise<Array<{ key: string; animLib: unknown[]; anims: unknown[] }>> => {
     const all = await idbAll<GameMap>('maps');
+    const snapshots: Array<{ key: string; animLib: unknown[]; anims: unknown[] }> = [];
     for (const { key, value: mp } of all) {
       const lib = (mp.animLib ?? []).filter((x) => x.id !== animId);
       const placed = (mp.anims ?? []).filter((x) => x.aid !== animId);
       if (lib.length !== (mp.animLib ?? []).length || placed.length !== (mp.anims ?? []).length) {
+        snapshots.push({ key, animLib: mp.animLib ?? [], anims: mp.anims ?? [] });
         await idbPut('maps', key, { ...mp, animLib: lib, anims: placed, updatedAt: Date.now() });
       }
     }
+    return snapshots;
   };
 
   const removeAnim = async (a: AnimDef) => {
+    const snaps = await purgeAnimFromMaps(a.id);
     await idbDel('anims', a.id);
-    await purgeAnimFromMaps(a.id);
+    rememberDeleted({
+      label: `анимацию «${a.name}»`,
+      restore: async () => {
+        await idbPut('anims', a.id, JSON.parse(JSON.stringify(a)));
+        for (const s of snaps) {
+          const cur = await idbGet<GameMap>('maps', s.key);
+          if (cur) await idbPut('maps', cur.id, { ...cur, animLib: s.animLib as GameMap['animLib'], anims: s.anims as GameMap['anims'], updatedAt: Date.now() });
+        }
+        await refresh();
+      },
+    });
     await refresh();
-    toast(`Анимация «${a.name}» удалена — также убрана из всех карт, где была вшита`, 'err');
+    toast(`Анимация «${a.name}» удалена — также убрана из всех карт, где была вшита (Ctrl+Z вернёт)`, 'err');
   };
 
   const saveTok = async () => {
@@ -440,10 +493,21 @@ export default function TokenEditor() {
   };
 
   const removeTok = async (t: TokenDef) => {
+    const snaps = await purgeTokFromMaps(t.id);
     await idbDel('tokens', t.id);
-    await purgeTokFromMaps(t.id);
+    rememberDeleted({
+      label: `фишку «${t.name}»`,
+      restore: async () => {
+        await idbPut('tokens', t.id, JSON.parse(JSON.stringify(t)));
+        for (const s of snaps) {
+          const cur = await idbGet<GameMap>('maps', s.key);
+          if (cur) await idbPut('maps', cur.id, { ...cur, mapTokens: s.mapTokens, updatedAt: Date.now() });
+        }
+        await refresh();
+      },
+    });
     await refresh();
-    toast(`Фишка «${t.name}» удалена — также убрана из всех карт, где была выбрана`, 'err');
+    toast(`Фишка «${t.name}» удалена — также убрана из всех карт, где была выбрана (Ctrl+Z вернёт)`, 'err');
   };
 
   /* ---------- обычные фишки: пиксель-арт / PNG / правка ---------- */
@@ -548,12 +612,7 @@ export default function TokenEditor() {
                         className={`relative aspect-square border-2 border-gold/40 overflow-hidden cursor-pointer transition-transform hover:scale-105 ${(animDraft || tokDraft) ? 'hover:border-gold' : ''}`}
                       >
                         <img src={t.dataUrl} alt={t.name} className="w-full h-full object-cover" style={{ imageRendering: 'pixelated' }} />
-                        <span
-                          role="button"
-                          aria-label="удалить тайл"
-                          onClick={(ev) => { ev.stopPropagation(); void delTile(t.id); }}
-                          className="absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center opacity-0 hover:opacity-100 cursor-pointer"
-                        >×</span>
+                        <HoldDeleteButton as="span" onFire={() => void delTile(t.id)} label={t.name} ariaLabel="удалить тайл" title="Удалить тайл" className="absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center opacity-0 hover:opacity-100 cursor-pointer">×</HoldDeleteButton>
                       </button>
                     ))}
                   </div>
@@ -579,7 +638,7 @@ export default function TokenEditor() {
                       <span className="font-display text-[10px] uppercase text-dim truncate">{g.name}</span>
                       <span className="tick-label text-faint shrink-0">· {inG.length}</span>
                     </button>
-                    <button onClick={() => void delGroup(g)} title="Убрать группу и её тайлы из библиотеки" className="text-faint hover:text-coral cursor-pointer shrink-0 px-0.5">{Ic.cross(10)}</button>
+                    <HoldDeleteButton onFire={() => void delGroup(g)} label={g.name} ariaLabel="Убрать группу" title="Убрать группу и её тайлы из библиотеки" className="text-faint hover:text-coral cursor-pointer shrink-0 px-0.5">{Ic.cross(10)}</HoldDeleteButton>
                   </div>
                   {!g.collapsed && (
                     <div className="grid grid-cols-4 gap-1.5">
@@ -591,12 +650,7 @@ export default function TokenEditor() {
                           className={`relative aspect-square border-2 overflow-hidden cursor-pointer transition-transform hover:scale-105 ${(animDraft || tokDraft) ? 'border-edge hover:border-gold' : 'border-edge'}`}
                         >
                           <img src={t.dataUrl} alt={t.name} className="w-full h-full object-cover" style={{ imageRendering: 'pixelated' }} />
-                          <span
-                            role="button"
-                            aria-label="удалить тайл"
-                            onClick={(ev) => { ev.stopPropagation(); void delTile(t.id); }}
-                            className="absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center opacity-0 hover:opacity-100 cursor-pointer"
-                          >×</span>
+                          <HoldDeleteButton as="span" onFire={() => void delTile(t.id)} label={t.name} ariaLabel="удалить тайл" title="Удалить тайл" className="absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center opacity-0 hover:opacity-100 cursor-pointer">×</HoldDeleteButton>
                         </button>
                       ))}
                     </div>
@@ -726,7 +780,7 @@ export default function TokenEditor() {
                       <div className="tick-label text-faint">{a.clip.frames.length} кадр. · {a.clip.fps} кадр/с</div>
                       <div className="flex justify-center gap-2 mt-2">
                         <GhostBtn small onClick={() => { setAnimDraft({ id: a.id, name: a.name, fps: a.clip.fps, frames: [...a.clip.frames], createdAt: a.createdAt }); sfx.hover(); }} className="!px-2">Изменить</GhostBtn>
-                        <button onClick={() => void removeAnim(a)} className="text-faint hover:text-coral cursor-pointer" aria-label="Удалить анимацию">{Ic.trash(15)}</button>
+                        <HoldDeleteButton onFire={() => void removeAnim(a)} label={a.name} ariaLabel="Удалить анимацию">{Ic.trash(15)}</HoldDeleteButton>
                       </div>
                     </div>
                   ))}
@@ -758,7 +812,7 @@ export default function TokenEditor() {
                             setActiveClip('idle');
                             sfx.hover();
                           }} className="!px-2">Изменить</GhostBtn>
-                          <button onClick={() => void removeTok(t)} className="text-faint hover:text-coral cursor-pointer" aria-label="Удалить фишку">{Ic.trash(15)}</button>
+                          <HoldDeleteButton onFire={() => void removeTok(t)} label={t.name} ariaLabel="Удалить фишку">{Ic.trash(15)}</HoldDeleteButton>
                         </div>
                       </div>
                     ))}
@@ -781,7 +835,7 @@ export default function TokenEditor() {
                       <div className="font-display text-[11px] uppercase text-paper truncate mt-2">{t.name}</div>
                       <div className="flex justify-center gap-2 mt-2">
                         <GhostBtn small onClick={() => editToken(t)} className="!px-2">Изменить</GhostBtn>
-                        <button onClick={() => void removeTok(t)} className="text-faint hover:text-coral cursor-pointer" aria-label="Удалить фишку">{Ic.trash(15)}</button>
+                        <HoldDeleteButton onFire={() => void removeTok(t)} label={t.name} ariaLabel="Удалить фишку">{Ic.trash(15)}</HoldDeleteButton>
                       </div>
                     </div>
                   ))}

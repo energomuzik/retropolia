@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { initApp, useApp } from './store';
 import { Toasts } from './ui';
-import { setVolume } from './sound';
+import { setVolume, sfx } from './sound';
+import { peekDeleted, undoLastDelete } from './delGuard';
 import MenuScreen from './screens/MenuScreen';
 import MapEditor from './screens/MapEditor';
 import TaskEditor from './screens/TaskEditor';
@@ -46,6 +47,26 @@ export default function App() {
       window.removeEventListener('gamepadconnected', on);
       window.removeEventListener('gamepaddisconnected', off);
     };
+  }, []);
+
+  /* Ctrl+Z — вернуть ПОСЛЕДНУЮ удалённую вещь (на один шаг назад).
+     В полях ввода Ctrl+Z остаётся текстовой отменой браузера */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.code !== 'KeyZ') return;
+      const tgt = e.target as HTMLElement | null;
+      if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+      const entry = peekDeleted();
+      if (!entry) return;
+      e.preventDefault();
+      void undoLastDelete().then(async () => {
+        await useApp.getState().refresh();
+        useApp.getState().toast(`Возвращено: ${entry.label}`, 'ok');
+        sfx.coin();
+      });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
 
   if (!ready) {

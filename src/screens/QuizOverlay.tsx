@@ -5,6 +5,21 @@ import { GhostBtn, Ic, PxBtn } from '../ui';
 import { PLAYER_COLORS } from '../types';
 import { sfx } from '../sound';
 
+/* детерминированная перетасовка: у ВСЕХ игроков одинаковый порядок (сид из quizId+startedAt) */
+const seededShuffle = (n: number, seedStr: string): number[] => {
+  let h = 2166136261;
+  for (let i = 0; i < seedStr.length; i++) { h ^= seedStr.charCodeAt(i); h = Math.imul(h, 16777619); }
+  if (h === 0) h = 42;
+  const rnd = () => { h ^= h << 13; h ^= h >>> 17; h ^= h << 5; return ((h >>> 0) % 100000) / 100000; };
+  const arr = [...Array(n).keys()];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  if (arr.every((v, i) => v === i) && arr.length > 1) [arr[0], arr[1]] = [arr[1], arr[0]]; // не показывать уже готовый порядок
+  return arr;
+};
+
 /**
  * Квиз поверх игрового экрана.
  * — «Гонка» (choice/text/music): вопрос видят ВСЕ живые игроки, отвечает кто первым.
@@ -26,6 +41,9 @@ export default function QuizOverlay() {
   const [, setTick] = useState(0);
   const [text, setText] = useState('');
   const [sent, setSent] = useState(false);
+  /* квиз «По порядку»: disp — порядок ПОКАЗА пунктов (индексы исходных, т.е. верных позиций) */
+  const [disp, setDisp] = useState<number[]>([]);
+  const dragPosRef = useRef<number | null>(null);
   const wasResolvedRef = useRef(false);
   /* Таймер идёт по ЛОКАЛЬНЫМ часам игрока с момента, когда он получил вопрос.
      Иначе рассинхрон часов двух ПК (±5–10 с) давал одному игроку меньше времени. */
@@ -37,6 +55,13 @@ export default function QuizOverlay() {
     setSent(false);
     wasResolvedRef.current = false;
   }, [q?.quizId, q?.startedAt]);
+
+  // перетасовка пунктов квиза «По порядку» — одинаковая у всех игроков
+  useEffect(() => {
+    if (quiz?.type === 'order' && q) {
+      setDisp(seededShuffle((quiz.items ?? []).length, `${q.quizId}:${q.startedAt || 0}`));
+    }
+  }, [q?.quizId, q?.startedAt, quiz?.type, quiz?.id]);
 
   // запоминаем локальный момент старта отсчёта для этого вопроса
   useEffect(() => {
@@ -100,9 +125,23 @@ export default function QuizOverlay() {
     dispatch({ t: 'quizAnswer', id: me, answer, sentAt: Date.now() });
   };
 
+  /* сдвинуть пункт с позиции from на позицию to (в списке показа) */
+  const moveDisp = (from: number, to: number) => {
+    setDisp((d) => {
+      if (to < 0 || to >= d.length || from === to) return d;
+      const nd = [...d];
+      const [x] = nd.splice(from, 1);
+      nd.splice(to, 0, x);
+      return nd;
+    });
+    sfx.hover();
+  };
+
   const accent = isMystery ? '#ff8b3f' : '#5aa9ff';
+  const isOrder = quiz.type === 'order';
   const correctText =
-    quiz.type === 'choice'
+    isOrder ? (quiz.items ?? []).map((it) => it.text).join(' → ')
+    : quiz.type === 'choice'
       ? quiz.options?.[quiz.correct ?? 0] ?? ''
       : (quiz.answers ?? []).filter((x) => x.trim()).join(' / ');
 
@@ -247,6 +286,57 @@ export default function QuizOverlay() {
                               <span className="text-[13px] text-paper leading-snug">{opt}</span>
                             </button>
                           ))}
+                        </div>
+                      ) : isOrder ? (
+                        /* ---------- «По порядку»: перетащи ответы в правильный порядок ---------- */
+                        <div className="space-y-2">
+                          <p className="text-center text-[11px] text-magma">
+                            Перетащите ответы мышью (или стрелками ▲▼) так, чтобы они шли СВЕРХУ ВНИЗ в правильном порядке, затем нажмите «Подтвердить».
+                          </p>
+                          {disp.map((origIdx, pos) => {
+                            const it = (quiz.items ?? [])[origIdx];
+                            if (!it) return null;
+                            return (
+                              <div
+                                key={origIdx}
+                                draggable={canAnswer}
+                                onDragStart={() => { dragPosRef.current = pos; }}
+                                onDragOver={(e) => { if (canAnswer) e.preventDefault(); }}
+                                onDrop={(e) => {
+                                  e.preventDefault();
+                                  if (canAnswer && dragPosRef.current !== null) moveDisp(dragPosRef.current, pos);
+                                  dragPosRef.current = null;
+                                }}
+                                className={`pixel-panel pixel-corners p-2.5 flex items-center gap-2.5 transition-all ${canAnswer ? 'cursor-grab active:cursor-grabbing hover:border-magma' : 'opacity-70'}`}
+                              >
+                                <span className="font-pixel text-[10px] text-magma w-5 shrink-0 text-center">{pos + 1}</span>
+                                <span className="text-faint shrink-0 select-none font-pixel text-[10px]">⠿</span>
+                                {it.image && <img src={it.image} alt="" className="w-10 h-10 object-contain border-2 border-edge shrink-0" />}
+                                <span className="text-[13px] text-paper leading-snug flex-1 min-w-0">{it.text}</span>
+                                <span className="flex flex-col shrink-0">
+                                  <button
+                                    disabled={!canAnswer || pos === 0}
+                                    onClick={() => moveDisp(pos, pos - 1)}
+                                    aria-label="Выше"
+                                    title="Поднять"
+                                    className={`leading-none px-1 text-[10px] ${pos === 0 || !canAnswer ? 'text-edge' : 'text-dim hover:text-gold cursor-pointer'}`}
+                                  >▲</button>
+                                  <button
+                                    disabled={!canAnswer || pos === disp.length - 1}
+                                    onClick={() => moveDisp(pos, pos + 1)}
+                                    aria-label="Ниже"
+                                    title="Опустить"
+                                    className={`leading-none px-1 text-[10px] ${pos === disp.length - 1 || !canAnswer ? 'text-edge' : 'text-dim hover:text-gold cursor-pointer'}`}
+                                  >▼</button>
+                                </span>
+                              </div>
+                            );
+                          })}
+                          <div className="flex justify-center pt-1">
+                            <PxBtn color="gold" disabled={!canAnswer} onClick={() => submit(disp.join('|'))}>
+                              {Ic.check(14)} Подтвердить
+                            </PxBtn>
+                          </div>
                         </div>
                       ) : (
                         <div className="flex gap-2">

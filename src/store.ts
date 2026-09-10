@@ -78,6 +78,7 @@ export const useApp = create<AppState>()((set, get) => ({
     relay: '',
     relayHub: '',
     turn: '',
+    delMode: 'confirm', // защита от случайного удаления: с окошком по умолчанию
   },
   setOptions: (p) => {
     const options = { ...get().options, ...p };

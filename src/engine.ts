@@ -1105,6 +1105,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         correct = false;
       } else if (qd.type === 'text' || qd.type === 'music') {
         correct = (qd.answers ?? []).some((ans) => norm(ans) === norm(String(a.answer)));
+      } else if (qd.type === 'order') {
+        // ответ — «2|0|3|1»: порядок исходных (верных) индексов, как расставил игрок
+        const want = (qd.items ?? []).map((_, i) => String(i)).join('|');
+        correct = String(a.answer) === want;
       } else {
         correct = Number(a.answer) === qd.correct;
       }

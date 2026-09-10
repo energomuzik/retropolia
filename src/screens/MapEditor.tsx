@@ -7,8 +7,9 @@ import {
 } from '../render';
 import { extractTilesFromImage } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
-import { idbDel, idbPut, uid } from '../db';
+import { idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimDef, CellDef, CellType, GameMap, PlacedAnim, Stamp, TokenDef, TileGroup, TileImg } from '../types';
+import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import { sfx } from '../sound';
 
 /* ---------- импорт картинок: сжимаем до разумного размера, чтобы карта не весила десятки МБ ---------- */
@@ -377,6 +378,19 @@ export default function MapEditor() {
       const ok = window.confirm(`Тайлы этой группы уже стоят на карте (${used} шт.). Убрать группу вместе с ними с карты?`);
       if (!ok) return;
     }
+    const patch = {
+      tileset: map.tileset ?? [],
+      tileGroups: map.tileGroups ?? [],
+      stamps: map.stamps ?? [],
+    };
+    rememberDeleted({
+      label: `папку «${g.name}» (${g.tids.length} тайл.)`,
+      restore: async () => {
+        setMap((m) => (m && m.id === map.id ? { ...m, ...patch } : m)); // если карта всё ещё открыта
+        const cur = await idbGet<GameMap>('maps', map.id);
+        if (cur) { await idbPut('maps', map.id, { ...cur, ...patch, updatedAt: Date.now() }); await useApp.getState().refresh(); }
+      },
+    });
     const tset = new Set(g.tids);
     updMap({
       tileset: (map.tileset ?? []).filter((t) => !tset.has(t.id)),
@@ -390,6 +404,19 @@ export default function MapEditor() {
 
   const delTile = (tid: string) => {
     if (!map) return;
+    const patch = {
+      tileset: map.tileset ?? [],
+      tileGroups: map.tileGroups ?? [],
+      stamps: map.stamps ?? [],
+    };
+    rememberDeleted({
+      label: `тайл «${(map.tileset ?? []).find((t) => t.id === tid)?.name ?? tid}»`,
+      restore: async () => {
+        setMap((m) => (m && m.id === map.id ? { ...m, ...patch } : m));
+        const cur = await idbGet<GameMap>('maps', map.id);
+        if (cur) { await idbPut('maps', map.id, { ...cur, ...patch, updatedAt: Date.now() }); await useApp.getState().refresh(); }
+      },
+    });
     const stamps = (map.stamps ?? []).filter((s) => s.tid !== tid);
     updMap({
       tileset: (map.tileset ?? []).filter((t) => t.id !== tid),
@@ -1170,11 +1197,13 @@ export default function MapEditor() {
                           <span className="font-display text-[10px] uppercase text-dim truncate">{g.name}</span>
                           <span className="tick-label text-faint shrink-0">· {inG.length}</span>
                         </button>
-                        <button
-                          onClick={() => delGroup(g)}
+                        <HoldDeleteButton
+                          onFire={() => delGroup(g)}
+                          label={g.name}
+                          ariaLabel="Убрать группу"
                           title="Убрать группу из панели (папку на компьютере это не трогает)"
                           className="text-faint hover:text-coral cursor-pointer shrink-0 px-0.5"
-                        >{Ic.cross(10)}</button>
+                        >{Ic.cross(10)}</HoldDeleteButton>
                       </div>
                       {!g.collapsed && (
                         <div className="grid grid-cols-4 gap-1.5">
@@ -1186,13 +1215,14 @@ export default function MapEditor() {
                               className={`relative aspect-square border-2 overflow-hidden cursor-pointer transition-transform hover:scale-105 ${tileId === t.id ? 'border-gold' : 'border-edge'}`}
                             >
                               <img src={t.dataUrl} alt={t.name} className="w-full h-full object-cover" style={{ imageRendering: 'pixelated' }} />
-                              <span
-                                role="button"
-                                aria-label="удалить тайл"
-                                onClick={(ev) => { ev.stopPropagation(); delTile(t.id); }}
-                                className="absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center opacity-0 hover:opacity-100 cursor-pointer"
-                                style={{ opacity: tileId === t.id ? 0.9 : undefined }}
-                              >×</span>
+                              <HoldDeleteButton
+                                as="span"
+                                onFire={() => delTile(t.id)}
+                                label={t.name}
+                                ariaLabel="удалить тайл"
+                                title="Удалить тайл"
+                                className={`absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center cursor-pointer ${tileId === t.id ? 'opacity-90' : 'opacity-0 hover:opacity-100'}`}
+                              >×</HoldDeleteButton>
                             </button>
                           ))}
                         </div>
