@@ -5,6 +5,7 @@ import SegaBox, { type SegaApi } from '../SegaBox';
 import KeyBinder from '../KeyBinder';
 import { idbDel, idbPut, uid } from '../db';
 import type { RomDef, SaveDef } from '../types';
+import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import {
   keyLabel, loadEmuPrefs, PREFS_EVENT, listGamepads,
   PAD_ACTIONS, NES_TO_RETRO, codeToEjsKey,
@@ -29,10 +30,22 @@ export default function EmulatorLauncher() {
   const launchedRomRef = useRef<string | null>(null);
   // наш редактор управления (открывается кнопкой «Управление» рядом с эмулятором)
   const [controlsOpen, setControlsOpen] = useState(false);
+  // папки ромов: имя папки для следующей загрузки + какие спойлеры свернуты
+  const [newRomFolder, setNewRomFolder] = useState('');
+  const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({});
 
   const rom = roms.find((r) => r.id === romId) ?? null;
   const isNes = rom?.ext === 'nes';
   const romSaves = saves.filter((s) => s.romId === romId).sort((a, b) => a.slot - b.slot);
+
+  /* группировка ромов по папкам (спойлеры, как у тайлов в редакторах);
+     ромы без папки показываются отдельным списком «Без папки» */
+  const folderNames = useMemo(
+    () => [...new Set(roms.map((r) => r.folder ?? '').filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru')),
+    [roms],
+  );
+  const looseRoms = useMemo(() => roms.filter((r) => !r.folder), [roms]);
+  const romsIn = (folder: string) => roms.filter((r) => r.folder === folder);
 
   /* Раскладка пользователя → «мост»: клавиша пользователя → клавиша ядра.
      Клавиши ядра читаются из самого EmulatorJS при старте — переназначение не
@@ -83,9 +96,11 @@ export default function EmulatorLauncher() {
     const isSegaFile = ['md', 'gen', 'sms', 'gg', 'bin'].includes(ext);
     if (!isNesFile && !isSegaFile) { toast('Поддерживаются .nes (NES) и .md/.gen/.sms/.gg/.bin (SEGA)', 'err'); return; }
     const buf = await f.arrayBuffer();
+    const folder = newRomFolder.trim().slice(0, 24);
     const r: RomDef = {
       id: uid('rom'), name: f.name.replace(/\.[^.]+$/, ''), fileName: f.name,
       ext: isNesFile ? 'nes' : 'sega', size: f.size, createdAt: Date.now(),
+      ...(folder ? { folder } : {}),
     };
     await idbPut('roms', r.id, r);
     await idbPut('blobs', `rom-${r.id}`, buf);
@@ -93,7 +108,7 @@ export default function EmulatorLauncher() {
     setRomId(r.id);
     setRunning(false);
     sfx.coin();
-    toast(isNesFile ? `Ром «${r.name}» загружен (NES)` : `Ром «${r.name}» загружен (SEGA)`, 'ok');
+    toast(`Ром «${r.name}» загружен (${isNesFile ? 'NES' : 'SEGA'})${folder ? ` → папка «${folder}»` : ''}`, 'ok');
   };
 
   const launch = async (state?: unknown) => {
@@ -146,7 +161,18 @@ export default function EmulatorLauncher() {
   };
 
   const delRom = async (r: RomDef) => {
+    // для Ctrl+Z: запоминаем ром, его данные и сохранения ДО удаления
     const linked = saves.filter((s) => s.romId === r.id);
+    const blob = await getRomData(r.id);
+    rememberDeleted({
+      label: `ром «${r.name}»${linked.length ? ` и его сохранения (${linked.length})` : ''}`,
+      restore: async () => {
+        await idbPut('roms', r.id, { ...r });
+        if (blob) await idbPut('blobs', `rom-${r.id}`, blob);
+        for (const s of linked) await idbPut('saves', s.id, { ...s });
+        await refresh();
+      },
+    });
     await Promise.all(linked.map((s) => idbDel('saves', s.id)));
     await idbDel('roms', r.id);
     await idbDel('blobs', `rom-${r.id}`);
@@ -155,12 +181,71 @@ export default function EmulatorLauncher() {
     toast(`Ром «${r.name}» и его сохранения удалены`, 'err');
   };
 
+  /* удалить папку ромов: ромы + их данные + сохранения (всё запоминается для Ctrl+Z) */
+  const delRomFolder = async (folder: string) => {
+    const inF = roms.filter((r) => r.folder === folder);
+    if (!inF.length) return;
+    const items: { rom: RomDef; blob: ArrayBuffer | null; saves: SaveDef[] }[] = [];
+    for (const r of inF) {
+      items.push({ rom: r, blob: await getRomData(r.id), saves: saves.filter((s) => s.romId === r.id) });
+    }
+    rememberDeleted({
+      label: `папку ромов «${folder}» (${inF.length})`,
+      restore: async () => {
+        for (const it of items) {
+          await idbPut('roms', it.rom.id, { ...it.rom });
+          if (it.blob) await idbPut('blobs', `rom-${it.rom.id}`, it.blob);
+          for (const s of it.saves) await idbPut('saves', s.id, { ...s });
+        }
+        await refresh();
+      },
+    });
+    for (const it of items) {
+      await Promise.all(it.saves.map((s) => idbDel('saves', s.id)));
+      await idbDel('roms', it.rom.id);
+      await idbDel('blobs', `rom-${it.rom.id}`);
+    }
+    if (romId && inF.some((r) => r.id === romId)) { setRomId(null); setRunning(false); }
+    await refresh();
+    toast(`Папка «${folder}» удалена (ромов: ${inF.length})`, 'err');
+  };
+
   const delSave = async (s: SaveDef) => {
+    rememberDeleted({
+      label: `сохранение «${s.name}» (слот ${s.slot})`,
+      restore: async () => {
+        await idbPut('saves', s.id, { ...s });
+        await refresh();
+      },
+    });
     await idbDel('saves', s.id);
     await refresh();
     sfx.fail();
     toast(`Сохранение (слот ${s.slot}) удалено`, 'err');
   };
+
+  /* строка рома в левой панели (в папке-спойлере или без папки) */
+  const romRow = (r: RomDef) => (
+    <div key={r.id} className={`border-2 px-3 py-2 transition-colors ${romId === r.id ? 'border-coral bg-coral/10' : 'border-edge bg-panel hover:border-edge2'}`}>
+      <button className="w-full text-left cursor-pointer" onClick={() => { setRomId(r.id); setRunning(false); sfx.hover(); }}>
+        <div className="flex items-center gap-2">
+          <span className={`font-pixel text-[7px] px-1 py-0.5 ${r.ext === 'nes' ? 'bg-sky text-abyss' : 'bg-magma text-abyss'}`}>{r.ext.toUpperCase()}</span>
+          <span className="font-display text-[12px] uppercase text-paper truncate">{r.name}</span>
+        </div>
+        <div className="tick-label text-faint mt-1">{fmtSize(r.size)} · сохранений: {saves.filter((s) => s.romId === r.id).length}</div>
+      </button>
+      <div className="flex items-center justify-between mt-1.5">
+        <span className="tick-label text-faint truncate">{r.fileName}</span>
+        <HoldDeleteButton
+          onFire={() => void delRom(r)}
+          label={`ром «${r.name}»`}
+          ariaLabel="Удалить ром"
+          title="Удалить ром"
+          className="text-faint hover:text-coral cursor-pointer"
+        >{Ic.trash(14)}</HoldDeleteButton>
+      </div>
+    </div>
+  );
 
   const prefs = loadEmuPrefs();
   const pads = listGamepads();
@@ -178,31 +263,73 @@ export default function EmulatorLauncher() {
         </div>
         <p className="text-[13px] text-dim mb-6 max-w-3xl">
           Тестовый стенд: гоняйте ромы (NES и SEGA), проходите до нужного места и жмите <span className="text-gold font-display uppercase">«Сохранить состояние»</span> —
-          слоты потом выбираются в редакторе заданий. Неверные сохранения удаляются кнопкой корзины.
+          слоты потом выбираются в редакторе заданий. Ромы можно раскладывать по папкам (спойлеры, как у тайлов) —
+          впишите имя папки перед загрузкой. Удаление ромов, папок и сохранений подчиняется режиму из «Опций»,
+          а Ctrl+Z вернёт последнее удалённое.
         </p>
 
         <div className="grid lg:grid-cols-[300px_1fr] gap-5">
           <Panel title={`Ромы · ${roms.length}`} icon={Ic.cart(16)} accent="var(--color-coral)">
-            <div className="p-2.5 space-y-1.5 max-h-[420px] overflow-y-auto">
-              {roms.map((r) => (
-                <div key={r.id} className={`border-2 px-3 py-2 transition-colors ${romId === r.id ? 'border-coral bg-coral/10' : 'border-edge bg-panel hover:border-edge2'}`}>
-                  <button className="w-full text-left cursor-pointer" onClick={() => { setRomId(r.id); setRunning(false); sfx.hover(); }}>
-                    <div className="flex items-center gap-2">
-                      <span className={`font-pixel text-[7px] px-1 py-0.5 ${r.ext === 'nes' ? 'bg-sky text-abyss' : 'bg-magma text-abyss'}`}>{r.ext.toUpperCase()}</span>
-                      <span className="font-display text-[12px] uppercase text-paper truncate">{r.name}</span>
+            <div className="p-2.5 space-y-1.5 max-h-[460px] overflow-y-auto">
+              {/* папка для следующей загрузки: с автодополнением по существующим */}
+              <input
+                className="field-in w-full px-2 py-1.5 text-[11px]"
+                placeholder="Папка для загрузки (можно пусто)"
+                list="rom-folder-list"
+                maxLength={24}
+                value={newRomFolder}
+                onChange={(e) => setNewRomFolder(e.target.value)}
+              />
+              <datalist id="rom-folder-list">
+                {folderNames.map((f) => <option key={f} value={f} />)}
+              </datalist>
+
+              {/* папки-спойлеры с ромами */}
+              {folderNames.map((f) => {
+                const inF = romsIn(f);
+                const collapsed = collapsedFolders[f] ?? false;
+                return (
+                  <div key={`f-${f}`}>
+                    <div className="flex items-center gap-1 mb-1">
+                      <button
+                        onClick={() => setCollapsedFolders((s) => ({ ...s, [f]: !collapsed }))}
+                        className="flex-1 min-w-0 flex items-center gap-1 text-left cursor-pointer hover:bg-[rgba(255,93,115,0.08)] px-1 py-0.5"
+                        title={collapsed ? 'Развернуть' : 'Свернуть'}
+                      >
+                        <span className={`text-[10px] shrink-0 ${collapsed ? 'text-faint' : 'text-coral'}`}>{collapsed ? '▸' : '▾'}</span>
+                        <span className="text-[10px] text-faint shrink-0">📁</span>
+                        <span className="font-display text-[10px] uppercase text-dim truncate">{f}</span>
+                        <span className="tick-label text-faint shrink-0">· {inF.length}</span>
+                      </button>
+                      <HoldDeleteButton
+                        onFire={() => void delRomFolder(f)}
+                        label={`папку ромов «${f}» (${inF.length})`}
+                        ariaLabel="Удалить папку ромов"
+                        title="Удалить папку вместе с ромами и их сохранениями"
+                        className="text-faint hover:text-coral cursor-pointer shrink-0 px-0.5"
+                      >{Ic.cross(10)}</HoldDeleteButton>
                     </div>
-                    <div className="tick-label text-faint mt-1">{fmtSize(r.size)} · сохранений: {saves.filter((s) => s.romId === r.id).length}</div>
-                  </button>
-                  <div className="flex items-center justify-between mt-1.5">
-                    <span className="tick-label text-faint">{r.fileName}</span>
-                    <button onClick={() => void delRom(r)} className="text-faint hover:text-coral cursor-pointer" aria-label="Удалить ром">{Ic.trash(14)}</button>
+                    {!collapsed && <div className="space-y-1.5">{inF.map((r) => romRow(r))}</div>}
                   </div>
+                );
+              })}
+
+              {/* ромы без папки */}
+              {looseRoms.length > 0 && folderNames.length > 0 && (
+                <div className="pt-1">
+                  <div className="tick-label text-faint mb-1 px-1">Без папки · {looseRoms.length}</div>
+                  <div className="space-y-1.5">{looseRoms.map((r) => romRow(r))}</div>
                 </div>
-              ))}
+              )}
+              {looseRoms.length > 0 && folderNames.length === 0 && (
+                <div className="space-y-1.5">{looseRoms.map((r) => romRow(r))}</div>
+              )}
+
               {roms.length === 0 && (
                 <div className="text-center py-8 px-3">
                   <span className="text-coral inline-block floaty">{Ic.cart(36)}</span>
                   <p className="text-[12px] text-dim mt-3">Загрузите файл .nes или .md/.sms — и вперёд</p>
+                  <p className="text-[10px] text-faint mt-2 leading-tight">Чтобы разложить ромы по папкам, впишите имя папки в поле выше перед загрузкой</p>
                 </div>
               )}
             </div>
@@ -287,7 +414,13 @@ export default function EmulatorLauncher() {
                         <div className="tick-label text-faint">{new Date(s.createdAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</div>
                       </div>
                       <GhostBtn small onClick={() => loadSave(s)}>{Ic.play(11)}</GhostBtn>
-                      <button onClick={() => void delSave(s)} className="text-faint hover:text-coral cursor-pointer" aria-label="Удалить сохранение">{Ic.trash(14)}</button>
+                      <HoldDeleteButton
+                        onFire={() => void delSave(s)}
+                        label={`сохранение «${s.name}» (слот ${s.slot})`}
+                        ariaLabel="Удалить сохранение"
+                        title="Удалить сохранение"
+                        className="text-faint hover:text-coral cursor-pointer"
+                      >{Ic.trash(14)}</HoldDeleteButton>
                     </div>
                   ))}
                   {romSaves.length === 0 && <div className="text-[12px] text-dim sm:col-span-2 py-3 text-center">Сохранений нет — запустите ром и запишите первое состояние</div>}

@@ -252,6 +252,29 @@ export default function MapEditor() {
       return { ...m, anims: arr };
     });
   const removeAnim = (aid: string) => {
+    const m = mapRef.current;
+    const idx = m ? (m.anims ?? []).findIndex((a) => a.id === aid) : -1;
+    if (m && idx >= 0) {
+      const snap = m.anims![idx];
+      rememberDeleted({
+        label: `анимацию «${(m.animLib ?? []).find((x) => x.id === snap.aid)?.name ?? 'с карты'}»`,
+        restore: async () => {
+          setMap((mm) => {
+            if (!mm || mm.id !== m.id) return mm;
+            const arr = (mm.anims ?? []).slice();
+            arr.splice(Math.min(idx, arr.length), 0, snap);
+            return { ...mm, anims: arr };
+          });
+          const cur = await idbGet<GameMap>('maps', m.id);
+          if (cur) {
+            const arr = (cur.anims ?? []).slice();
+            arr.splice(Math.min(idx, arr.length), 0, snap);
+            await idbPut('maps', m.id, { ...cur, anims: arr, updatedAt: Date.now() });
+            await useApp.getState().refresh();
+          }
+        },
+      });
+    }
     setMap((mm) => (mm ? { ...mm, anims: (mm.anims ?? []).filter((a) => a.id !== aid) } : mm));
     setSelAnim(null);
     dirtyRef.current = true;
@@ -572,7 +595,56 @@ export default function MapEditor() {
     sfx.step();
   };
 
+  /* запомнить удаляемый штамп — Ctrl+Z вернёт его на то же место.
+     Ластик и клавиша Delete работают как раньше (сразу), но теперь отменяются */
+  const forgetStamp = (idx: number) => {
+    const m = mapRef.current;
+    const st = m?.stamps?.[idx];
+    if (!m || !st) return;
+    const label = `тайл «${tileImgById.get(st.tid)?.name ?? 'с карты'}» с карты`;
+    rememberDeleted({
+      label,
+      restore: async () => {
+        setMap((mm) => {
+          if (!mm || mm.id !== m.id) return mm;
+          const stamps = (mm.stamps ?? []).slice();
+          stamps.splice(Math.min(idx, stamps.length), 0, st);
+          return { ...mm, stamps };
+        });
+        const cur = await idbGet<GameMap>('maps', m.id);
+        if (cur) {
+          const stamps = (cur.stamps ?? []).slice();
+          stamps.splice(Math.min(idx, stamps.length), 0, st);
+          await idbPut('maps', m.id, { ...cur, stamps, updatedAt: Date.now() });
+          await useApp.getState().refresh();
+        }
+      },
+    });
+  };
+
   const deleteCell = (idx: number) => {
+    const m = mapRef.current;
+    const cell = m?.cells[idx];
+    if (m && cell) {
+      rememberDeleted({
+        label: `ячейку маршрута`,
+        restore: async () => {
+          setMap((mm) => {
+            if (!mm || mm.id !== m.id) return mm;
+            const cells = mm.cells.slice();
+            cells.splice(Math.min(idx, cells.length), 0, cell);
+            return { ...mm, cells } as GameMap;
+          });
+          const cur = await idbGet<GameMap>('maps', m.id);
+          if (cur) {
+            const cells = cur.cells.slice();
+            cells.splice(Math.min(idx, cells.length), 0, cell);
+            await idbPut('maps', m.id, { ...cur, cells, updatedAt: Date.now() });
+            await useApp.getState().refresh();
+          }
+        },
+      });
+    }
     setMap((mm) => {
       if (!mm || !mm.cells[idx]) return mm;
       const cells = mm.cells.slice();
@@ -768,6 +840,7 @@ export default function MapEditor() {
     if (tool === 'erase') {
       const si = stampAtPoint(m, w.x, w.y);
       if (si >= 0) {
+        forgetStamp(si);
         setMap((mm) => (mm ? { ...mm, stamps: (mm.stamps ?? []).filter((_, i) => i !== si) } : mm));
         if (selStamp === (mapRef.current?.stamps ?? [])[si]?.id) setSelStamp(null);
         dirtyRef.current = true;
@@ -782,6 +855,7 @@ export default function MapEditor() {
   const eraseAt = (m: GameMap, wx: number, wy: number) => {
     const si = stampAtPoint(m, wx, wy);
     if (si < 0) return false;
+    forgetStamp(si);
     setMap((mm) => (mm ? { ...mm, stamps: (mm.stamps ?? []).filter((_, i) => i !== si) } : mm));
     dirtyRef.current = true;
     return true;
@@ -876,6 +950,7 @@ export default function MapEditor() {
       if (!map) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selStamp && selStampIdx >= 0) {
+          forgetStamp(selStampIdx);
           setMap((mm) => (mm ? { ...mm, stamps: (mm.stamps ?? []).filter((s) => s.id !== selStamp) } : mm));
           setSelStamp(null);
           dirtyRef.current = true;
@@ -1087,9 +1162,22 @@ export default function MapEditor() {
   };
 
   const removeMap = async (id: string) => {
+    const victim = maps.find((x) => x.id === id) ?? (map?.id === id ? map : null);
+    const wasOpen = map?.id === id;
+    if (victim) {
+      const snap = JSON.parse(JSON.stringify(victim)) as GameMap;
+      rememberDeleted({
+        label: `карту «${snap.name}»`,
+        restore: async () => {
+          await idbPut('maps', snap.id, JSON.parse(JSON.stringify(snap)));
+          await useApp.getState().refresh();
+          if (wasOpen) setMap(migrateMap(JSON.parse(JSON.stringify(snap)), tiles)); // вернём и reopened
+        },
+      });
+    }
     await idbDel('maps', id);
     await refresh();
-    if (map?.id === id) setMap(null);
+    if (wasOpen) setMap(null);
     toast('Карта удалена', 'err');
   };
 
@@ -1138,11 +1226,13 @@ export default function MapEditor() {
                     <div className="font-display text-[11px] uppercase text-paper truncate">{m.name}</div>
                     <div className="tick-label text-faint mt-0.5">{m.cells.length} яч. · {m.ready ? 'готова' : 'в работе'}</div>
                   </button>
-                  <button
-                    onClick={() => void removeMap(m.id)}
-                    className="px-2 text-faint hover:text-coral cursor-pointer"
+                  <HoldDeleteButton
+                    onFire={() => void removeMap(m.id)}
+                    label={`карту «${m.name}»`}
+                    ariaLabel="Удалить карту"
                     title="Удалить карту"
-                  >{Ic.cross(12)}</button>
+                    className="px-2 text-faint hover:text-coral cursor-pointer"
+                  >{Ic.cross(12)}</HoldDeleteButton>
                 </div>
               ))}
               {maps.length === 0 && <div className="text-[11px] text-faint">Пока пусто — создайте первую карту</div>}
@@ -1658,12 +1748,15 @@ export default function MapEditor() {
                     />
                   </div>
 
-                  <button
-                    onClick={() => deleteCell(selCell)}
+                  <HoldDeleteButton
+                    onFire={() => deleteCell(selCell)}
+                    label="ячейку маршрута"
+                    ariaLabel="Удалить ячейку"
+                    title="Удалить ячейку"
                     className="w-full py-1.5 border-2 border-coral/60 text-coral font-display text-[10px] uppercase hover:bg-coral/10 transition-colors cursor-pointer"
                   >
                     Удалить ячейку
-                  </button>
+                  </HoldDeleteButton>
                 </div>
               )}
 

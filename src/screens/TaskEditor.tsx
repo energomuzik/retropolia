@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../store';
 import { Field, GhostBtn, Ic, Panel, PxBtn, Stepper } from '../ui';
 import { cellAtPoint, drawBoard, fitView } from '../render';
-import { idbPut, uid } from '../db';
+import { idbGet, idbPut, uid } from '../db';
 import { cartridgeArt, cardArt, fileToDataUrl } from '../assets';
 import type { CardDef, CardEffect, CellType, ChaosKind, EffectType, GameMap, TaskDef } from '../types';
 import { CHAOS_LIST, chaosLabel, mkChaosCard, JOY_LIST } from '../types';
 import { renumberByPath, fixLinksAfterDelete } from '../render';
+import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import { sfx } from '../sound';
 
 const EFFECTS: { key: EffectType; label: string; hasValue?: boolean; hasTarget?: boolean; unit?: string; def: number }[] = [
@@ -240,6 +241,28 @@ export default function TaskEditor() {
 
   const delCard = async (id: string) => {
     if (!map) return;
+    const inBonus = map.bonusCards.find((c) => c.id === id);
+    const inTrap = map.trapCards.find((c) => c.id === id);
+    const card = inBonus ?? inTrap;
+    if (card && map.id) {
+      const mapId = map.id;
+      const deckKind = inBonus ? 'bonus' : 'trap';
+      const snap = JSON.parse(JSON.stringify(card));
+      rememberDeleted({
+        label: `карточку «${card.name}»`,
+        restore: async () => {
+          const cur = await idbGet<GameMap>('maps', mapId);
+          if (!cur) return;
+          const next = JSON.parse(JSON.stringify(cur)) as GameMap;
+          const deck = deckKind === 'bonus' ? next.bonusCards : next.trapCards;
+          if (!deck.some((c) => c.id === (snap as { id: string }).id)) deck.push(snap);
+          next.updatedAt = Date.now();
+          await idbPut('maps', mapId, next);
+          setMap(next); // если редактор закрыт — setMap безвреден, данные восстановятся в IDB
+          await useApp.getState().refresh();
+        },
+      });
+    }
     const nextMap = JSON.parse(JSON.stringify(map)) as GameMap;
     nextMap.bonusCards = nextMap.bonusCards.filter((c) => c.id !== id);
     nextMap.trapCards = nextMap.trapCards.filter((c) => c.id !== id);
@@ -258,6 +281,23 @@ export default function TaskEditor() {
 
   const delCell = async () => {
     if (!map || selCell === null) return;
+    const cellSnap = JSON.parse(JSON.stringify(map.cells[selCell]));
+    const cellIdx = selCell;
+    const mapId = map.id;
+    rememberDeleted({
+      label: `ячейку маршрута`,
+      restore: async () => {
+        const cur = await idbGet<GameMap>('maps', mapId);
+        if (!cur) return;
+        const next = JSON.parse(JSON.stringify(cur)) as GameMap;
+        next.cells.splice(Math.min(cellIdx, next.cells.length), 0, cellSnap);
+        renumberByPath(next); // номера — по маршруту
+        next.updatedAt = Date.now();
+        await idbPut('maps', mapId, next);
+        setMap(next);
+        await useApp.getState().refresh();
+      },
+    });
     const nextMap = JSON.parse(JSON.stringify(map)) as GameMap;
     nextMap.cells.splice(selCell, 1);
     fixLinksAfterDelete(nextMap, selCell); // сдвигаем стрелки и перенумеровываем по маршруту
@@ -435,7 +475,13 @@ export default function TaskEditor() {
                   {cell.type === 'rest' && (
                     <p className="text-[10px] text-dim leading-tight">Пустая клетка-передышка: ничего не происходит. Ром и карточки не нужны — в «без заданий» она не считается.</p>
                   )}
-                  <GhostBtn className="w-full" onClick={() => void delCell()}>{Ic.trash(13)} Удалить ячейку из маршрута</GhostBtn>
+                  <HoldDeleteButton
+                    onFire={() => void delCell()}
+                    label="ячейку маршрута"
+                    ariaLabel="Удалить ячейку из маршрута"
+                    title="Удалить ячейку из маршрута"
+                    className="btn-ghost pixel-corners px-4 py-2 text-xs inline-flex items-center justify-center gap-2 w-full"
+                  >{Ic.trash(13)} Удалить ячейку из маршрута</HoldDeleteButton>
                 </div>
               </Panel>
 
@@ -582,7 +628,13 @@ export default function TaskEditor() {
                           <div className="font-display text-[11px] uppercase text-paper truncate">{c.name}</div>
                           <div className="text-[10px] text-dim leading-tight">{effectLabel(c.effect)}</div>
                         </div>
-                        <button onClick={() => void delCard(c.id)} className="text-faint hover:text-coral cursor-pointer shrink-0" aria-label="Удалить карточку">{Ic.trash(14)}</button>
+                        <HoldDeleteButton
+                          onFire={() => void delCard(c.id)}
+                          label={`карточку «${c.name}»`}
+                          ariaLabel="Удалить карточку"
+                          title="Удалить карточку"
+                          className="text-faint hover:text-coral cursor-pointer shrink-0"
+                        >{Ic.trash(14)}</HoldDeleteButton>
                       </div>
                     ))}
                     {deck.length === 0 && (
@@ -678,7 +730,6 @@ function CardThumb({ id }: { id: string }) {
   return url ? <img src={url} alt="" className="w-11 h-8 object-cover border border-edge" /> : <span className="w-11 h-8 bg-panel inline-block border border-edge" />;
 }
 
-import { idbGet } from '../db';
 import { useEffect as useEff2, useState as useSt2 } from 'react';
 function useBlobImageUrl(id: string): string | null {
   const [u, setU] = useSt2<string | null>(null);

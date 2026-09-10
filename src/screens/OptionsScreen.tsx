@@ -155,7 +155,7 @@ export default function OptionsScreen() {
             <div className="p-4 space-y-3">
               <div>
                 <span className="font-display text-[12px] uppercase text-paper">Удаление в редакторах</span>
-                <div className="text-[10px] text-faint mt-0.5 mb-2">Как работают крестики ✕ и урны 🗑 у тайлов, папок, фишек, анимаций и квизов</div>
+                <div className="text-[10px] text-faint mt-0.5 mb-2">Как работают крестики ✕ и урны 🗑 у тайлов, папок, фишек, анимаций, квизов, карт, ромов, сохранений, карточек и партий</div>
                 <div className="grid sm:grid-cols-3 gap-2">
                   {DEL_MODES.map((m) => (
                     <button
@@ -169,8 +169,8 @@ export default function OptionsScreen() {
                   ))}
                 </div>
                 <p className="text-[10px] text-faint mt-2 leading-relaxed">
-                  Случайно удалили не то? Нажмите Ctrl+Z — вернётся последняя удалённая вещь (на один шаг назад).
-                  Ластик в пиксель-редакторе работает как раньше — на него настройка не влияет.
+                  Случайно удалили не то? Нажмите Ctrl+Z — вернётся именно ПОСЛЕДНЯЯ удалённая вещь (на один шаг назад),
+                  даже если её стёрли ластиком или клавишей Delete. Ластик в пиксель-редакторе работает как раньше — на него настройка не влияет.
                 </p>
               </div>
             </div>

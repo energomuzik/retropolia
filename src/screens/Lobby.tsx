@@ -6,6 +6,7 @@ import { genRoomCode } from '../net';
 import { newSession, fmtClock } from '../engine';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import { downloadHostBat } from '../host/hostPackage';
+import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import type { GameMap, SessionSnapshot } from '../types';
 import { PLAYER_COLORS, PLAYER_NAMES } from '../types';
 import { sfx } from '../sound';
@@ -201,6 +202,17 @@ export function LoadScreen() {
   };
 
   const del = async (id: string) => {
+    const snap = snaps.find((s) => s.id === id);
+    if (snap) {
+      rememberDeleted({
+        label: `сохранённую партию «${snap.name}»`,
+        restore: async () => {
+          await idbPut('sessions', snap.id, JSON.parse(JSON.stringify(snap)));
+          setSnaps((prev) => [...prev.filter((x) => x.id !== id), snap].sort((a, b) => b.createdAt - a.createdAt));
+          void refresh();
+        },
+      });
+    }
     await idbDel('sessions', id);
     setSnaps((prev) => prev.filter((s) => s.id !== id));
     void refresh();
@@ -235,7 +247,13 @@ export function LoadScreen() {
               </div>
               <div className="flex gap-2">
                 <PxBtn color="teal" onClick={() => resume(s)}>{Ic.play(13)} Собрать команду</PxBtn>
-                <GhostBtn onClick={() => void del(s.id)}>{Ic.trash(13)}</GhostBtn>
+                <HoldDeleteButton
+                  onFire={() => void del(s.id)}
+                  label={`сохранённую партию «${s.name}»`}
+                  ariaLabel="Удалить сохранённую партию"
+                  title="Удалить сохранённую партию"
+                  className="btn-ghost pixel-corners px-4 py-2 text-xs inline-flex items-center justify-center gap-2"
+                >{Ic.trash(13)}</HoldDeleteButton>
               </div>
             </div>
           ))}

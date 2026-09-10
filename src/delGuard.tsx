@@ -1,4 +1,5 @@
 import { useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { useApp } from './store';
 import { GhostBtn, Ic, Modal, PxBtn } from './ui';
 import { sfx } from './sound';
@@ -9,7 +10,10 @@ import { sfx } from './sound';
    • confirm — клик открывает окошко с предупреждением (по умолчанию)
    • hold    — удалить можно, только удерживая крестик ~0.8 с
    Каждое удаление через rememberDeleted() запоминается — Ctrl+Z возвращает
-   ПОСЛЕДНЮЮ удалённую вещь (один шаг, глубже не храним). */
+   ПОСЛЕДНЮЮ удалённую вещь (один шаг, глубже не храним).
+   ВАЖНО: если в className передан absolute — НЕ добавляем свой relative,
+   иначе Tailwind (relative в CSS идёт позже absolute) сломает позиционирование
+   крестика на тайле, и он исчезнет из угла (так было в v0.20.0). */
 
 const HOLD_MS = 800;
 
@@ -83,13 +87,19 @@ export function HoldDeleteButton({
     delMode === 'hold' ? 'Удерживайте, чтобы удалить' :
     delMode === 'confirm' ? `${title} (с подтверждением)` : title;
 
+  /* если вызывающий сам задаёт позиционирование (absolute) — не мешаем ему:
+     свой relative добавляем только когда его нет, иначе Tailwind сломает позиционирование */
+  const isAbsolute = /(?:^|\s)absolute(?:\s|$)/.test(className);
+  const posCls = isAbsolute ? '' : 'relative ';
+  const fillCls = 'absolute left-0 top-0 h-full'; // полоска заполнения при удержании
+
   const inner = (
     <>
       <span className={`relative z-10 inline-flex ${holding ? 'text-coral' : ''}`}>{children}</span>
       {delMode === 'hold' && (
         <span
           aria-hidden
-          className="absolute left-0 top-0 h-full bg-[rgba(255,93,115,0.35)] pointer-events-none"
+          className={`bg-[rgba(255,93,115,0.35)] pointer-events-none ${fillCls}`}
           style={{ width: holding ? '100%' : '0%', transition: `width ${HOLD_MS}ms linear` }}
         />
       )}
@@ -117,7 +127,7 @@ export function HoldDeleteButton({
           onKeyDown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && delMode !== 'instant') { e.preventDefault(); e.stopPropagation(); setConfirming(true); } }}
           title={modeTitle}
           aria-label={ariaLabel}
-          className={`relative overflow-hidden shrink-0 ${className}`}
+          className={`${posCls}overflow-hidden shrink-0 ${className}`}
         >
           {inner}
         </span>
@@ -128,31 +138,38 @@ export function HoldDeleteButton({
           onKeyDown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && delMode !== 'instant') { e.preventDefault(); setConfirming(true); } }}
           title={modeTitle}
           aria-label={ariaLabel}
-          className={`relative overflow-hidden shrink-0 ${className}`}
+          className={`${posCls}overflow-hidden shrink-0 ${className}`}
         >
           {inner}
         </button>
       );
 
+  /* Окошко подтверждения рисуем ЧЕРЕЗ ПОРТАЛ в body: если кнопка лежит внутри
+     другой кнопки (крестик на тайле) или внутри элемента с transform
+     (hover:scale-105), обычный fixed-модал обрезается/съезжает. Плюс
+     stopPropagation — чтобы клики по окошку не «нажали» родительскую кнопку тайла. */
   return (
     <>
       {tag}
 
-      {confirming && delMode !== 'instant' && (
-        <Modal title="Подтвердите удаление" icon={<span className="text-coral">{Ic.trash(18)}</span>} onClose={() => setConfirming(false)} w="max-w-md">
-          <div className="p-5 space-y-4">
-            <p className="text-[13px] text-paper leading-relaxed">
-              Удалить <span className="text-coral font-display uppercase">{label}</span>?
-            </p>
-            <p className="text-[11px] text-dim leading-relaxed">
-              Случайно удалили? Ctrl+Z вернёт последнюю удалённую вещь (на один шаг назад).
-            </p>
-            <div className="flex justify-end gap-2">
-              <GhostBtn onClick={() => { sfx.hover(); setConfirming(false); }}>Отмена</GhostBtn>
-              <PxBtn color="coral" onClick={fire}>{Ic.trash(14)} Удалить</PxBtn>
+      {confirming && delMode !== 'instant' && createPortal(
+        <div onClick={(e) => e.stopPropagation()}>
+          <Modal title="Подтвердите удаление" icon={<span className="text-coral">{Ic.trash(18)}</span>} onClose={() => setConfirming(false)} w="max-w-md">
+            <div className="p-5 space-y-4">
+              <p className="text-[13px] text-paper leading-relaxed">
+                Удалить <span className="text-coral font-display uppercase">{label}</span>?
+              </p>
+              <p className="text-[11px] text-dim leading-relaxed">
+                Случайно удалили? Ctrl+Z вернёт последнюю удалённую вещь (на один шаг назад).
+              </p>
+              <div className="flex justify-end gap-2">
+                <GhostBtn onClick={() => { sfx.hover(); setConfirming(false); }}>Отмена</GhostBtn>
+                <PxBtn color="coral" onClick={fire}>{Ic.trash(14)} Удалить</PxBtn>
+              </div>
             </div>
-          </div>
-        </Modal>
+          </Modal>
+        </div>,
+        document.body,
       )}
     </>
   );
