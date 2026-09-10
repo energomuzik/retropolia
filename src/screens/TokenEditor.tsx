@@ -5,12 +5,16 @@ import PixelPaint, { emptyGrid, gridToDataUrl, imageToGrid } from '../PixelPaint
 import { extractTilesFromImage } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbAll, idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimClip, AnimDef, GameMap, TokenAnim, TokenDef, TileGroup, TileImg } from '../types';
+import type { AnimClip, AnimDef, GameMap, SoundDef, TokenAnim, TokenDef, TileGroup, TileImg } from '../types';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import { sfx } from '../sound';
+import { playOneShot, stopOneShot } from '../loopsnd';
 
 const SIZES = [12, 16, 24, 32];
 const MAX_FRAME = 256; // кадры анимаций сжимаются до 256px по большей стороне — карта остаётся лёгкой
+
+const fmtBytes = (b: number) => (b >= 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} МБ` : `${Math.max(1, Math.round(b / 1024))} КБ`);
+const isAudioFile = (f: File) => f.type.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(f.name);
 
 /* сжатие кадра (dataUrl → dataUrl); картинки меньше 256px не трогаем */
 const shrinkFrame = (dataUrl: string): Promise<string> =>
@@ -61,8 +65,8 @@ const CLIP_META: { key: ClipKey; label: string; hint: string }[] = [
 ];
 
 interface ClipDraft { fps: number; frames: string[] }
-interface AnimDraft { id?: string; name: string; fps: number; frames: string[]; createdAt?: number }
-interface TokDraft { id?: string; name: string; size: number; clips: Record<ClipKey, ClipDraft>; createdAt?: number }
+interface AnimDraft { id?: string; name: string; fps: number; frames: string[]; createdAt?: number; sndId?: string }
+interface TokDraft { id?: string; name: string; size: number; clips: Record<ClipKey, ClipDraft>; createdAt?: number; sndId?: string }
 
 const emptyClips = (): Record<ClipKey, ClipDraft> => ({
   idle: { fps: 6, frames: [] },
@@ -109,8 +113,39 @@ function FrameStrip({ clip, onFrames, size = 52 }: {
   );
 }
 
+/* Выбор звука из библиотеки для анимации/фишки: список + кнопка прослушивания.
+   Сохраняется КОПИЯ dataUrl — звук из библиотеки потом можно удалить. */
+function SoundPicker({ sounds, value, onChange }: { sounds: SoundDef[]; value: string; onChange: (id: string) => void }) {
+  const [playing, setPlaying] = useState(false);
+  const url = sounds.find((s) => s.id === value)?.dataUrl ?? null;
+  useEffect(() => () => stopOneShot(), []);
+  return (
+    <div className="flex items-end gap-2 flex-wrap">
+      <div className="flex-1 min-w-[180px]">
+        <Field label="Звук (необязательно)">
+          <select
+            className="field-in w-full px-3 py-2 text-sm cursor-pointer"
+            value={value}
+            onChange={(e) => { stopOneShot(); setPlaying(false); onChange(e.target.value); }}
+          >
+            <option value="">Без звука</option>
+            {sounds.map((s) => <option key={s.id} value={s.id}>{s.folder ? `${s.folder} / ${s.name}` : s.name}</option>)}
+          </select>
+        </Field>
+      </div>
+      {url && (
+        <GhostBtn onClick={() => {
+          if (playing) { stopOneShot(); setPlaying(false); return; }
+          playOneShot(url);
+          setPlaying(true);
+        }} title="Прослушать выбранный звук">{playing ? Ic.pause(14) : Ic.play(14)} {playing ? 'Стоп' : 'Прослушать'}</GhostBtn>
+      )}
+    </div>
+  );
+}
+
 export default function TokenEditor() {
-  const { tokens, anims, animTiles, animGroups, setScreen, refresh, toast } = useApp();
+  const { tokens, anims, sounds, animTiles, animGroups, setScreen, refresh, toast } = useApp();
   const [tab, setTab] = useState<'anims' | 'atokens' | 'tokens'>('anims');
 
   /* ---------- пиксель-арт редактор ОБЫЧНОЙ фишки: создание И правка существующей.
@@ -132,6 +167,9 @@ export default function TokenEditor() {
   const exInfoRef = useRef<ExtractInfo | null>(null);
   const exRunRef = useRef(0);
   const exTimerRef = useRef<number | null>(null);
+  /* скрытые поля загрузки ЗВУКОВ (папка + файлы) */
+  const sndFolderRef = useRef<HTMLInputElement>(null);
+  const sndFilesRef = useRef<HTMLInputElement>(null);
 
   const tileById = useMemo(() => new Map(animTiles.map((t) => [t.id, t])), [animTiles]);
 
@@ -313,6 +351,112 @@ export default function TokenEditor() {
     sfx.fail();
   };
 
+  /* ---------- ЗВУКИ: библиотека для анимаций и фишек (IndexedDB 'sounds') ----------
+     Загрузка пачкой или ПАПКОЙ (поддиректория = папка-спойлер), прослушивание,
+     удаление по режиму из Опций (крестики), Ctrl+Z возвращает. */
+  const [sndOpen, setSndOpen] = useState<Record<string, boolean>>({});
+  const [previewId, setPreviewId] = useState<string | null>(null);
+  const previewRef = useRef<HTMLAudioElement | null>(null);
+  useEffect(() => () => { previewRef.current?.pause(); }, []);
+
+  const togglePreview = (s: SoundDef) => {
+    if (previewId === s.id && previewRef.current) {
+      previewRef.current.pause();
+      previewRef.current = null;
+      setPreviewId(null);
+      return;
+    }
+    previewRef.current?.pause();
+    const a = new Audio(s.dataUrl);
+    a.onended = () => { setPreviewId((cur) => (cur === s.id ? null : cur)); };
+    a.play().catch(() => undefined);
+    previewRef.current = a;
+    setPreviewId(s.id);
+    sfx.hover();
+  };
+
+  const addSoundFiles = async (files: FileList | null, kind: 'folder' | 'files' = 'files') => {
+    if (!files) return;
+    let count = 0, skipped = 0, big = 0;
+    for (const f of Array.from(files)) {
+      if (!isAudioFile(f)) { skipped++; continue; }
+      const dataUrl = await new Promise<string>((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(String(r.result));
+        r.onerror = () => rej(r.error);
+        r.readAsDataURL(f);
+      }).catch(() => null);
+      if (!dataUrl) { skipped++; continue; }
+      const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath || '';
+      const folder = kind === 'folder' && rel.includes('/') ? (rel.split('/')[0] || 'Звуки') : undefined;
+      const s: SoundDef = {
+        id: uid('snd'),
+        name: f.name.replace(/\.[a-z0-9]+$/i, '').slice(0, 24) || 'звук',
+        dataUrl, size: f.size, createdAt: Date.now(),
+        ...(folder ? { folder } : {}),
+      };
+      await idbPut('sounds', s.id, s);
+      count++;
+      if (f.size > 8 * 1024 * 1024) big++;
+    }
+    if (!count) { toast('Аудиофайлов не нашлось — подойдут .mp3, .wav, .ogg, .m4a', 'err'); return; }
+    await refresh();
+    sfx.coin();
+    toast(`Звуков добавлено: ${count}${skipped ? ` · пропущено чужих: ${skipped}` : ''}${big ? ` · ⚠ очень большие: ${big} (карта станет тяжелее)` : ''}`, big ? 'info' : 'ok');
+  };
+
+  const delSound = async (s: SoundDef) => {
+    rememberDeleted({
+      label: `звук «${s.name}»`,
+      restore: async () => {
+        await idbPut('sounds', s.id, JSON.parse(JSON.stringify(s)));
+        await refresh();
+      },
+    });
+    if (previewId === s.id) togglePreview(s); // играл — остановим
+    await idbDel('sounds', s.id);
+    await refresh();
+    toast(`Звук «${s.name}» удалён из библиотеки — вшитые копии в анимациях и фишках остались (Ctrl+Z вернёт)`, 'err');
+  };
+
+  const delSoundFolder = async (folder: string) => {
+    const list = sounds.filter((s) => s.folder === folder);
+    if (!list.length) return;
+    rememberDeleted({
+      label: `папку звуков «${folder}» (${list.length})`,
+      restore: async () => {
+        for (const s of list) await idbPut('sounds', s.id, JSON.parse(JSON.stringify(s)));
+        await refresh();
+      },
+    });
+    for (const s of list) {
+      if (previewId === s.id) togglePreview(s);
+      await idbDel('sounds', s.id);
+    }
+    await refresh();
+    toast(`Папка звуков «${folder}» удалена (${list.length}) — Ctrl+Z вернёт`, 'err');
+  };
+
+  const soundFolders = useMemo(() => [...new Set(sounds.map((s) => s.folder ?? '').filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru')), [sounds]);
+  const looseSounds = useMemo(() => sounds.filter((s) => !s.folder), [sounds]);
+  const soundsIn = (folder: string) => sounds.filter((s) => s.folder === folder);
+
+  const soundRow = (s: SoundDef) => (
+    <div key={s.id} className="flex items-center gap-1.5 border-2 border-edge bg-panel px-1.5 py-1">
+      <button
+        onClick={() => togglePreview(s)}
+        title={previewId === s.id ? 'Остановить' : 'Прослушать'}
+        className={`shrink-0 w-6 h-6 border-2 font-pixel text-[9px] cursor-pointer ${previewId === s.id ? 'border-gold text-gold bg-gold/10' : 'border-edge text-dim hover:text-paper'}`}
+      >{previewId === s.id ? '■' : '▶'}</button>
+      <div className="flex-1 min-w-0">
+        <div className="font-display text-[10px] uppercase text-paper truncate">{s.name}</div>
+        <div className="tick-label text-faint">{fmtBytes(s.size)}</div>
+      </div>
+      <HoldDeleteButton onFire={() => void delSound(s)} label={`звук «${s.name}»`} ariaLabel="Удалить звук" title="Удалить звук из библиотеки" className="text-faint hover:text-coral cursor-pointer shrink-0 px-0.5">{Ic.cross(10)}</HoldDeleteButton>
+    </div>
+  );
+
+
   const addExtractToLibrary = async () => {
     if (!extract || !extract.tiles.length) return;
     const name = extract.name.trim() || 'Вырезанное';
@@ -402,17 +546,19 @@ export default function TokenEditor() {
   const saveAnim = async () => {
     if (!animDraft) return;
     if (!animDraft.frames.length) { toast('Добавьте хотя бы один кадр — кликайте тайлы слева', 'err'); sfx.fail(); return; }
+    const sndUrl = animDraft.sndId ? sounds.find((x) => x.id === animDraft.sndId)?.dataUrl : undefined;
     const a: AnimDef = {
       id: animDraft.id ?? uid('anim'),
       name: animDraft.name.trim().toUpperCase() || 'АНИМАЦИЯ',
       clip: { fps: Math.max(1, Math.min(24, animDraft.fps)), frames: animDraft.frames },
+      ...(sndUrl ? { snd: sndUrl } : {}),
       createdAt: animDraft.createdAt ?? Date.now(),
     };
     await idbPut('anims', a.id, a);
     await refresh();
     setAnimDraft(null);
     sfx.success();
-    toast(`Анимация «${a.name}» сохранена — вшивайте её в карты в редакторе карт`, 'ok');
+    toast(`Анимация «${a.name}» сохранена${a.snd ? ' со звуком' : ''} — вшивайте её в карты в редакторе карт`, 'ok');
   };
 
   /* УДАЛЁННАЯ фишка не должна оставаться вшитой в карты: чистим mapTokens всех карт,
@@ -470,12 +616,14 @@ export default function TokenEditor() {
   const saveTok = async () => {
     if (!tokDraft) return;
     if (!tokDraft.clips.idle.frames.length) { toast('Клип IDLE обязателен — добавьте в него кадры (это фишка, когда она стоит)', 'err'); sfx.fail(); return; }
+    const tokSndUrl = tokDraft.sndId ? sounds.find((x) => x.id === tokDraft.sndId)?.dataUrl : undefined;
     const anim: TokenAnim = {
       idle: { fps: Math.max(1, Math.min(24, tokDraft.clips.idle.fps)), frames: tokDraft.clips.idle.frames },
       ...(tokDraft.clips.up.frames.length ? { up: { fps: Math.max(1, Math.min(24, tokDraft.clips.up.fps)), frames: tokDraft.clips.up.frames } } : {}),
       ...(tokDraft.clips.down.frames.length ? { down: { fps: Math.max(1, Math.min(24, tokDraft.clips.down.fps)), frames: tokDraft.clips.down.frames } } : {}),
       ...(tokDraft.clips.left.frames.length ? { left: { fps: Math.max(1, Math.min(24, tokDraft.clips.left.fps)), frames: tokDraft.clips.left.frames } } : {}),
       ...(tokDraft.clips.right.frames.length ? { right: { fps: Math.max(1, Math.min(24, tokDraft.clips.right.fps)), frames: tokDraft.clips.right.frames } } : {}),
+      ...(tokSndUrl ? { snd: tokSndUrl } : {}),
     };
     const t: TokenDef = {
       id: tokDraft.id ?? uid('tok'),
@@ -489,7 +637,7 @@ export default function TokenEditor() {
     await refresh();
     setTokDraft(null);
     sfx.success();
-    toast(`Анимированная фишка «${t.name}» готова — отмечайте её в картах`, 'ok');
+    toast(`Анимированная фишка «${t.name}» готова${anim.snd ? ' со звуком хода' : ''} — отмечайте её в картах`, 'ok');
   };
 
   const removeTok = async (t: TokenDef) => {
@@ -663,6 +811,47 @@ export default function TokenEditor() {
             )}
             <p className="text-[10px] text-gold leading-tight mt-2">Откройте создание анимации или фишки — и кликайте тайлы здесь: они встанут КАДРАМИ по порядку. На вкладке «Обычные фишки» клик по тайлу откроет его в пиксель-редакторе, а доработанные варианты лягут на вкладку «✎ Изменённые тайлы» вверху панели.</p>
           </div>
+
+          {/* ---------- ЗВУКИ: библиотека для анимаций и фишек ---------- */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <div className="tick-label">🔊 Звуки · {sounds.length}</div>
+              <button onClick={() => sndFilesRef.current?.click()} className="text-[10px] text-sky hover:text-paper cursor-pointer">+ файлы</button>
+            </div>
+            <GhostBtn small className="w-full mb-2" onClick={() => sndFolderRef.current?.click()}>{Ic.upload(12)} Папка со звуками</GhostBtn>
+            {soundFolders.map((f) => {
+              const list = soundsIn(f);
+              const open = sndOpen[f] ?? true;
+              return (
+                <div key={f} className="mb-2">
+                  <div className="flex items-center gap-1 mb-1">
+                    <button
+                      onClick={() => setSndOpen((s) => ({ ...s, [f]: !open }))}
+                      className="flex-1 min-w-0 flex items-center gap-1 text-left cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
+                      title={open ? 'Свернуть' : 'Развернуть'}
+                    >
+                      <span className={`text-[10px] shrink-0 ${open ? 'text-gold' : 'text-faint'}`}>{open ? '▾' : '▸'}</span>
+                      <span className="text-[10px] text-faint shrink-0">📁</span>
+                      <span className="font-display text-[10px] uppercase text-dim truncate">{f}</span>
+                      <span className="tick-label text-faint shrink-0">· {list.length}</span>
+                    </button>
+                    <HoldDeleteButton onFire={() => void delSoundFolder(f)} label={`папку звуков «${f}» (${list.length})`} ariaLabel="Удалить папку звуков" title="Удалить папку со всеми звуками в ней" className="text-faint hover:text-coral cursor-pointer shrink-0 px-0.5">{Ic.cross(10)}</HoldDeleteButton>
+                  </div>
+                  {open && <div className="space-y-1">{list.map((s) => soundRow(s))}</div>}
+                </div>
+              );
+            })}
+            {looseSounds.length > 0 && (
+              <div className="mb-2">
+                <div className="tick-label text-faint mb-1 px-1">Без папки · {looseSounds.length}</div>
+                <div className="space-y-1">{looseSounds.map((s) => soundRow(s))}</div>
+              </div>
+            )}
+            {sounds.length === 0 && (
+              <p className="text-[10px] text-faint leading-tight">Пока звуков нет. Загрузите ПАПКУ (.mp3, .wav, .ogg, .m4a) или отдельные файлы — затем прикрепите звук к анимации или анимированной фишке в их создателях.</p>
+            )}
+            <p className="text-[10px] text-gold leading-tight mt-1">Звук вшивается в анимацию КОПИЕЙ — файл из библиотеки потом можно удалить, вшитое не сломается. Длинные записи сделают карту тяжелее: она уезжает игрокам целиком.</p>
+          </div>
         </div>
 
         {/* центр */}
@@ -694,8 +883,12 @@ export default function TokenEditor() {
                 </div>
                 <p className="text-[11px] text-gold leading-tight">Выбирайте анимацию КАДР ЗА КАДРОМ: кликайте тайлы в ЛЕВОЙ панели — они встанут по порядку. Стрелками ← → меняйте порядок кадров, × — уберите лишний.</p>
                 <FrameStrip clip={{ fps: animDraft.fps, frames: animDraft.frames }} onFrames={(frames) => setAnimDraft({ ...animDraft, frames })} size={64} />
+                <div className="pt-1 border-t-2 border-edge space-y-1">
+                  <SoundPicker sounds={sounds} value={animDraft.sndId ?? ''} onChange={(id) => setAnimDraft((d) => (d ? { ...d, sndId: id || undefined } : d))} />
+                  <p className="text-[10px] text-faint leading-tight">У анимации со звуком на карте задаётся РАДИУС: фишка играющего вошла в круг — звук играет (только у него), а в задании приглушается.</p>
+                </div>
                 <div className="flex justify-end gap-2">
-                  <GhostBtn onClick={() => setAnimDraft(null)}>Отмена</GhostBtn>
+                  <GhostBtn onClick={() => { stopOneShot(); setAnimDraft(null); }}>Отмена</GhostBtn>
                   <PxBtn color="sky" onClick={() => void saveAnim()}>{Ic.check(14)} Сохранить анимацию</PxBtn>
                 </div>
               </div>
@@ -746,8 +939,12 @@ export default function TokenEditor() {
                     </div>
                   );
                 })}
+                <div className="pt-1 border-t-2 border-edge space-y-1">
+                  <SoundPicker sounds={sounds} value={tokDraft.sndId ?? ''} onChange={(id) => setTokDraft((d) => (d ? { ...d, sndId: id || undefined } : d))} />
+                  <p className="text-[10px] text-faint leading-tight">Звук хода фишки: играет, ПОКА фишка движется (вместо стандартных «щелчков» шагов). Короткие звуки будут повторяться, пока фишка идёт.</p>
+                </div>
                 <div className="flex justify-end gap-2">
-                  <GhostBtn onClick={() => setTokDraft(null)}>Отмена</GhostBtn>
+                  <GhostBtn onClick={() => { stopOneShot(); setTokDraft(null); }}>Отмена</GhostBtn>
                   <PxBtn color="sky" onClick={() => void saveTok()}>{Ic.check(14)} Сохранить фишку</PxBtn>
                 </div>
               </div>
@@ -779,7 +976,7 @@ export default function TokenEditor() {
                       <div className="font-display text-[11px] uppercase text-paper truncate mt-2">{a.name}</div>
                       <div className="tick-label text-faint">{a.clip.frames.length} кадр. · {a.clip.fps} кадр/с</div>
                       <div className="flex justify-center gap-2 mt-2">
-                        <GhostBtn small onClick={() => { setAnimDraft({ id: a.id, name: a.name, fps: a.clip.fps, frames: [...a.clip.frames], createdAt: a.createdAt }); sfx.hover(); }} className="!px-2">Изменить</GhostBtn>
+                        <GhostBtn small onClick={() => { setAnimDraft({ id: a.id, name: a.name, fps: a.clip.fps, frames: [...a.clip.frames], createdAt: a.createdAt, sndId: sounds.find((x) => x.dataUrl === a.snd)?.id }); sfx.hover(); }} className="!px-2">Изменить</GhostBtn>
                         <HoldDeleteButton onFire={() => void removeAnim(a)} label={a.name} ariaLabel="Удалить анимацию">{Ic.trash(15)}</HoldDeleteButton>
                       </div>
                     </div>
@@ -808,7 +1005,7 @@ export default function TokenEditor() {
                         <div className="flex justify-center gap-2 mt-2">
                           <GhostBtn small onClick={() => {
                             const a = JSON.parse(JSON.stringify(t.anim)) as TokenAnim;
-                            setTokDraft({ id: t.id, name: t.name, createdAt: t.createdAt, size: t.size ?? DEF_TOKEN_SIZE, clips: { idle: a.idle, up: a.up ?? { fps: 6, frames: [] }, down: a.down ?? { fps: 6, frames: [] }, left: a.left ?? { fps: 6, frames: [] }, right: a.right ?? { fps: 6, frames: [] } } });
+                            setTokDraft({ id: t.id, name: t.name, createdAt: t.createdAt, size: t.size ?? DEF_TOKEN_SIZE, sndId: sounds.find((x) => x.dataUrl === a.snd)?.id, clips: { idle: a.idle, up: a.up ?? { fps: 6, frames: [] }, down: a.down ?? { fps: 6, frames: [] }, left: a.left ?? { fps: 6, frames: [] }, right: a.right ?? { fps: 6, frames: [] } } });
                             setActiveClip('idle');
                             sfx.hover();
                           }} className="!px-2">Изменить</GhostBtn>
@@ -855,6 +1052,8 @@ export default function TokenEditor() {
       <input ref={folderRef} type="file" multiple accept="image/*" style={{ display: 'none' }} {...({ webkitdirectory: 'true', directory: 'true' } as Record<string, string>)} onChange={(e) => { void addTileFiles(e.target.files, 'folder'); e.currentTarget.value = ''; }} />
       <input ref={filesRef} type="file" multiple accept="image/*" style={{ display: 'none' }} onChange={(e) => { void addTileFiles(e.target.files, 'files'); e.currentTarget.value = ''; }} />
       <input ref={extRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => { void openExtract(e.target.files?.[0]); e.currentTarget.value = ''; }} />
+      <input ref={sndFolderRef} type="file" multiple accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" style={{ display: 'none' }} {...({ webkitdirectory: 'true', directory: 'true' } as Record<string, string>)} onChange={(e) => { void addSoundFiles(e.target.files, 'folder'); e.currentTarget.value = ''; }} />
+      <input ref={sndFilesRef} type="file" multiple accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" style={{ display: 'none' }} onChange={(e) => { void addSoundFiles(e.target.files, 'files'); e.currentTarget.value = ''; }} />
 
       {extract && (
         <Modal title="Нарезка кадров из картинки" icon={Ic.pawn(16)} onClose={closeExtract} w="max-w-2xl">

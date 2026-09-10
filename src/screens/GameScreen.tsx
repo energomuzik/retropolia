@@ -19,6 +19,7 @@ import { PLAYER_COLORS, SKIP_COST, CHAOS_LIST, chaosLabel, JOY_LIST } from '../t
 import type { CardDef, ChaosKind, TaskDef } from '../types';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
+import { startLoop, stopLoop, syncLoops, stopGroup, killGroup, stopOneShot } from '../loopsnd';
 
 export default function GameScreen() {
   const st = useApp();
@@ -113,6 +114,8 @@ export default function GameScreen() {
   const prevDispRef = useRef<Record<string, { x: number; y: number }>>({}); // позиция фишки в прошлом кадре — для направления анимации
   const hopRef = useRef<Record<string, { queue: number[]; last: number; lastDir?: 'up' | 'down' | 'left' | 'right'; speed?: number }>>({});
   const arrivedRef = useRef(0);
+  /* игроки, чья фишка СЕЙЧАС идёт со СВОИМ звуком (anim.snd) — вместо «щелчков» шагов */
+  const moveSndRef = useRef<Set<string>>(new Set());
   const holdStartRef = useRef(0);
   const shakeIntRef = useRef(0);
 
@@ -239,6 +242,36 @@ export default function GameScreen() {
     });
   }, [me, options.broadcast]);
 
+  /* ---------- ЗВУКИ РАДИУСА у анимаций со звуком ----------
+     Триггер — фишка ИГРАЮЩЕГО игрока: вошла в круг (pa.r) — звук играет (фейд-ин),
+     вышла — затихает. Слышит только играющий; пока крутится его ЗАДАНИЕ (эмулятор),
+     все звуки радиуса приглушаются и возобновляются после. */
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      const cur = useApp.getState();
+      const m = cur.sessionMap;
+      const sess = cur.session;
+      if (!m || !sess || sess.phase !== 'playing') { stopGroup('amb-'); return; }
+      const act = sess.players[sess.turn % sess.players.length];
+      const ch = sess.challenge;
+      const emuRunning = !!ch && ch.started && (ch.status === 'playing' || ch.status === 'voting');
+      const mine = act?.id === cur.selfId;
+      const d = mine ? dispRef.current[cur.selfId] : null;
+      const wanted = new Map<string, string>();
+      if (d && !emuRunning) {
+        const alib = new Map((m.animLib ?? []).map((a) => [a.id, a]));
+        for (const pa of m.anims ?? []) {
+          const e = alib.get(pa.aid);
+          if (!e?.snd || !pa.r || pa.r <= 0) continue;
+          if (Math.hypot(d.x - pa.x, d.y - pa.y) <= pa.r) wanted.set(pa.id, e.snd);
+        }
+      }
+      syncLoops('amb-', wanted);
+    }, 250);
+    return () => { window.clearInterval(t); killGroup('amb-'); killGroup('mv-'); stopOneShot(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /* ---------- тик таймера ---------- */
   useEffect(() => {
     const t = setInterval(() => setTick((x) => x + 1), 500);
@@ -287,6 +320,21 @@ export default function GameScreen() {
     if (s?.moving) {
       hopRef.current[s.moving.player] = { queue: [...s.moving.path], last: 0 };
       setViewMode('follow');
+      /* ЗВУК ХОДА ФИШКИ: у фишки с анимацией со звуком — её собственный звук на всё время
+         движения (слышат все, как и «щелчки» шагов); у фишек без звука — шаги как раньше */
+      const cur = useApp.getState();
+      const mp = cur.session?.players.find((x) => x.id === s.moving!.player);
+      const snd = mp?.tokenKey ? (cur.sessionMap?.mapTokens ?? []).find((x) => x.id === mp.tokenKey)?.anim?.snd : undefined;
+      for (const k of [...moveSndRef.current]) {
+        if (k !== s.moving.player) { moveSndRef.current.delete(k); stopLoop(`mv-${k}`, 0.25); }
+      }
+      if (snd) {
+        moveSndRef.current.add(s.moving.player);
+        startLoop(`mv-${s.moving.player}`, snd, { instant: true, spd: 0.3 });
+      }
+    } else {
+      // движение кончилось — гасим все звуки хода
+      for (const k of [...moveSndRef.current]) { moveSndRef.current.delete(k); stopLoop(`mv-${k}`, 0.25); }
     }
   }, [s?.moving?.ts]);
 
@@ -381,7 +429,7 @@ export default function GameScreen() {
                 if (dist <= remain || dist < 0.5) { // dist < 0.5 — нулевой отрезок (стоим в этой клетке): сразу пройти
                   d.x = tgt.x; d.y = tgt.y; remain -= dist;
                   hop.queue.shift();
-                  sfx.step();
+                  if (!moveSndRef.current.has(p.id)) sfx.step(); // у фишки свой звук хода — «щелчки» не дублируем
                   if (hop.queue.length === 0 && sess.moving && sess.moving.player === p.id && p.id === me && arrivedRef.current !== sess.moving.ts) {
                     arrivedRef.current = sess.moving.ts;
                     dispatch({ t: 'arrived', id: me });
@@ -400,7 +448,7 @@ export default function GameScreen() {
               if (dist < 3) {
                 hop.queue.shift();
                 d.x = tgt.x; d.y = tgt.y;
-                sfx.step();
+                if (!moveSndRef.current.has(p.id)) sfx.step(); // у фишки свой звук хода — «щелчки» не дублируем
                 if (hop.queue.length === 0 && sess.moving && sess.moving.player === p.id && p.id === me && arrivedRef.current !== sess.moving.ts) {
                   arrivedRef.current = sess.moving.ts;
                   dispatch({ t: 'arrived', id: me });
@@ -411,6 +459,11 @@ export default function GameScreen() {
                 d.y += dy * Math.min(1, hf * dt);
                 lift = -Math.abs(Math.sin(t / 110)) * 7; // подскок — только в прыжковом режиме
               }
+            }
+            // фишка дошла (очередь пуста) — гасим её звук хода, если ещё играет
+            if (moveSndRef.current.has(p.id) && !hop.queue.length) {
+              moveSndRef.current.delete(p.id);
+              stopLoop(`mv-${p.id}`, 0.25);
             }
           } else if (!mvActive) {
             // тянем к авторитетной клетке только когда это движение не «висит» в ожидании

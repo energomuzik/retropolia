@@ -1,8 +1,9 @@
 const DB_NAME = 'retropolia-db';
 // v2: добавлено хранилище 'tokens' (фишки игроков)
 // v3: добавлены 'anims' (анимации автора), 'animTiles' и 'animGroups' (библиотека тайлов редактора анимаций)
-const DB_VERSION = 3;
-export const STORES = ['tiles', 'maps', 'roms', 'saves', 'blobs', 'sessions', 'tokens', 'anims', 'animTiles', 'animGroups'] as const;
+// v4: добавлено 'sounds' (звуковая библиотека для анимаций карт и фишек)
+const DB_VERSION = 4;
+export const STORES = ['tiles', 'maps', 'roms', 'saves', 'blobs', 'sessions', 'tokens', 'anims', 'animTiles', 'animGroups', 'sounds'] as const;
 export type StoreName = (typeof STORES)[number];
 
 let dbPromise: Promise<IDBDatabase> | null = null;

@@ -241,11 +241,11 @@ export default function MapEditor() {
       if (placeAnimId === a.id) setPlaceAnimId('');
       sfx.click();
     } else {
-      updMap({ animLib: [...lib, { id: a.id, name: a.name, clip: JSON.parse(JSON.stringify(a.clip)) }] });
+      updMap({ animLib: [...lib, { id: a.id, name: a.name, clip: JSON.parse(JSON.stringify(a.clip)), ...(a.snd ? { snd: a.snd } : {}) }] });
       setPlaceAnimId(a.id);
       setTool('anim');
       sfx.coin();
-      toast('Анимация вшита в карту — кликните по полю, чтобы разместить', 'ok');
+      toast(a.snd ? 'Анимация со звуком вшита в карту — кликните по полю, чтобы разместить (радиус зададите в её панели)' : 'Анимация вшита в карту — кликните по полю, чтобы разместить', 'ok');
     }
     dirtyRef.current = true;
   };
@@ -889,7 +889,8 @@ export default function MapEditor() {
         const maxSide = Math.max(natW, natH);
         const k = maxSide < 64 ? 64 / maxSide : maxSide > 128 ? 128 / maxSide : 1;
         const p = snapPt(w.x, w.y);
-        const pa: PlacedAnim = { id: uid('anim'), aid: placeAnimId, x: Math.round(p.x), y: Math.round(p.y), w: Math.round(natW * k), h: Math.round(natH * k) };
+        const withSnd = !!(m.animLib ?? []).find((x) => x.id === placeAnimId)?.snd; // у анимации со звуком — стартовый радиус
+        const pa: PlacedAnim = { id: uid('anim'), aid: placeAnimId, x: Math.round(p.x), y: Math.round(p.y), w: Math.round(natW * k), h: Math.round(natH * k), ...(withSnd ? { r: 160 } : {}) };
         setMap((mm) => (mm ? { ...mm, anims: [...(mm.anims ?? []), pa] } : mm));
         setSelAnim(pa.id);
         setSelCell(null);
@@ -1073,6 +1074,7 @@ export default function MapEditor() {
           currentCell: startCellIdx(m),
           showNumbers: true, tokens: [], time: t,
           hoverCell: null,
+          sndRadii: true, // пунктирные круги радиусов звука — только в редакторе
         });
         const v = viewRef.current;
         ctx.save();
@@ -1572,8 +1574,8 @@ export default function MapEditor() {
                                 <AnimPreview frames={a.clip.frames} fps={a.clip.fps} size={28} />
                               </div>
                               <div className="flex-1 min-w-0">
-                                <div className="font-display text-[10px] uppercase text-paper truncate">{a.name}</div>
-                                <div className="tick-label text-faint">{a.clip.frames.length} кадр. · {a.clip.fps} кадр/с</div>
+                                <div className="font-display text-[10px] uppercase text-paper truncate">{a.snd ? '🔊 ' : ''}{a.name}</div>
+                                <div className="tick-label text-faint">{a.clip.frames.length} кадр. · {a.clip.fps} кадр/с{a.snd ? ' · со звуком' : ''}</div>
                               </div>
                               <button
                                 onClick={() => toggleMapAnim(a)}
@@ -1595,14 +1597,14 @@ export default function MapEditor() {
                             <button
                               key={e.id}
                               onClick={() => { setPlaceAnimId(e.id); setTool('anim'); setSelAnim(null); sfx.hover(); }}
-                              title={`Размещать «${e.name}» на карте`}
+                              title={`Размещать «${e.name}» на карте${e.snd ? ' (со звуком)' : ''}`}
                               className={`px-1.5 py-1 border-2 font-display text-[8px] uppercase cursor-pointer ${placeAnimId === e.id ? 'border-gold text-gold' : 'border-edge text-dim hover:text-paper'}`}
-                            >{e.name.slice(0, 10)}</button>
+                            >{e.snd ? '🔊 ' : ''}{e.name.slice(0, 10)}</button>
                           ))}
                         </div>
                       </div>
                     )}
-                    <p className="text-[10px] text-faint mt-1.5 leading-tight">Вшитые анимации уезжают всем игрокам вместе с картой. Экземпляры можно двигать мышью, менять размер за жёлтый угол и слоями.</p>
+                    <p className="text-[10px] text-faint mt-1.5 leading-tight">Вшитые анимации уезжают всем игрокам вместе с картой. Экземпляры можно двигать мышью, менять размер за жёлтый угол и слоями. 🔊 — у анимации есть звук: у её экземпляров на карте задаётся радиус.</p>
                   </div>
                 )}
               </div>
@@ -1995,6 +1997,17 @@ export default function MapEditor() {
                     <div className="flex items-center justify-between"><span className="text-[10px] text-dim">Ширина</span><Stepper value={Math.round(selAnimDef.w)} onChange={(v) => { updAnim(selAnimIdx, { w: v }); dirtyRef.current = true; }} min={12} max={2048} step={8} /></div>
                     <div className="flex items-center justify-between"><span className="text-[10px] text-dim">Высота</span><Stepper value={Math.round(selAnimDef.h)} onChange={(v) => { updAnim(selAnimIdx, { h: v }); dirtyRef.current = true; }} min={12} max={2048} step={8} /></div>
                   </div>
+                  {selAnimLib?.snd ? (
+                    <div className="space-y-1 border-2 border-teal/40 px-2 py-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-teal">🔊 Радиус звука</span>
+                        <Stepper value={selAnimDef.r ?? 0} onChange={(v) => { updAnim(selAnimIdx, { r: v }); dirtyRef.current = true; }} min={0} max={3000} step={10} suffix=" px" />
+                      </div>
+                      <p className="text-[10px] text-teal leading-tight">Фишка ИГРАЮЩЕГО вошла в круг — звук анимации играет, только у него; в задании он приглушается. 0 = молчит. Пунктирный круг виден только в редакторе.</p>
+                    </div>
+                  ) : (
+                    <p className="text-[10px] text-faint leading-tight">У этой анимации звука нет — прикрепите его в «Редакторе анимаций и фишек» (спойлер «Звуки»), затем пере-вшите её в карту.</p>
+                  )}
                   <p className="text-[10px] text-gold leading-tight">Тяните жёлтый УГОЛОК рамки на карте — меняете размер мышью. Центр не двигается.</p>
 
                   <div className="grid grid-cols-2 gap-1.5">

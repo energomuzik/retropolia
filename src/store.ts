@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { AnimDef, GameMap, GameOptions, GameSession, RomDef, SaveDef, SessionSnapshot, TileDef, TileGroup, TileImg, TokenDef } from './types';
+import type { AnimDef, GameMap, GameOptions, GameSession, RomDef, SaveDef, SessionSnapshot, SoundDef, TileDef, TileGroup, TileImg, TokenDef } from './types';
 import type { NetInfo, Room } from './net';
 import { idbAll, idbGet, idbPut } from './db';
 import { builtinTiles } from './assets';
@@ -25,6 +25,7 @@ interface AppState {
   saves: SaveDef[];
   tokens: TokenDef[];
   anims: AnimDef[]; // свободные анимации автора (для карт)
+  sounds: SoundDef[]; // звуковая библиотека (для анимаций и фишек)
   animTiles: TileImg[]; // библиотека тайлов редактора анимаций (глобальная)
   animGroups: TileGroup[]; // папки/нарезки в панели редактора анимаций
   refresh: () => Promise<void>;
@@ -93,16 +94,18 @@ export const useApp = create<AppState>()((set, get) => ({
   saves: [],
   tokens: [],
   anims: [],
+  sounds: [],
   animTiles: [],
   animGroups: [],
   refresh: async () => {
-    const [tiles, maps, roms, saves, tokens, anims, animTiles, animGroups] = await Promise.all([
+    const [tiles, maps, roms, saves, tokens, anims, sounds, animTiles, animGroups] = await Promise.all([
       idbAll<TileDef>('tiles'),
       idbAll<GameMap>('maps'),
       idbAll<RomDef>('roms'),
       idbAll<SaveDef>('saves'),
       idbAll<TokenDef>('tokens'),
       idbAll<AnimDef>('anims'),
+      idbAll<SoundDef>('sounds'),
       idbAll<TileImg>('animTiles'),
       idbAll<TileGroup>('animGroups'),
     ]);
@@ -120,6 +123,7 @@ export const useApp = create<AppState>()((set, get) => ({
       saves: saves.map((e) => e.value).sort((a, b) => a.slot - b.slot),
       tokens: tokens.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
       anims: anims.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
+      sounds: sounds.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
       animTiles: animTiles.map((e) => e.value),
       animGroups: animGroups.map((e) => e.value),
     });

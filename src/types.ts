@@ -402,6 +402,19 @@ export interface TokenAnim {
   down?: AnimClip;
   left?: AnimClip;
   right?: AnimClip;
+  snd?: string; // data:audio — звук хода фишки: играет, ПОКА фишка идёт (вместо «щелчков» шагов); вшивается копией вместе с фишкой
+}
+
+/* Звук из библиотеки редактора анимаций и фишек (IndexedDB).
+   В анимации/фишку звук вшивается КОПИЕЙ (dataUrl), поэтому сам файл из библиотеки
+   можно удалять — уже вшитые анимации не ломаются. Длинные записи делают карту тяжелее. */
+export interface SoundDef {
+  id: string;
+  name: string;
+  dataUrl: string; // data:audio/...
+  size: number; // байт исходного файла
+  createdAt: number;
+  folder?: string; // папка-спойлер; нет — «Без папки»
 }
 
 /* Свободная анимация автора (библиотека в редакторе анимаций и фишек):
@@ -410,6 +423,7 @@ export interface AnimDef {
   id: string;
   name: string;
   clip: AnimClip;
+  snd?: string; // data:audio — звук анимации (вшивается копией)
   createdAt: number;
 }
 
@@ -418,6 +432,7 @@ export interface AnimLibEntry {
   id: string;
   name: string;
   clip: AnimClip;
+  snd?: string; // звук, вшитый в карту вместе с анимацией
 }
 
 /* Размещённая на карте анимация — как штамп-тайл, но проигрывает кадры.
@@ -429,6 +444,7 @@ export interface PlacedAnim {
   y: number;
   w: number;
   h: number;
+  r?: number; // радиус звука в px поля (у анимаций со звуком): фишка ИГРАЮЩЕГО вошла в круг — звук играет, только у него; в задании приглушается. нет/0 — молчит
 }
 
 export interface ChallengeState {

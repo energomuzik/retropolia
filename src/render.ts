@@ -272,6 +272,7 @@ export interface BoardDrawOpts {
   time: number;
   hoverCell: number | null;
   mystery?: Set<number>; // ячейки, которые ещё не «открыты» — рисуем как «?»
+  sndRadii?: boolean; // пунктирные круги радиуса звука у анимаций со звуком (только редактор карт; в игре не рисуем)
 }
 
 function px(ctx: CanvasRenderingContext2D, x: number, y: number, s: number, pattern: string[], color: string) {
@@ -387,6 +388,19 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
   for (const pa of map.anims ?? []) {
     const entry = alib.get(pa.aid);
     if (!entry || !entry.clip.frames.length) continue;
+    // круг радиуса звука — только в редакторе карт: автор видит зону срабатывания
+    if (o.sndRadii && entry.snd && pa.r && pa.r > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(pa.x, pa.y, pa.r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(46,230,168,0.06)';
+      ctx.fill();
+      ctx.setLineDash([10, 7]);
+      ctx.strokeStyle = 'rgba(46,230,168,0.75)';
+      ctx.lineWidth = 2 / Math.max(0.05, view.zoom);
+      ctx.stroke();
+      ctx.restore();
+    }
     const img = getImage(entry.clip.frames[clipFrameIdx(entry.clip, o.time)]);
     if (!img) continue;
     ctx.save();
