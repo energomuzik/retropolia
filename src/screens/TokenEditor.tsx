@@ -4,8 +4,8 @@ import { AnimPreview, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
 import PixelPaint, { emptyGrid, gridToDataUrl, imageToGrid } from '../PixelPaint';
 import { extractTilesFromImage } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
-import { idbDel, idbPut, uid } from '../db';
-import type { AnimClip, AnimDef, TokenAnim, TokenDef, TileGroup, TileImg } from '../types';
+import { idbAll, idbDel, idbPut, uid } from '../db';
+import type { AnimClip, AnimDef, GameMap, TokenAnim, TokenDef, TileGroup, TileImg } from '../types';
 import { sfx } from '../sound';
 
 const SIZES = [12, 16, 24, 32];
@@ -133,6 +133,17 @@ export default function TokenEditor() {
   const exTimerRef = useRef<number | null>(null);
 
   const tileById = useMemo(() => new Map(animTiles.map((t) => [t.id, t])), [animTiles]);
+
+  /* «Изменённые тайлы» — отдельная вкладка ВВЕРХУ левой панели (под «Зеркалом кадров»):
+     тайлы, доработанные в пикс-редакторе на вкладке «Обычные фишки»; отсюда их удобно
+     брать кадрами для анимаций фишек и анимаций карт. В общем списке папок не дублируются */
+  const [edOpen, setEdOpen] = useState(true);
+  const editedGroups = useMemo(() => (animGroups ?? []).filter((g) => g.kind === 'edited'), [animGroups]);
+  const otherGroups = useMemo(() => (animGroups ?? []).filter((g) => g.kind !== 'edited'), [animGroups]);
+  const editedTiles = useMemo(
+    () => editedGroups.flatMap((g) => g.tids.map((tid) => tileById.get(tid)).filter(Boolean) as TileImg[]),
+    [editedGroups, tileById],
+  );
 
   const runExtract = async (base: { file: File; src: string; bgMode: 'auto' | 'custom'; bg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; name: string }, patch: Partial<typeof base>) => {
     const next = { ...base, ...patch };
@@ -371,10 +382,36 @@ export default function TokenEditor() {
     toast(`Анимация «${a.name}» сохранена — вшивайте её в карты в редакторе карт`, 'ok');
   };
 
+  /* УДАЛЁННАЯ фишка не должна оставаться вшитой в карты: чистим mapTokens всех карт,
+     иначе при запуске карты удалённую фишку всё ещё можно выбрать */
+  const purgeTokFromMaps = async (tokId: string) => {
+    const all = await idbAll<GameMap>('maps');
+    for (const { key, value: mp } of all) {
+      const next = (mp.mapTokens ?? []).filter((x) => x.id !== tokId);
+      if (next.length !== (mp.mapTokens ?? []).length) {
+        await idbPut('maps', key, { ...mp, mapTokens: next, updatedAt: Date.now() });
+      }
+    }
+  };
+
+  /* УДАЛЁННАЯ анимация: чистим animLib всех карт И снятые с карты анимации с этой ссылкой
+     (иначе в редакторе карт остаются битые записи, а анимация — «жива» внутри карты) */
+  const purgeAnimFromMaps = async (animId: string) => {
+    const all = await idbAll<GameMap>('maps');
+    for (const { key, value: mp } of all) {
+      const lib = (mp.animLib ?? []).filter((x) => x.id !== animId);
+      const placed = (mp.anims ?? []).filter((x) => x.aid !== animId);
+      if (lib.length !== (mp.animLib ?? []).length || placed.length !== (mp.anims ?? []).length) {
+        await idbPut('maps', key, { ...mp, animLib: lib, anims: placed, updatedAt: Date.now() });
+      }
+    }
+  };
+
   const removeAnim = async (a: AnimDef) => {
     await idbDel('anims', a.id);
+    await purgeAnimFromMaps(a.id);
     await refresh();
-    toast(`Анимация «${a.name}» удалена`, 'err');
+    toast(`Анимация «${a.name}» удалена — также убрана из всех карт, где была вшита`, 'err');
   };
 
   const saveTok = async () => {
@@ -404,8 +441,9 @@ export default function TokenEditor() {
 
   const removeTok = async (t: TokenDef) => {
     await idbDel('tokens', t.id);
+    await purgeTokFromMaps(t.id);
     await refresh();
-    toast(`Фишка «${t.name}» удалена`, 'err');
+    toast(`Фишка «${t.name}» удалена — также убрана из всех карт, где была выбрана`, 'err');
   };
 
   /* ---------- обычные фишки: пиксель-арт / PNG / правка ---------- */
@@ -486,7 +524,46 @@ export default function TokenEditor() {
               title="ЗЕРКАЛО по горизонтали: пока включено, каждый клик по тайлу добавляет ОТРАЖЁННУЮ копию кадра — для тайлов, нарисованных только в одну сторону"
               className={`w-full py-1 mb-2 border-2 font-display text-[9px] uppercase cursor-pointer ${mirrorMode ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}
             >⇋ Зеркало кадров: {mirrorMode ? 'ВКЛ' : 'ВЫКЛ'}</button>
-            {(animGroups ?? []).map((g) => {
+
+            {/* ---------- «Изменённые тайлы»: всегда вверху, под «Зеркалом кадров» ---------- */}
+            <div className="mb-3">
+              <button
+                onClick={() => setEdOpen((v) => !v)}
+                title={edOpen ? 'Свернуть' : 'Развернуть'}
+                className="w-full flex items-center gap-1 text-left cursor-pointer hover:bg-[rgba(255,207,63,0.08)] px-1 py-0.5 mb-1"
+              >
+                <span className={`text-[10px] shrink-0 ${edOpen ? 'text-gold' : 'text-faint'}`}>{edOpen ? '▾' : '▸'}</span>
+                <span className="text-[10px] text-gold shrink-0">✎</span>
+                <span className="font-display text-[10px] uppercase text-dim truncate">Изменённые тайлы</span>
+                <span className="tick-label text-faint shrink-0">· {editedTiles.length}</span>
+              </button>
+              {edOpen && (
+                editedTiles.length ? (
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {editedTiles.map((t) => (
+                      <button
+                        key={t.id}
+                        title={`${t.name} — клик: добавить кадром (или открыть в пикс-редакторе на вкладке «Обычные фишки»)`}
+                        onClick={() => onTileClick(t)}
+                        className={`relative aspect-square border-2 border-gold/40 overflow-hidden cursor-pointer transition-transform hover:scale-105 ${(animDraft || tokDraft) ? 'hover:border-gold' : ''}`}
+                      >
+                        <img src={t.dataUrl} alt={t.name} className="w-full h-full object-cover" style={{ imageRendering: 'pixelated' }} />
+                        <span
+                          role="button"
+                          aria-label="удалить тайл"
+                          onClick={(ev) => { ev.stopPropagation(); void delTile(t.id); }}
+                          className="absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center opacity-0 hover:opacity-100 cursor-pointer"
+                        >×</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-faint leading-tight px-1">Пока пусто: на вкладке «Обычные фишки» кликните тайл и дорисуйте его — изменённая версия появится здесь и пойдёт в анимации фишек и карт.</p>
+                )
+              )}
+            </div>
+
+            {(otherGroups ?? []).map((g) => {
               const inG = g.tids.map((tid) => tileById.get(tid)).filter(Boolean) as TileImg[];
               const tag = g.kind === 'extract' ? '✂' : g.kind === 'edited' ? '✎' : g.kind === 'folder' ? '›' : '+';
               return (
@@ -530,7 +607,7 @@ export default function TokenEditor() {
             {animGroups.length === 0 && (
               <p className="text-[10px] text-faint leading-tight">Загрузите папку с картинками-кадрами, отдельные файлы или нарежьте кадры из спрайт-листа («✂ Нарезать»). Библиотека одна для всех анимаций и фишек.</p>
             )}
-            <p className="text-[10px] text-gold leading-tight mt-2">Откройте создание анимации или фишки — и кликайте тайлы здесь: они встанут КАДРАМИ по порядку. На вкладке «Обычные фишки» клик по тайлу откроет его в пиксель-редакторе, а доработанные варианты сами лягут в группу «✎ Изменённые».</p>
+            <p className="text-[10px] text-gold leading-tight mt-2">Откройте создание анимации или фишки — и кликайте тайлы здесь: они встанут КАДРАМИ по порядку. На вкладке «Обычные фишки» клик по тайлу откроет его в пиксель-редакторе, а доработанные варианты лягут на вкладку «✎ Изменённые тайлы» вверху панели.</p>
           </div>
         </div>
 

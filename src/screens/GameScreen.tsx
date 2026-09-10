@@ -298,13 +298,19 @@ export default function GameScreen() {
     }
   }, [s?.moving?.ts, s?.challenge, s?.pendingCard, s?.quiz, s?.awaitPost]);
 
-  /* ---------- авто-доезд (страховка хоста) ---------- */
+  /* ---------- авто-доезд (страховка хоста) ----------
+     Бюджет движения зависит от длины пути и скорости карты: на медленных скоростях
+     (например 0.5 кл/с) путь идёт дольше фиксированных 8 секунд — раньше страховка
+     обрывала ход на полпути, камера прыгала на следующего игрока, а фишка телепортировалась. */
   useEffect(() => {
     if (!room?.isHost) return;
     const t = setInterval(() => {
       const cur = useApp.getState();
       const mv = cur.session?.moving;
-      if (mv && Date.now() - mv.ts > 8000) {
+      if (!mv) return;
+      const cps = clampMoveSpeed(cur.sessionMap?.moveSpeed ?? DEF_MOVE_SPEED); // кл/с из карты
+      const budget = Math.max(8000, (mv.path.length / cps) * 1000 + 6000); // время пути + запас 6 с
+      if (Date.now() - mv.ts > budget) {
         dispatch({ t: 'arrived', id: mv.player });
       }
     }, 2000);
@@ -359,15 +365,20 @@ export default function GameScreen() {
                  Скорость — в клетках в секунду, задаёт автор карты (moveSpeed) */
               if (hop.speed === undefined) {
                 const t0 = cellCenter(m, hop.queue[0]);
-                const seg0 = Math.hypot(t0.x - d.x, t0.y - d.y);
-                hop.speed = smoothPxPerFrame(seg0, cps); // px за кадр 60fps
+                let seg0 = Math.hypot(t0.x - d.x, t0.y - d.y);
+                if (seg0 < 0.5 && hop.queue.length > 1) {
+                  // путь начинается с текущей клетки — скорость меряем по следующему отрезку
+                  const t1 = cellCenter(m, hop.queue[1]);
+                  seg0 = Math.hypot(t1.x - d.x, t1.y - d.y);
+                }
+                hop.speed = smoothPxPerFrame(Math.max(seg0, 1), cps); // px за кадр 60fps
               }
               let remain = hop.speed * dt;
               while (remain > 0 && hop.queue.length) {
                 const tgt = cellCenter(m, hop.queue[0]);
                 const dx = tgt.x - d.x, dy = tgt.y - d.y;
                 const dist = Math.hypot(dx, dy);
-                if (dist <= remain) {
+                if (dist <= remain || dist < 0.5) { // dist < 0.5 — нулевой отрезок (стоим в этой клетке): сразу пройти
                   d.x = tgt.x; d.y = tgt.y; remain -= dist;
                   hop.queue.shift();
                   sfx.step();
