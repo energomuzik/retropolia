@@ -232,6 +232,9 @@ canvas { image-rendering: pixelated; }
 }
 .glow-throb { animation: glow-throb 2.2s ease-in-out infinite; }
 
+/* полоска удержания Delete (режим «долгое нажатие» с клавиатуры, delGuard.useKeyDelete) */
+@keyframes delhold { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
 .tick-label {
   font-family: var(--font-pixel);
   font-size: 9px;

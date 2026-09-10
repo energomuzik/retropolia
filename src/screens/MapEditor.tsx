@@ -9,7 +9,7 @@ import { extractTilesFromImage } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimDef, CellDef, CellType, GameMap, PlacedAnim, Stamp, TokenDef, TileGroup, TileImg } from '../types';
-import { HoldDeleteButton, rememberDeleted } from '../delGuard';
+import { HoldDeleteButton, rememberDeleted, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
 
 /* ---------- импорт картинок: сжимаем до разумного размера, чтобы карта не весила десятки МБ ---------- */
@@ -143,6 +143,8 @@ export default function MapEditor() {
   const [snap, setSnap] = useState(false);
   const [tokOpen, setTokOpen] = useState(true); // спойлер «Фишки партии» в левой панели
   const [animOpen, setAnimOpen] = useState(false); // спойлер «Анимации» в левой панели
+  const [layersOpen, setLayersOpen] = useState(true); // спойлер «Слои» в левой панели
+  const [activeLayer, setActiveLayer] = useState(0); // слой, на который ставятся НОВЫЕ тайлы (0 — нижний)
   const [placeAnimId, setPlaceAnimId] = useState(''); // вшитая анимация, выбранная для размещения
   const [selAnim, setSelAnim] = useState<string | null>(null); // выбранная размещённая анимация
   const [extract, setExtract] = useState<{ file: File; src: string; name: string; busy: boolean; bgMode: 'auto' | 'custom'; bg: string; foundBg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; tiles: TileImg[] } | null>(null);
@@ -166,6 +168,9 @@ export default function MapEditor() {
   const dirtyRef = useRef(false);
   const toolRef = useRef(tool); toolRef.current = tool;
   const snapRef = useRef(snap); snapRef.current = snap;
+  const activeLayerRef = useRef(activeLayer); activeLayerRef.current = activeLayer; // для placeStamp (читается из замыканий)
+  /* удаление с клавиатуры (Delete/Backspace), подчиняющееся режиму из Опций */
+  const keyDel = useKeyDelete();
 
   const tileset: TileImg[] = map?.tileset ?? [];
   const tileImgById = useMemo(() => new Map(tileset.map((t) => [t.id, t])), [tileset]);
@@ -326,6 +331,7 @@ export default function MapEditor() {
     setPlaceAnimId('');
     setLinkFrom(null);
     setTool('select');
+    setActiveLayer(Math.max(0, (copy.tileLayers ?? 2) - 1)); // новые тайлы — на верхний слой (чем моложе, тем выше)
     requestAnimationFrame(() => {
       const cv = canvasRef.current;
       if (cv) setView(fitView(copy, cv.clientWidth, cv.clientHeight));
@@ -561,7 +567,7 @@ export default function MapEditor() {
       const maxSide = Math.max(natW, natH);
       const k = maxSide < 64 ? 64 / maxSide : maxSide > 128 ? 128 / maxSide : 1;
       const p = snapPt(wx, wy);
-      const st: Stamp = { id: uid('st'), tid: tileId, x: Math.round(p.x), y: Math.round(p.y), w: Math.round(natW * k), h: Math.round(natH * k), rot: 0 };
+      const st: Stamp = { id: uid('st'), tid: tileId, x: Math.round(p.x), y: Math.round(p.y), w: Math.round(natW * k), h: Math.round(natH * k), rot: 0, ...(activeLayerRef.current > 0 ? { layer: activeLayerRef.current } : {}) };
       setMap((mm) => (mm ? { ...mm, stamps: [...(mm.stamps ?? []), st] } : mm));
       setSelStamp(st.id);
       setSelCell(null);
@@ -620,6 +626,17 @@ export default function MapEditor() {
         }
       },
     });
+  };
+
+  /* удалить штамп по индексу: запомнить для Ctrl+Z и убрать (кнопка «Удалить тайл» в панели и клавиша Delete) */
+  const deleteStampNow = (idx: number) => {
+    const m = mapRef.current;
+    const st = m?.stamps?.[idx];
+    if (!m || !st) return;
+    forgetStamp(idx);
+    setMap((mm) => (mm ? { ...mm, stamps: (mm.stamps ?? []).filter((s) => s.id !== st.id) } : mm));
+    setSelStamp(null);
+    dirtyRef.current = true;
   };
 
   const deleteCell = (idx: number) => {
@@ -949,16 +966,15 @@ export default function MapEditor() {
       if (e.key === 'Escape') { setLinkFrom(null); setSelCell(null); setSelStamp(null); setSelAnim(null); setPlaceAnimId(''); return; }
       if (!map) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (e.repeat) return; // удержание обрабатывает useKeyDelete (режим «долгое нажатие»)
         if (selStamp && selStampIdx >= 0) {
-          forgetStamp(selStampIdx);
-          setMap((mm) => (mm ? { ...mm, stamps: (mm.stamps ?? []).filter((s) => s.id !== selStamp) } : mm));
-          setSelStamp(null);
-          dirtyRef.current = true;
-          sfx.fail();
+          const st = map.stamps![selStampIdx];
+          keyDel.keyDeleteStart(`тайл «${tileImgById.get(st.tid)?.name ?? 'с карты'}» с карты`, () => deleteStampNow(selStampIdx));
         } else if (selAnim) {
-          removeAnim(selAnim);
+          const an = (map.anims ?? []).find((a) => a.id === selAnim);
+          keyDel.keyDeleteStart(`анимацию «${(map.animLib ?? []).find((x) => x.id === an?.aid)?.name ?? 'с карты'}»`, () => removeAnim(selAnim));
         } else if (selCell !== null) {
-          deleteCell(selCell);
+          keyDel.keyDeleteStart('ячейку маршрута', () => deleteCell(selCell));
         }
         return;
       }
@@ -973,8 +989,20 @@ export default function MapEditor() {
         sfx.hover();
       }
     };
+    /* отпустили Delete в режиме «долгое нажатие» — отменяем удержание */
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Delete' || e.key === 'Backspace') keyDel.keyDeleteCancel(true);
+    };
+    /* окно потеряло фокус — не оставляем «зависшее» удержание */
+    const onBlur = () => keyDel.keyDeleteCancel(false);
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [map, selCell, selStamp, selStampIdx, selAnim]);
 
@@ -1261,6 +1289,61 @@ export default function MapEditor() {
                 <p className="text-[10px] text-faint mt-1 leading-tight">Фон лежит ВНУТРИ карты и уедет игрокам сам. Большая картинка сожмётся до 2000px.</p>
               </div>
 
+              {/* СЛОИ: фон — самый низ, тайловые слои (выбор + добавление), ячейки и стрелки — всегда самый верх */}
+              {map && (
+                <div>
+                  <button onClick={() => setLayersOpen((o) => !o)} className="w-full flex items-center gap-1.5 mb-2 cursor-pointer group" title={layersOpen ? 'Свернуть' : 'Развернуть'}>
+                    <span className={`text-[10px] ${layersOpen ? 'text-gold' : 'text-faint'}`}>{layersOpen ? '▾' : '▸'}</span>
+                    <span className="tick-label group-hover:text-paper">🗂 Слои карты</span>
+                  </button>
+                  {layersOpen && (
+                    <div className="space-y-1">
+                      {/* фон — самый нижний слой */}
+                      <div className="flex items-center gap-1.5 border-2 border-edge bg-panel px-2 py-1.5">
+                        <span className="text-[10px] shrink-0">🖼</span>
+                        <span className="font-display text-[10px] uppercase text-dim flex-1 min-w-0 truncate">Фон</span>
+                        <span className="tick-label text-faint">{map.bg ? 'есть' : 'нет'} · низ</span>
+                      </div>
+                      {/* тайловые слои: клик — выбрать для рисования */}
+                      {Array.from({ length: map.tileLayers ?? 2 }, (_, i) => i).map((i) => {
+                        const cnt = (map.stamps ?? []).filter((s) => (s.layer ?? 0) === i).length;
+                        const active = activeLayer === i;
+                        return (
+                          <button
+                            key={i}
+                            onClick={() => { setActiveLayer(i); sfx.hover(); }}
+                            className={`w-full flex items-center gap-1.5 border-2 px-2 py-1.5 cursor-pointer transition-colors ${active ? 'border-gold bg-gold/10' : 'border-edge bg-panel hover:border-edge2'}`}
+                            title={active ? 'Активный слой — новые тайлы встанут сюда' : `Рисовать на слое ${i + 1}`}
+                          >
+                            <span className={`text-[10px] shrink-0 ${active ? 'text-gold' : 'text-faint'}`}>{active ? '✏' : '·'}</span>
+                            <span className={`font-display text-[10px] uppercase flex-1 min-w-0 text-left truncate ${active ? 'text-gold' : 'text-dim'}`}>Слой {i + 1}</span>
+                            <span className="tick-label text-faint">{cnt} шт.</span>
+                          </button>
+                        );
+                      })}
+                      {/* ячейки и стрелки — всегда самый верх */}
+                      <div className="flex items-center gap-1.5 border-2 border-edge bg-panel px-2 py-1.5">
+                        <span className="text-[10px] shrink-0">✚</span>
+                        <span className="font-display text-[10px] uppercase text-dim flex-1 min-w-0 truncate">Ячейки и стрелки</span>
+                        <span className="tick-label text-faint">всегда верх</span>
+                      </div>
+                      <div className="flex items-center justify-between pt-0.5">
+                        <p className="text-[10px] text-faint leading-tight flex-1 min-w-0">Активный слой помечен ✏ — новые тайлы встанут на него. «Слой ±» в панели тайла переносит его между слоями.</p>
+                        {(map.tileLayers ?? 2) < 6 && (
+                          <GhostBtn small className="ml-2 shrink-0" onClick={() => {
+                            const n = (map.tileLayers ?? 2) + 1;
+                            updMap({ tileLayers: n });
+                            setActiveLayer(n - 1); // новый слой сразу активен — рисуем на нём
+                            dirtyRef.current = true;
+                            sfx.coin();
+                          }}>{Ic.plus(11)} Слой</GhostBtn>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <div className="tick-label">Тайлы карты · {tileset.length}</div>
@@ -1528,7 +1611,7 @@ export default function MapEditor() {
                 {tool === 'erase' && <div className="text-coral font-pixel text-[8px]">ЛАСТИК: клик или тяните с кнопкой — стирает ТАЙЛЫ под курсором · ячейки не трогает</div>}
               </div>
               <div className="absolute bottom-3 right-3 tick-label text-faint text-right pointer-events-none">
-                колесо — зум · ПКМ — камера · Delete — удалить · R — поворот · жёлтый угол тайла — размер
+                колесо — зум · ПКМ — камера · Delete — удалить (по режиму из Опций) · R — поворот · жёлтый угол тайла — размер
               </div>
 
               {/* панель ячейки */}
@@ -1785,34 +1868,48 @@ export default function MapEditor() {
                       sfx.hover();
                     }}>Дублировать</GhostBtn>
                     <GhostBtn small onClick={() => {
-                      const st = map!.stamps!;
-                      if (selStampIdx >= st.length - 1) return;
-                      const arr = st.slice();
-                      [arr[selStampIdx], arr[selStampIdx + 1]] = [arr[selStampIdx + 1], arr[selStampIdx]];
-                      updMap({ stamps: arr });
+                      const cur = selStampDef.layer ?? 0;
+                      const maxL = (map.tileLayers ?? 2) - 1;
+                      if (cur < maxL) {
+                        updStamp(selStampIdx, { layer: cur + 1 });
+                      } else {
+                        // уже верхний слой — поднимаем НАД ВСЕМИ тайлами этого слоя (в конец массива)
+                        const arr = [...(map.stamps ?? [])];
+                        const [st] = arr.splice(selStampIdx, 1);
+                        if (st) arr.push(st);
+                        updMap({ stamps: arr });
+                        toast('Тайл поднят над всеми тайлами верхнего слоя', 'info');
+                      }
                       dirtyRef.current = true;
-                    }} title="Выше по слоям (перекрывает соседей)">Слой +</GhostBtn>
+                      sfx.hover();
+                    }} title="СЛОЙ ВЫШЕ: тайл перекроет тайлы нижних слоёв">Слой +</GhostBtn>
                     <GhostBtn small onClick={() => {
-                      const st = map!.stamps!;
-                      if (selStampIdx <= 0) return;
-                      const arr = st.slice();
-                      [arr[selStampIdx], arr[selStampIdx - 1]] = [arr[selStampIdx - 1], arr[selStampIdx]];
-                      updMap({ stamps: arr });
+                      const cur = selStampDef.layer ?? 0;
+                      if (cur > 0) {
+                        updStamp(selStampIdx, { layer: cur - 1 });
+                      } else {
+                        // уже нижний слой — опускаем ПОД ВСЕ тайлы этого слоя (в начало массива)
+                        const arr = [...(map.stamps ?? [])];
+                        const [st] = arr.splice(selStampIdx, 1);
+                        if (st) arr.unshift(st);
+                        updMap({ stamps: arr });
+                        toast('Тайл опущен под все тайлы нижнего слоя', 'info');
+                      }
                       dirtyRef.current = true;
-                    }} title="Ниже по слоям (под соседями)">Слой −</GhostBtn>
+                      sfx.hover();
+                    }} title="СЛОЙ НИЖЕ: тайл уйдёт ПОД тайлы верхних слоёв">Слой −</GhostBtn>
                   </div>
+                  <p className="text-[10px] text-gold leading-tight">Слой {(selStampDef.layer ?? 0) + 1} из {map.tileLayers ?? 2}. «Слой ±» переносит тайл между слоями; на крайнем — под/над всеми тайлами этого слоя.</p>
 
-                  <button
-                    onClick={() => {
-                      setMap((mm) => (mm ? { ...mm, stamps: (mm.stamps ?? []).filter((s) => s.id !== selStampDef.id) } : mm));
-                      setSelStamp(null);
-                      dirtyRef.current = true;
-                      sfx.fail();
-                    }}
+                  <HoldDeleteButton
+                    onFire={() => deleteStampNow(selStampIdx)}
+                    label={`тайл «${selTileDef?.name ?? '?'}» с карты`}
+                    ariaLabel="Удалить тайл с карты"
+                    title="Удалить тайл с карты"
                     className="w-full py-1.5 border-2 border-coral/60 text-coral font-display text-[10px] uppercase hover:bg-coral/10 transition-colors cursor-pointer"
                   >
                     Удалить тайл
-                  </button>
+                  </HoldDeleteButton>
                 </div>
               )}
 
@@ -1866,12 +1963,15 @@ export default function MapEditor() {
                     <GhostBtn small onClick={() => { setPlaceAnimId(selAnimDef.aid); sfx.hover(); toast('Кликайте по полю — поставите ещё экземпляры этой анимации', 'info'); }}>Ставить ещё</GhostBtn>
                   </div>
 
-                  <button
-                    onClick={() => removeAnim(selAnimDef.id)}
+                  <HoldDeleteButton
+                    onFire={() => removeAnim(selAnimDef.id)}
+                    label={`анимацию «${selAnimLib?.name ?? '?'}» с карты`}
+                    ariaLabel="Удалить анимацию с карты"
+                    title="Удалить анимацию с карты"
                     className="w-full py-1.5 border-2 border-coral/60 text-coral font-display text-[10px] uppercase hover:bg-coral/10 transition-colors cursor-pointer"
                   >
                     Удалить анимацию
-                  </button>
+                  </HoldDeleteButton>
                 </div>
               )}
             </>
@@ -1884,6 +1984,9 @@ export default function MapEditor() {
       <input ref={filesRef} type="file" multiple accept="image/*" style={{ display: 'none' }} onChange={(e) => { void addTileFiles(e.target.files, 'files'); e.currentTarget.value = ''; }} />
       <input ref={bgRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => { void setBg(e.target.files); e.currentTarget.value = ''; }} />
       <input ref={extRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => { void openExtract(e.target.files?.[0]); e.currentTarget.value = ''; }} />
+
+      {/* окошко подтверждения / полоска удержания для Delete-клавиши (режим из Опций) */}
+      {keyDel.node}
 
       {extract && (
         <Modal title="Нарезка тайлов из картинки" icon={Ic.map(16)} onClose={closeExtract} w="max-w-2xl">

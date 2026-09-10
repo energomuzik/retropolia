@@ -15,6 +15,19 @@ import { sfx } from '../sound';
 
 const fmtSize = (b: number) => (b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} МБ` : `${Math.max(1, Math.round(b / 1024))} КБ`);
 
+/* пустые папки ромов (без ромов) — в localStorage, чтобы пустая папка не исчезала */
+const ROM_FOLDERS_KEY = 'retropolia-rom-folders';
+const loadEmptyRomFolders = (): string[] => {
+  try {
+    const raw = localStorage.getItem(ROM_FOLDERS_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string' && x.trim()) : [];
+  } catch { return []; }
+};
+const saveEmptyRomFolders = (arr: string[]) => {
+  try { localStorage.setItem(ROM_FOLDERS_KEY, JSON.stringify(arr)); } catch { /* приватный режим — переживём */ }
+};
+
 export default function EmulatorLauncher() {
   const { roms, saves, setScreen, refresh, toast } = useApp();
   const [romId, setRomId] = useState<string | null>(null);
@@ -30,19 +43,33 @@ export default function EmulatorLauncher() {
   const launchedRomRef = useRef<string | null>(null);
   // наш редактор управления (открывается кнопкой «Управление» рядом с эмулятором)
   const [controlsOpen, setControlsOpen] = useState(false);
-  // папки ромов: имя папки для следующей загрузки + какие спойлеры свернуты
-  const [newRomFolder, setNewRomFolder] = useState('');
+  // папки ромов: выбранная папка для загрузки + какие спойлеры свернуты + пустые папки (localStorage)
+  const [uploadFolder, setUploadFolder] = useState(''); // '' — «Без папки»
+  const [newFolderOpen, setNewFolderOpen] = useState(false); // строка создания новой папки
+  const [newFolderName, setNewFolderName] = useState('');
+  const [emptyFolders, setEmptyFolders] = useState<string[]>(loadEmptyRomFolders);
   const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({});
+
+  const setEmptyFoldersSaved = (updater: (prev: string[]) => string[]) => {
+    setEmptyFolders((prev) => {
+      const next = updater(prev);
+      saveEmptyRomFolders(next);
+      return next;
+    });
+  };
+  const addEmptyRomFolder = (name: string) => setEmptyFoldersSaved((prev) => (prev.includes(name) ? prev : [...prev, name]));
+  const removeEmptyRomFolder = (name: string) => setEmptyFoldersSaved((prev) => prev.filter((x) => x !== name));
 
   const rom = roms.find((r) => r.id === romId) ?? null;
   const isNes = rom?.ext === 'nes';
   const romSaves = saves.filter((s) => s.romId === romId).sort((a, b) => a.slot - b.slot);
 
   /* группировка ромов по папкам (спойлеры, как у тайлов в редакторах);
-     ромы без папки показываются отдельным списком «Без папки» */
+     ромы без папки показываются отдельным списком «Без папки».
+     В списке и пустые папки (созданные кнопкой «+ Папка» и ещё не заполненные) */
   const folderNames = useMemo(
-    () => [...new Set(roms.map((r) => r.folder ?? '').filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru')),
-    [roms],
+    () => [...new Set([...emptyFolders, ...roms.map((r) => r.folder ?? '').filter(Boolean)])].sort((a, b) => a.localeCompare(b, 'ru')),
+    [roms, emptyFolders],
   );
   const looseRoms = useMemo(() => roms.filter((r) => !r.folder), [roms]);
   const romsIn = (folder: string) => roms.filter((r) => r.folder === folder);
@@ -88,27 +115,49 @@ export default function EmulatorLauncher() {
     };
   }, []);
 
+  /* загрузка СРАЗУ НЕСКОЛЬКИХ ромов в выбранную папку (select над кнопкой) */
   const onUpload = async (files: FileList | null) => {
-    const f = files?.[0];
-    if (!f) return;
-    const ext = (f.name.split('.').pop() ?? '').toLowerCase();
-    const isNesFile = ext === 'nes';
-    const isSegaFile = ['md', 'gen', 'sms', 'gg', 'bin'].includes(ext);
-    if (!isNesFile && !isSegaFile) { toast('Поддерживаются .nes (NES) и .md/.gen/.sms/.gg/.bin (SEGA)', 'err'); return; }
-    const buf = await f.arrayBuffer();
-    const folder = newRomFolder.trim().slice(0, 24);
-    const r: RomDef = {
-      id: uid('rom'), name: f.name.replace(/\.[^.]+$/, ''), fileName: f.name,
-      ext: isNesFile ? 'nes' : 'sega', size: f.size, createdAt: Date.now(),
-      ...(folder ? { folder } : {}),
-    };
-    await idbPut('roms', r.id, r);
-    await idbPut('blobs', `rom-${r.id}`, buf);
+    const list = Array.from(files ?? []);
+    if (!list.length) return;
+    const folder = uploadFolder.trim().slice(0, 24);
+    let lastId: string | null = null;
+    let loaded = 0, skipped = 0;
+    for (const f of list) {
+      const ext = (f.name.split('.').pop() ?? '').toLowerCase();
+      const isNesFile = ext === 'nes';
+      const isSegaFile = ['md', 'gen', 'sms', 'gg', 'bin'].includes(ext);
+      if (!isNesFile && !isSegaFile) { skipped++; continue; }
+      const buf = await f.arrayBuffer();
+      const r: RomDef = {
+        id: uid('rom'), name: f.name.replace(/\.[^.]+$/, ''), fileName: f.name,
+        ext: isNesFile ? 'nes' : 'sega', size: f.size, createdAt: Date.now(),
+        ...(folder ? { folder } : {}),
+      };
+      await idbPut('roms', r.id, r);
+      await idbPut('blobs', `rom-${r.id}`, buf);
+      lastId = r.id;
+      loaded++;
+    }
+    if (!loaded) { toast('Нет поддерживаемых файлов: .nes (NES) и .md/.gen/.sms/.gg/.bin (SEGA)', 'err'); return; }
+    if (folder) removeEmptyRomFolder(folder); // папка больше не пустая
     await refresh();
-    setRomId(r.id);
+    if (lastId) setRomId(lastId);
     setRunning(false);
     sfx.coin();
-    toast(`Ром «${r.name}» загружен (${isNesFile ? 'NES' : 'SEGA'})${folder ? ` → папка «${folder}»` : ''}`, 'ok');
+    toast(skipped ? `Ромов загружено: ${loaded} → папка «${folder || 'Без папки'}» · пропущено чужих: ${skipped}` : `Ромов загружено: ${loaded}${folder ? ` → папка «${folder}»` : ''}`, 'ok');
+  };
+
+  /* создать папку: имя вводится в строке под списком; пустая папка хранится в localStorage */
+  const createRomFolder = () => {
+    const name = newFolderName.trim().slice(0, 24);
+    if (!name) { toast('Введите название папки', 'err'); return; }
+    if (folderNames.includes(name)) { toast('Такая папка уже есть', 'err'); return; }
+    addEmptyRomFolder(name);
+    setUploadFolder(name); // сразу выбрана — можно заливать ромы
+    setNewFolderName('');
+    setNewFolderOpen(false);
+    sfx.coin();
+    toast(`Папка «${name}» создана — загрузите в неё ромы`, 'ok');
   };
 
   const launch = async (state?: unknown) => {
@@ -181,10 +230,21 @@ export default function EmulatorLauncher() {
     toast(`Ром «${r.name}» и его сохранения удалены`, 'err');
   };
 
-  /* удалить папку ромов: ромы + их данные + сохранения (всё запоминается для Ctrl+Z) */
+  /* удалить папку ромов: ромы + их данные + сохранения (всё запоминается для Ctrl+Z);
+     пустую папку просто убираем из списка — Ctrl+Z вернёт и её */
   const delRomFolder = async (folder: string) => {
     const inF = roms.filter((r) => r.folder === folder);
-    if (!inF.length) return;
+    if (!inF.length) {
+      rememberDeleted({
+        label: `пустую папку «${folder}»`,
+        restore: async () => { addEmptyRomFolder(folder); await refresh(); },
+      });
+      removeEmptyRomFolder(folder);
+      if (uploadFolder === folder) setUploadFolder('');
+      sfx.fail();
+      toast(`Пустая папка «${folder}» убрана`, 'err');
+      return;
+    }
     const items: { rom: RomDef; blob: ArrayBuffer | null; saves: SaveDef[] }[] = [];
     for (const r of inF) {
       items.push({ rom: r, blob: await getRomData(r.id), saves: saves.filter((s) => s.romId === r.id) });
@@ -206,6 +266,8 @@ export default function EmulatorLauncher() {
       await idbDel('blobs', `rom-${it.rom.id}`);
     }
     if (romId && inF.some((r) => r.id === romId)) { setRomId(null); setRunning(false); }
+    removeEmptyRomFolder(folder);
+    if (uploadFolder === folder) setUploadFolder('');
     await refresh();
     toast(`Папка «${folder}» удалена (ромов: ${inF.length})`, 'err');
   };
@@ -258,31 +320,46 @@ export default function EmulatorLauncher() {
           <h1 className="font-display text-2xl uppercase tracking-wider text-coral flex items-center gap-3">
             <span className="text-coral">{Ic.chip(22)}</span> Запуск эмулятора
           </h1>
-          <PxBtn color="coral" className="ml-auto" onClick={() => fileRef.current?.click()}>{Ic.upload(15)} Загрузить ром</PxBtn>
-          <input ref={fileRef} type="file" accept=".nes,.md,.gen,.sms,.gg,.bin" className="hidden" onChange={(e) => { void onUpload(e.target.files); e.target.value = ''; }} />
+          <PxBtn color="coral" className="ml-auto" onClick={() => fileRef.current?.click()}>{Ic.upload(15)} Загрузить ромы</PxBtn>
+          <input ref={fileRef} type="file" accept=".nes,.md,.gen,.sms,.gg,.bin" multiple className="hidden" onChange={(e) => { void onUpload(e.target.files); e.target.value = ''; }} />
         </div>
         <p className="text-[13px] text-dim mb-6 max-w-3xl">
           Тестовый стенд: гоняйте ромы (NES и SEGA), проходите до нужного места и жмите <span className="text-gold font-display uppercase">«Сохранить состояние»</span> —
-          слоты потом выбираются в редакторе заданий. Ромы можно раскладывать по папкам (спойлеры, как у тайлов) —
-          впишите имя папки перед загрузкой. Удаление ромов, папок и сохранений подчиняется режиму из «Опций»,
-          а Ctrl+Z вернёт последнее удалённое.
+          слоты потом выбираются в редакторе заданий. Ромы раскладываются по папкам-спойлерам (как тайлы):
+          создайте папку кнопкой «+ Папка», выберите её в списке и загрузите сразу пачку файлов.
+          Удаление папок, ромов и сохранений подчиняется режиму из «Опций», а Ctrl+Z вернёт последнее удалённое.
         </p>
 
         <div className="grid lg:grid-cols-[300px_1fr] gap-5">
           <Panel title={`Ромы · ${roms.length}`} icon={Ic.cart(16)} accent="var(--color-coral)">
             <div className="p-2.5 space-y-1.5 max-h-[460px] overflow-y-auto">
-              {/* папка для следующей загрузки: с автодополнением по существующим */}
-              <input
-                className="field-in w-full px-2 py-1.5 text-[11px]"
-                placeholder="Папка для загрузки (можно пусто)"
-                list="rom-folder-list"
-                maxLength={24}
-                value={newRomFolder}
-                onChange={(e) => setNewRomFolder(e.target.value)}
-              />
-              <datalist id="rom-folder-list">
-                {folderNames.map((f) => <option key={f} value={f} />)}
-              </datalist>
+              {/* папка для загрузки + создание новой */}
+              <div className="flex items-center gap-1">
+                <select
+                  className="field-in flex-1 min-w-0 px-2 py-1.5 text-[11px] cursor-pointer"
+                  value={uploadFolder}
+                  onChange={(e) => setUploadFolder(e.target.value)}
+                  title="Папка, в которую попадут загружаемые ромы"
+                >
+                  <option value="">Без папки</option>
+                  {folderNames.map((f) => <option key={f} value={f}>📁 {f}</option>)}
+                </select>
+                <GhostBtn small className="shrink-0" onClick={() => { setNewFolderOpen((o) => !o); sfx.click(); }} title="Создать новую папку">{Ic.plus(11)} Папка</GhostBtn>
+              </div>
+              {newFolderOpen && (
+                <div className="flex items-center gap-1">
+                  <input
+                    className="field-in flex-1 min-w-0 px-2 py-1.5 text-[11px]"
+                    placeholder="Название новой папки"
+                    maxLength={24}
+                    autoFocus
+                    value={newFolderName}
+                    onChange={(e) => setNewFolderName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') createRomFolder(); if (e.key === 'Escape') setNewFolderOpen(false); }}
+                  />
+                  <PxBtn color="teal" small onClick={createRomFolder}>OK</PxBtn>
+                </div>
+              )}
 
               {/* папки-спойлеры с ромами */}
               {folderNames.map((f) => {
@@ -329,7 +406,7 @@ export default function EmulatorLauncher() {
                 <div className="text-center py-8 px-3">
                   <span className="text-coral inline-block floaty">{Ic.cart(36)}</span>
                   <p className="text-[12px] text-dim mt-3">Загрузите файл .nes или .md/.sms — и вперёд</p>
-                  <p className="text-[10px] text-faint mt-2 leading-tight">Чтобы разложить ромы по папкам, впишите имя папки в поле выше перед загрузкой</p>
+                  <p className="text-[10px] text-faint mt-2 leading-tight">Создайте папку («+ Папка»), выберите её в списке — и жмите «Загрузить ромы»: можно сразу несколько файлов</p>
                 </div>
               )}
             </div>

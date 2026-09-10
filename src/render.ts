@@ -86,14 +86,27 @@ export function clipForToken(anim: TokenAnim, dir: TokenDir | undefined): AnimCl
   return anim.idle;
 }
 
-/* ШТАМП под точкой: верхний — тот, что позже в массиве (рисуется последним) */
+/* ШТАМП под точкой: верхний — самый высокий СЛОЙ, в нём — позже по массиву */
 export function stampAtPoint(map: GameMap, wx: number, wy: number): number {
-  const st = map.stamps ?? [];
-  for (let i = st.length - 1; i >= 0; i--) {
-    const s = st[i];
+  const order = stampsDrawOrder(map); // от нижних к верхним
+  for (let k = order.length - 1; k >= 0; k--) {
+    const i = order[k]; // ищем начиная с САМОГО ВЕРХНЕГО (верхний слой, в нём — позже по массиву)
+    const s = (map.stamps ?? [])[i];
+    if (!s) continue;
     if (wx >= s.x - s.w / 2 && wx < s.x + s.w / 2 && wy >= s.y - s.h / 2 && wy < s.y + s.h / 2) return i;
   }
   return -1;
+}
+
+/* ПОРЯДОК ОТРИСОВКИ ШТАМПОВ: по слоям снизу вверх (layer, нет = 0), внутри слоя —
+   порядок в массиве (позже = выше). Возвращает ИНДЕКСЫ в map.stamps.
+   Фон карты всегда ниже всех, ячейки/стрелки — выше всех (они рисуются позже в drawBoard). */
+export function stampsDrawOrder(map: GameMap): number[] {
+  const st = map.stamps ?? [];
+  return st
+    .map((s, i) => ({ l: s.layer ?? 0, i }))
+    .sort((a, b) => (a.l !== b.l ? a.l - b.l : a.i - b.i))
+    .map((x) => x.i);
 }
 
 /* ---------- маршрут: следующая/предыдущая ячейка ---------- */
@@ -344,10 +357,12 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     }
   }
 
-  // ШТАМПЫ (тайлы редактора в стиле Tiled): порядок в массиве = слой, последние сверху
+  // ШТАМПЫ (тайлы редактора в стиле Tiled): сначала СЛОЙ (layer снизу вверх), внутри слоя — порядок в массиве (последние сверху)
   const tset = tilesetMap(map);
   const stamps = map.stamps ?? [];
-  for (const st of stamps) {
+  for (const si of stampsDrawOrder(map)) {
+    const st = stamps[si];
+    if (!st) continue;
     const t = tset.get(st.tid);
     const img = t ? getImage(t.dataUrl) : null;
     ctx.save();
