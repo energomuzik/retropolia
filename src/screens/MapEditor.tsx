@@ -9,6 +9,7 @@ import { extractTilesFromImage } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimDef, CellDef, CellType, GameMap, PlacedAnim, Stamp, TokenDef, TileGroup, TileImg } from '../types';
+import { MAP_MODES } from '../types';
 import { HoldDeleteButton, rememberDeleted, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
 
@@ -1494,6 +1495,29 @@ export default function MapEditor() {
                   <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Минут у каждого</span><Stepper value={map.startMin ?? 60} onChange={(v) => updMap({ startMin: v })} min={5} max={180} step={5} /></div>
                   <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><Stepper value={map.startTries ?? 60} onChange={(v) => updMap({ startTries: v })} min={5} max={180} step={5} /></div>
                 </div>
+              </div>
+
+              <div>
+                <div className="tick-label mb-2">Режим игры</div>
+                <div className="space-y-1.5">
+                  {MAP_MODES.map((md) => {
+                    const on = (map.mode ?? 'classic') === md.id;
+                    return (
+                      <button
+                        key={md.id}
+                        onClick={() => { updMap({ mode: md.id }); sfx.hover(); }}
+                        title={md.hint}
+                        className={`w-full text-left border-2 px-2.5 py-2 cursor-pointer transition-colors ${on ? 'border-gold bg-gold/10' : 'border-edge bg-panel hover:border-edge2'}`}
+                      >
+                        <div className={`font-display text-[11px] uppercase ${on ? 'text-gold' : 'text-paper'}`}>{on ? '✓ ' : ''}{md.name}</div>
+                        <div className="tick-label text-faint mt-0.5 leading-tight">{md.hint}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-faint mt-1.5 leading-tight">
+                  Отметка действует на ВСЮ карту и видна игрокам при выборе карты. CLASSIC — обычная игра с кубиками (по умолчанию).
+                </p>
               </div>
 
               <div>

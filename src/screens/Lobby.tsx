@@ -7,7 +7,7 @@ import { newSession, fmtClock } from '../engine';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import { downloadHostBat } from '../host/hostPackage';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
-import type { GameMap, SessionSnapshot } from '../types';
+import type { GameMap, MapMode, SessionSnapshot } from '../types';
 import { PLAYER_COLORS, PLAYER_NAMES } from '../types';
 import { sfx } from '../sound';
 
@@ -17,6 +17,11 @@ export function CreateScreen() {
   const { maps, roms, setScreen, toast } = useApp();
   const ready = maps.filter((m) => m.ready);
   const [sel, setSel] = useState<string | null>(null);
+  /* фильтры/сортировка списка карт: режим, консоль заданий, квизы/бонусы/ловушки */
+  const [fMode, setFMode] = useState<'all' | MapMode>('all');
+  const [fCons, setFCons] = useState<'all' | 'nes' | 'sega'>('all');
+  const [fExtra, setFExtra] = useState<'all' | 'quiz' | 'bonus' | 'trap'>('all');
+  const [sortBy, setSortBy] = useState<'new' | 'name' | 'mode'>('new');
 
   // сводка по карте: что на ней есть (для списка с галочками)
   const mapFacts = (m: GameMap) => {
@@ -32,8 +37,49 @@ export function CreateScreen() {
       nes: taskCells.filter((c) => romExt(c.task!.romId) === 'nes').length,
       sega: taskCells.filter((c) => romExt(c.task!.romId) && romExt(c.task!.romId) !== 'nes').length,
       empty: m.cells.filter((c) => c.type === 'task' && !c.task).length,
+      mode: (m.mode ?? 'classic') as MapMode,
     };
   };
+
+  const modeChip: Record<MapMode, { label: string; cls: string }> = {
+    classic: { label: 'CLASSIC', cls: 'border-edge text-faint' },
+    skill: { label: 'SKILL CHALLENGE', cls: 'border-magma/60 text-magma' },
+    journey: { label: 'JOURNEY', cls: 'border-teal/60 text-teal' },
+  };
+
+  const shown = ready
+    .filter((m) => {
+      const f = mapFacts(m);
+      if (fMode !== 'all' && f.mode !== fMode) return false;
+      if (fCons === 'nes' && f.nes === 0) return false;
+      if (fCons === 'sega' && f.sega === 0) return false;
+      if (fExtra === 'quiz' && f.quiz === 0) return false;
+      if (fExtra === 'bonus' && f.bonus === 0) return false;
+      if (fExtra === 'trap' && f.trap === 0) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      if (sortBy === 'name') return a.name.localeCompare(b.name, 'ru');
+      if (sortBy === 'mode') {
+        const order: MapMode[] = ['classic', 'skill', 'journey'];
+        const d = order.indexOf(mapFacts(a).mode) - order.indexOf(mapFacts(b).mode);
+        return d !== 0 ? d : a.name.localeCompare(b.name, 'ru');
+      }
+      return b.updatedAt - a.updatedAt;
+    });
+
+  const chip = (on: boolean, label: string, onClick: () => void, tone = 'gold') => (
+    <button
+      onClick={() => { onClick(); sfx.hover(); }}
+      className={`px-2.5 py-1 text-[10px] font-display uppercase border-2 cursor-pointer transition-colors ${
+        on
+          ? tone === 'magma' ? 'border-magma text-magma bg-magma/10'
+            : tone === 'teal' ? 'border-teal text-teal bg-teal/10'
+            : tone === 'sky' ? 'border-sky text-sky bg-sky/10'
+            : 'border-gold text-gold bg-gold/10'
+          : 'border-edge text-faint hover:text-dim'}`}
+    >{on ? '✓ ' : ''}{label}</button>
+  );
 
   const create = () => {
     const st = useApp.getState();
@@ -55,9 +101,44 @@ export function CreateScreen() {
             <span className="text-gold">{Ic.dice(22)}</span> Создание игры
           </h1>
         </div>
-        <p className="text-[13px] text-dim mb-6">Выберите готовую карту — комната получит её автоматически, все игроки будут на одном поле.</p>
+        <p className="text-[13px] text-dim mb-4">Выберите готовую карту — комната получит её автоматически, все игроки будут на одном поле.</p>
+        {ready.length > 0 && (
+          <div className="mb-5 space-y-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="tick-label text-faint mr-1 shrink-0">Режим:</span>
+              {chip(fMode === 'all', 'Все', () => setFMode('all'))}
+              {chip(fMode === 'classic', 'Classic', () => setFMode('classic'))}
+              {chip(fMode === 'skill', 'Skill Challenge', () => setFMode('skill'), 'magma')}
+              {chip(fMode === 'journey', 'Journey', () => setFMode('journey'), 'teal')}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="tick-label text-faint mr-1 shrink-0">Консоль:</span>
+              {chip(fCons === 'all', 'Любая', () => setFCons('all'))}
+              {chip(fCons === 'nes', 'Есть NES', () => setFCons('nes'), 'sky')}
+              {chip(fCons === 'sega', 'Есть SEGA', () => setFCons('sega'), 'magma')}
+              <span className="tick-label text-faint mr-1 ml-3 shrink-0">На карте:</span>
+              {chip(fExtra === 'all', 'Всё', () => setFExtra('all'))}
+              {chip(fExtra === 'quiz', 'Квизы', () => setFExtra('quiz'), 'sky')}
+              {chip(fExtra === 'bonus', 'Бонусы', () => setFExtra('bonus'), 'teal')}
+              {chip(fExtra === 'trap', 'Ловушки', () => setFExtra('trap'), 'magma')}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="tick-label text-faint shrink-0">Сортировка:</span>
+              <select
+                className="field-in px-2 py-1.5 text-[11px] cursor-pointer"
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as 'new' | 'name' | 'mode')}
+              >
+                <option value="new">По новизне</option>
+                <option value="name">По названию</option>
+                <option value="mode">По режиму</option>
+              </select>
+              <span className="tick-label text-faint">карт: {shown.length} из {ready.length}</span>
+            </div>
+          </div>
+        )}
         <div className="grid sm:grid-cols-2 gap-4">
-          {ready.map((m: GameMap) => (
+          {shown.map((m: GameMap) => (
             <button
               key={m.id}
               onClick={() => { setSel(m.id); sfx.hover(); }}
@@ -65,7 +146,7 @@ export function CreateScreen() {
             >
               <div className="flex items-center justify-between">
                 <span className="font-display uppercase text-paper text-lg">{m.name}</span>
-                {sel === m.id && <span className="text-gold">{Ic.check(16)}</span>}
+                <span className={`font-pixel text-[7px] px-1.5 py-0.5 border-2 shrink-0 ${modeChip[mapFacts(m).mode].cls}`}>{modeChip[mapFacts(m).mode].label}</span>
               </div>
               <div className="tick-label text-faint mt-2">{(() => { const f = mapFacts(m); return `${f.cells} ячеек на маршруте`; })()}</div>
               <div className="mt-2.5 grid grid-cols-2 gap-x-3 gap-y-1">
@@ -95,6 +176,11 @@ export function CreateScreen() {
               </div>
             </button>
           ))}
+          {shown.length === 0 && ready.length > 0 && (
+            <div className="pixel-corners border-[3px] border-dashed border-edge p-6 text-center text-dim text-sm sm:col-span-2">
+              Под эти фильтры карт нет — ослабьте условия (сбросьте галочки сверху).
+            </div>
+          )}
           {ready.length === 0 && (
             <div className="pixel-corners border-[3px] border-dashed border-edge p-6 text-center text-dim text-sm sm:col-span-2">
               Готовых карт нет. Соберите карту и наполните её заданиями.
@@ -601,7 +687,10 @@ export function LobbyScreen() {
             <div className="flex items-center gap-2 mb-2.5">
               <span className="text-gold">{Ic.map(16)}</span>
               <span className="font-display uppercase tracking-wider text-paper text-sm">{sessionMap.name}</span>
-              <span className="tick-label text-faint ml-auto">карту раздаёт хост — у всех игроков она одинаковая</span>
+              {sessionMap.mode === 'skill' && <span className="font-pixel text-[7px] px-1.5 py-0.5 border-2 border-magma/60 text-magma shrink-0">SKILL CHALLENGE</span>}
+              {sessionMap.mode === 'journey' && <span className="font-pixel text-[7px] px-1.5 py-0.5 border-2 border-teal/60 text-teal shrink-0">JOURNEY</span>}
+              {sessionMap.mode === 'skill' && <span className="tick-label text-magma ml-auto">играет только хост · остальные — зрители</span>}
+              {sessionMap.mode !== 'skill' && <span className="tick-label text-faint ml-auto">карту раздаёт хост — у всех игроков она одинаковая</span>}
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1">
               {(() => {
@@ -793,9 +882,10 @@ export function LobbyScreen() {
             </PxBtn>
           )}
           {isHost && !resumeSnap && (() => {
-            const fewPlayers = session.players.length < 2;
-            const notReady = session.players.some((p) => !p.ready);
-            const notLoaded = session.players.some((p) => !p.isHost && (sync[p.id] ?? 0) < 100);
+            const skillSolo = sessionMap?.mode === 'skill';
+            const fewPlayers = session.players.length < 2 && !skillSolo;
+            const notReady = skillSolo ? false : session.players.some((p) => !p.ready);
+            const notLoaded = skillSolo ? false : session.players.some((p) => !p.isHost && (sync[p.id] ?? 0) < 100);
             const blocked = fewPlayers || notReady || notLoaded;
             return (
               <PxBtn
@@ -803,9 +893,9 @@ export function LobbyScreen() {
                 color="gold"
                 onClick={() => dispatch({ t: 'start' })}
                 disabled={blocked}
-                title={fewPlayers ? 'Для партии нужно минимум два игрока' : notReady ? 'Все игроки должны быть готовы' : notLoaded ? 'Ждём, пока все игроки загрузят данные карты' : undefined}
+                title={fewPlayers ? 'Для партии нужно минимум два игрока (в SKILL CHALLENGE можно начать и одному)' : notReady ? 'Все игроки должны быть готовы' : notLoaded ? 'Ждём, пока все игроки загрузят данные карты' : undefined}
               >
-                {Ic.dice(18)} {fewPlayers ? 'Ждём игроков…' : notLoaded ? 'Загрузка данных…' : 'Начать игру'}
+                {Ic.dice(18)} {fewPlayers ? (skillSolo ? 'Начать (вы один — зрители подтянутся)' : 'Ждём игроков…') : notLoaded ? 'Загрузка данных…' : 'Начать игру'}
               </PxBtn>
             );
           })()}

@@ -1,7 +1,7 @@
-import type { CardDef, GameMap, GameOptions, GameSession, PlayerState, TaskDef, TradeOffer } from './types';
-import { APP_VERSION, SKIP_COST, START_SEC, START_TRIES, JOY_LIST, mkJoyCard } from './types';
+import type { CardDef, GameMap, GameOptions, GameSession, PlayerState, TaskDef, TradeOffer, TokenDir } from './types';
+import { APP_VERSION, SKIP_COST, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS } from './types';
 import type { JoyId } from './types';
-import { hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
+import { CELL, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
 
 export type Action =
   | { t: 'hello'; id: string; name: string }
@@ -33,7 +33,9 @@ export type Action =
   | { t: 'quizTarget'; id: string; target: string }
   | { t: 'quizTimeout' }
   | { t: 'quizDone'; id: string }
-  | { t: 'cardAck'; id: string };
+  | { t: 'cardAck'; id: string }
+  | { t: 'journeyMove'; id: string; x: number; y: number; dir?: TokenDir } // JOURNEY: позиция фишки активного игрока (авторитет — хост)
+  | { t: 'journeyEnd'; id: string }; // JOURNEY: игрок сам передаёт ход
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const rnd6 = () => 1 + Math.floor(Math.random() * 6);
@@ -53,6 +55,20 @@ function normPlayer(p: PlayerState) {
   if (p.dicePlus === undefined) p.dicePlus = false;
   if (p.freeSkip === undefined) p.freeSkip = false;
   if (p.joyTurn === undefined) p.joyTurn = -1;
+  if (p.spect === undefined) p.spect = false;
+}
+
+const CELL_PX = CELL; // клетка сетки поля
+
+/* прямоугольник ячейки в px поля (для JOURNEY: «фишка пересекла ячейку») */
+function cellRectOf(map: GameMap, idx: number) {
+  const c = map.cells[idx];
+  if (!c) return null;
+  if (c.cx !== undefined && c.cy !== undefined) {
+    const w = c.cw ?? CELL_PX, h = c.ch ?? CELL_PX;
+    return { x: c.cx - w / 2, y: c.cy - h / 2, w, h };
+  }
+  return { x: c.x * CELL_PX, y: c.y * CELL_PX, w: (c.w || 1) * CELL_PX, h: (c.h || 1) * CELL_PX };
 }
 
 export function newSession(code: string, mapId: string, hostId: string, hostName: string): GameSession {
@@ -135,6 +151,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     base.turnNo = base.turnNo ?? 1;
     base.winner = base.winner ?? null;
     base.trades = Array.isArray(base.trades) ? base.trades : [];
+    base.journeyPos = base.journeyPos ?? {};
     for (const pl of base.players) normPlayer(pl);
     base.log = [`♻️ Партия восстановлена из сохранения (игроков: ${base.players.length})`, ...(Array.isArray(base.log) ? base.log : [])].slice(0, 50);
     return base;
@@ -154,16 +171,21 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   if (s.rollOffWinner === undefined) s.rollOffWinner = null;
   if (!Array.isArray(s.log)) s.log = [];
   if (!Array.isArray(s.trades)) s.trades = [];
+  if (s.journeyPos === undefined) s.journeyPos = {};
   for (const pl of s.players) normPlayer(pl);
   const log: Log = (t) => { s.log = [t, ...s.log].slice(0, 50); };
-  const alive = () => s.players.filter((p) => p.alive);
+  /* ЗРИТЕЛИ (SKILL CHALLENGE): подключены и смотрят, но не играют — ходов
+     им не достаётся, выбывание по ресурсам их не касается, победитель — не они */
+  const alive = () => s.players.filter((p) => p.alive && !p.spect);
   const aid = 'id' in a ? (a as { id: string }).id : '';
   const actor = () => s.players.find((p) => p.id === aid);
   const current = () => s.players[s.turn % s.players.length];
 
   const nextTurn = () => {
     const al = alive();
-    if (al.length <= 1) {
+    /* SKILL CHALLENGE: играет ОДИН хост — «остался один» это норма; конец партии
+       только по исчерпанию ресурсов (поражение) или по лимиту 25 ходов (пройдено) */
+    if (al.length === 0 || (al.length <= 1 && map.mode !== 'skill')) {
       s.phase = 'over';
       s.winner = al[0]?.id ?? null;
       if (s.winner) log(`🏆 ${al[0].name} — ПОБЕДИТЕЛЬ!`);
@@ -179,7 +201,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     for (let g = 0; g < s.players.length * 8; g++) {
       idx = (idx + 1) % s.players.length;
       const np = s.players[idx];
-      if (!np.alive) continue;
+      if (!np.alive || np.spect) continue;
       if (np.skipTurns > 0) {
         np.skipTurns--;
         log(`${np.name} пропускает ход`);
@@ -192,17 +214,18 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
 
   const checkElim = () => {
     for (const p of s.players) {
-      if (p.alive && p.secLeft <= 0 && p.triesLeft <= 0) {
+      if (p.alive && !p.spect && p.secLeft <= 0 && p.triesLeft <= 0) {
         p.alive = false;
         if (s.challenge && current().id === p.id) s.challenge = null;
         if (s.pendingCard && s.pendingCard.player === p.id) s.pendingCard = null;
         s.awaitPost = false;
         s.moving = null;
         log(`💀 ${p.name} выбывает — ресурсы исчерпаны`);
+        if (map.mode === 'skill' && p.isHost) log(`❌ SKILL CHALLENGE ПРОВАЛЕН: ресурсы исчерпаны до ${SKILL_TURNS} ходов`);
       }
     }
     const al = alive();
-    if (s.phase === 'playing' && al.length <= 1) {
+    if (s.phase === 'playing' && (al.length === 0 || (al.length <= 1 && map.mode !== 'skill'))) {
       s.phase = 'over';
       s.winner = al[0]?.id ?? null;
       if (s.winner) log(`🏆 ${al[0].name} — ПОБЕДИТЕЛЬ!`);
@@ -215,6 +238,17 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     if (s.phase !== 'playing') return;
     s.turnNo = (s.turnNo ?? 1) + 1; // номер хода партии (для автосейвов)
     nextTurn();
+    /* SKILL CHALLENGE: хост выдержал лимит ходов с ресурсами — челлендж пройден */
+    if (map.mode === 'skill' && s.phase === 'playing' && (s.turnNo ?? 1) > SKILL_TURNS) {
+      const host = s.players.find((p) => p.isHost);
+      s.phase = 'over';
+      if (host && host.alive && !host.spect) {
+        s.winner = host.id;
+        log(`🏆 SKILL CHALLENGE ПРОЙДЕН! ${host.name} выдержал ${SKILL_TURNS} ходов — ресурсы на месте`);
+      } else {
+        log(`⏱ ${SKILL_TURNS} ходов истекли`);
+      }
+    }
   };
 
   // Завершение квиза верным ответом: в обычном режиме и «коте в мешке»
@@ -569,9 +603,17 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
 
   switch (a.t) {
     case 'hello': {
-      if (s.phase !== 'lobby' || s.players.length >= 4 || s.players.some((p) => p.id === a.id)) return s0;
-      s.players.push(mkPlayer(a.id, a.name, s.players.length, false));
-      log(`${a.name.toUpperCase()} подключается`);
+      /* SKILL CHALLENGE: зрители могут подключаться и ВО ВРЕМЯ партии —
+        они добавляются как spect (ходов не получают, смотрят поле и трансляцию) */
+      const spectJoin = map.mode === 'skill' && (s.phase === 'playing' || s.phase === 'rollOff');
+      if (s.phase !== 'lobby' && !spectJoin) return s0;
+      if (s.players.some((p) => p.id === a.id)) return s0;
+      if (!spectJoin && s.players.length >= 4) return s0;
+      if (spectJoin && s.players.length >= 8) return s0;
+      const np = mkPlayer(a.id, a.name, s.players.length % 4, false);
+      if (spectJoin) { np.spect = true; np.ready = true; }
+      s.players.push(np);
+      log(spectJoin ? `👁 ${a.name.toUpperCase()} подключается зрителем (SKILL CHALLENGE)` : `${a.name.toUpperCase()} подключается`);
       break;
     }
     case 'ready': {
@@ -588,25 +630,43 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     }
     case 'start': {
       if (s.phase !== 'lobby') break;
-      if (s.players.length < 2) break; // партия только для двух и более игроков
+      /* SKILL CHALLENGE: хост может начать и в одиночку — остальные в лобби
+        станут зрителями; в остальных режимах партия на двоих и более */
+      const soloSkill = map.mode === 'skill';
+      if (s.players.length < 2 && !soloSkill) break;
       /* Стартовые ресурсы — из карты (одинаковые для всех игроков).
          Старые карты без настроек получают прежние значения (60 мин / 60 попыток). */
       const sm = Math.max(5, Math.min(180, Math.floor(map.startMin ?? START_SEC / 60)));
       const st = Math.max(5, Math.min(180, Math.floor(map.startTries ?? START_TRIES)));
       // все игроки начинают на СТАРТОВОЙ ячейке (первая с типом «старт», иначе №1)
       const startPos = startCellIdx(map);
-      for (const p of s.players) { p.secLeft = sm * 60; p.triesLeft = st; p.pos = startPos; }
+      for (const p of s.players) {
+        p.secLeft = sm * 60; p.triesLeft = st; p.pos = startPos;
+        if (soloSkill) p.spect = !p.isHost; // играет только хост — остальные смотрят
+      }
+      if (map.mode === 'journey') {
+        // фишки стартуют от стартовой ячейки; дальше ходят напрямую
+        const sc = map.cells[startPos];
+        const scx = sc ? (sc.cx ?? (sc.x + (sc.w || 1) / 2) * CELL_PX) : 0;
+        const scy = sc ? (sc.cy ?? (sc.y + (sc.h || 1) / 2) * CELL_PX) : 0;
+        s.journeyPos = {};
+        for (const p of s.players) s.journeyPos[p.id] = { x: scx, y: scy };
+      }
       s.phase = 'rollOff';
       s.rollOffIdx = 0;
       s.rollOffValues = {};
       s.rollOffReady = [];
-      log(`Игра начинается! У каждого: ${sm} мин и ${st} поп. Бросок за первый ход…`);
+      log(soloSkill
+        ? `🧨 SKILL CHALLENGE! Играет только хост — лимит ${SKILL_TURNS} ходов. Остальные — зрители.`
+        : `Игра начинается! У каждого: ${sm} мин и ${st} поп. Бросок за первый ход…`);
       break;
     }
     case 'roll': {
       if (s.phase === 'rollOff') {
-        if (s.rollOffIdx >= s.players.length) break;
-        const p = s.players[s.rollOffIdx];
+        /* жеребьёвка — только среди ИГРАЮЩИХ (в SKILL CHALLENGE зрители не бросают) */
+        const roster = s.players.filter((p) => !p.spect);
+        if (s.rollOffIdx >= roster.length) break;
+        const p = roster[s.rollOffIdx];
         if (p.id !== a.id) break;
         /* игрок влияет на бросок временем удержания: чем дольше тряс,
            тем больше «перемешиваний» (до 6). Результат вычисляется хостом
@@ -617,10 +677,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         s.rollOffValues[p.id] = v;
         s.rollOffIdx++;
         log(`🎲 ${p.name} выбрасывает ${v}`);
-        if (s.rollOffIdx >= s.players.length) {
-          const vals = s.players.map((p) => s.rollOffValues[p.id] ?? 0);
+        if (s.rollOffIdx >= roster.length) {
+          const vals = roster.map((p) => s.rollOffValues[p.id] ?? 0);
           const max = Math.max(...vals);
-          const leaders = s.players.filter((p) => (s.rollOffValues[p.id] ?? 0) === max);
+          const leaders = roster.filter((p) => (s.rollOffValues[p.id] ?? 0) === max);
           if (leaders.length === 1) {
             // фиксируем победителя, но не стартуем сразу: всем показывается экран
             // «первым ходит …», а запуск подтверждает действие rollOffGo
@@ -636,6 +696,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         break;
       }
       if (s.phase !== 'playing') break;
+      if (map.mode === 'journey') break; // JOURNEY: кубиков нет — ходят фишкой напрямую
       const p = current();
       if (!p || p.id !== a.id || s.moving || s.challenge || s.pendingCard || s.awaitPost || s.quiz) break;
       s.notice = null;
@@ -705,7 +766,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         s.rollOffReady.push(a.id);
         log(`✔ ${p.name}: готов начать`);
       }
-      if (s.players.every((pl) => (s.rollOffReady ?? []).includes(pl.id))) {
+      if (s.players.filter((pl) => !pl.spect).every((pl) => (s.rollOffReady ?? []).includes(pl.id))) {
         s.phase = 'playing';
         const w = s.players.find((pl) => pl.id === s.rollOffWinner);
         log(`🚀 Все готовы! Игра началась — ход ${w?.name ?? '—'}`);
@@ -720,6 +781,57 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       s.moving = null;
       if (!s.revealed.includes(p.pos)) s.revealed.push(p.pos);
       resolveLanding();
+      break;
+    }
+    /* ---------- JOURNEY: прямое управление фишкой ---------- */
+    case 'journeyMove': {
+      if (s.phase !== 'playing' || map.mode !== 'journey') break;
+      const p = current();
+      if (!p || p.id !== a.id || p.spect) break;
+      if (s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost) break;
+      const mszW = map.mw ?? map.cols * CELL_PX;
+      const mszH = map.mh ?? map.rows * CELL_PX;
+      const x = Math.max(0, Math.min(mszW, Number(a.x) || 0));
+      const y = Math.max(0, Math.min(mszH, Number(a.y) || 0));
+      const prev = s.journeyPos?.[p.id] ?? null;
+      // защита от телепортаций: одно обновление не дальше 2.5 клеток от прошлой позиции
+      if (prev && Math.hypot(x - prev.x, y - prev.y) > CELL_PX * 2.5) break;
+      s.journeyPos = s.journeyPos ?? {};
+      s.journeyPos[p.id] = { x, y, dir: a.dir, ts: Date.now() };
+      /* пересёк ячейку? вход = прошлый центр был ВНЕ прямоугольника, новый — ВНУТРИ.
+        Задание открывается сразу — «всё как раньше», выбор попытки/времени */
+      if (!s.challenge) {
+        for (let i = 0; i < map.cells.length; i++) {
+          const c = map.cells[i];
+          if (c.type !== 'task') continue;
+          const r = cellRectOf(map, i);
+          if (!r) continue;
+          const inNew = x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+          if (!inNew) continue;
+          const inOld = !!prev && prev.x >= r.x && prev.x < r.x + r.w && prev.y >= r.y && prev.y < r.y + r.h;
+          if (inOld) continue; // уже стоял в ней — вход был раньше (перешёл границу — заново)
+          if (s.captured[i] === p.id) continue; // своя ячейка — отдых
+          if (!cellTaskOf(s, map, i)) continue; // задания нет — обычная ячейка
+          p.pos = i;
+          if (!s.revealed.includes(i)) s.revealed.push(i);
+          s.challenge = {
+            cellIdx: i, mode: null, started: false, paused: false, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
+            status: 'choose', approvals: [], violations: [], lowStart: false,
+          };
+          const owner = s.captured[i] ? s.players.find((pl) => pl.id === s.captured[i]) : null;
+          log(`🎯 ${p.name}: задание на ячейке ${posName(i)}${owner ? ` (хозяин ${owner.name})` : ''}`);
+          break;
+        }
+      }
+      break;
+    }
+    case 'journeyEnd': {
+      if (s.phase !== 'playing' || map.mode !== 'journey') break;
+      const p = current();
+      if (!p || p.id !== a.id || p.spect) break;
+      if (s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost) break;
+      log(`➡ ${p.name} передаёт ход`);
+      endTurnNow();
       break;
     }
     case 'chooseMode': {
@@ -956,6 +1068,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       // применить карточку из инвентаря на себя: только в свой ход,
       // когда на столе пусто (до броска кубиков)
       if (s.phase !== 'playing') break;
+      if (map.mode === 'journey') { log('✖ В JOURNEY карточки не действуют — игроки ходят напрямую'); break; }
       const p = actor();
       if (!p || !p.alive || p.id !== current().id) break;
       if (s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost) break;
@@ -988,6 +1101,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     }
     case 'tradeOffer': {
       if (s.phase !== 'playing') break;
+      if (map.mode === 'journey') { log('✖ В JOURNEY торги недоступны'); break; }
       const p = actor();
       if (!p || !p.alive) break;
       // торгуются те, кто сейчас не в процессе хода; текущий игрок — только ДО броска

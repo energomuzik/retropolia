@@ -15,8 +15,8 @@ import {
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
-import { PLAYER_COLORS, SKIP_COST, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf } from '../types';
-import type { CardDef, ChaosKind, TaskDef } from '../types';
+import { PLAYER_COLORS, SKIP_COST, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf } from '../types';
+import type { CardDef, ChaosKind, TaskDef, TokenDir } from '../types';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
 import { startLoop, stopLoop, syncLoops, stopGroup, killGroup, stopOneShot } from '../loopsnd';
@@ -118,11 +118,19 @@ export default function GameScreen() {
   const moveSndRef = useRef<Set<string>>(new Set());
   const holdStartRef = useRef(0);
   const shakeIntRef = useRef(0);
+  /* ---------- JOURNEY: прямое управление фишкой ----------
+    journeyKeys — зажатые направления (клавиши и D-pad), journeySelf —
+    локальная позиция СВОЕЙ фишки (мгновенный отклик; хосту — апдейты ~6 раз/с) */
+  const journeyKeys = useRef<Set<TokenDir>>(new Set());
+  const journeySelf = useRef<{ x: number; y: number; dir?: TokenDir; moving: boolean; dirty: boolean; lastSent: number } | null>(null);
+  const journeyPress = (d: TokenDir, on: boolean) => { if (on) journeyKeys.current.add(d); else journeyKeys.current.delete(d); };
 
   const mePlayer = s?.players.find((p) => p.id === me);
   const active = s ? s.players[s.turn % s.players.length] : null;
   const myTurn = !!active && active.id === me;
   const ch = s?.challenge ?? null;
+  const isJourney = map?.mode === 'journey';
+  const isSkill = map?.mode === 'skill';
   const task = s && map && ch ? cellTaskOf(s, map, ch.cellIdx) : null;
   const activeChaos = task?.chaos ? [task.chaos] : [];
   // «Реверс крестовины»: смена кнопок запрещена, пока задание с этой пакостью идёт
@@ -390,12 +398,76 @@ export default function GameScreen() {
         const act = sess.players[sess.turn % sess.players.length];
         const smooth = !!m.smoothMove; // плавный ход (без прыжков) задан картой
         const cps = clampMoveSpeed(m.moveSpeed ?? DEF_MOVE_SPEED); // клеток в секунду — подобрал автор карты
+        const journeyMode = m.mode === 'journey';
+        const mszJ = journeyMode ? mapSize(m) : null;
         let anyoneMoving = false;
         const mapToks = m.mapTokens ?? [];
         const tokens = sess.players.map((p, pi) => {
           const center = cellCenter(m, p.pos);
           let d = dispRef.current[p.id];
           if (!d) { d = { ...center }; dispRef.current[p.id] = d; }
+
+          /* ---------- JOURNEY: фишки ходят НАПРЯМУЮ, без кубиков ----------
+             Своя фишка в свой ход — локальная симуляция (мгновенный отклик,
+             апдейты хосту ~6 раз/с). Остальные фишки плавно догоняют авторитетную
+             позицию из сети и играют походку по последнему направлению. */
+          if (journeyMode) {
+            const jp = sess.journeyPos?.[p.id];
+            let jdir: TokenDir | undefined;
+            if (p.id === me && act?.id === me && p.alive && !p.spect) {
+              let self = journeySelf.current;
+              if (!self) self = journeySelf.current = { x: jp?.x ?? center.x, y: jp?.y ?? center.y, dir: undefined, moving: false, dirty: false, lastSent: 0 };
+              let vx = 0, vy = 0;
+              const canWalk = !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost;
+              if (canWalk) {
+                for (const kd of journeyKeys.current) {
+                  if (kd === 'up') vy -= 1; else if (kd === 'down') vy += 1;
+                  else if (kd === 'left') vx -= 1; else if (kd === 'right') vx += 1;
+                }
+              }
+              const walking = vx !== 0 || vy !== 0;
+              if (walking) {
+                const len = Math.hypot(vx, vy);
+                const spd = cps * CELL * (dt / 60); // px за кадр — скорость из карты
+                self.x = Math.max(8, Math.min((mszJ?.w ?? 2048) - 8, self.x + (vx / len) * spd));
+                self.y = Math.max(8, Math.min((mszJ?.h ?? 2048) - 8, self.y + (vy / len) * spd));
+                self.dir = Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? 'right' : 'left') : (vy > 0 ? 'down' : 'up');
+                self.moving = true;
+                self.dirty = true;
+                jdir = self.dir;
+              } else {
+                self.moving = false;
+              }
+              d.x = self.x; d.y = self.y;
+              if (self.moving) anyoneMoving = true;
+              // сетевые апдейты: в движении ~6 раз/с, на остановке — финальная точка
+              const nowMs = Date.now();
+              if (self.dirty && ((self.moving && nowMs - self.lastSent > 160) || !self.moving)) {
+                self.dirty = false;
+                self.lastSent = nowMs;
+                dispatch({ t: 'journeyMove', id: me, x: Math.round(self.x), y: Math.round(self.y), dir: self.dir });
+              }
+            } else {
+              const tgt = jp ?? center;
+              d.x += (tgt.x - d.x) * Math.min(1, 0.22 * dt);
+              d.y += (tgt.y - d.y) * Math.min(1, 0.22 * dt);
+              const fresh = !!jp && Date.now() - (jp.ts ?? 0) < 450;
+              jdir = fresh ? jp!.dir : undefined; // идёт — походка по направлению; стоял — idle
+              if (p.id === act?.id && fresh) anyoneMoving = true;
+            }
+            const tokDefJ = p.tokenKey ? mapToks.find((x) => x.id === p.tokenKey) : null;
+            const tokSizeJ = tokDefJ ? (tokDefJ.size ?? (tokDefJ.anim ? 64 : 34)) : (p.tokenSize ?? 34);
+            return {
+              x: d.x, y: d.y, color: PLAYER_COLORS[p.color],
+              active: act?.id === p.id, alive: p.alive, label: p.name,
+              img: p.tokenImg ?? null,
+              anim: tokDefJ?.anim,
+              dir: jdir,
+              phase: pi * 0.53,
+              size: tokSizeJ,
+            };
+          }
+
           const hop = hopRef.current[p.id];
           let lift = 0; // вертикальный «подскок» фишки при движении (в плавном режиме — нет)
           let movingNow = false;
@@ -684,12 +756,43 @@ export default function GameScreen() {
     return () => { window.removeEventListener('keydown', dn); window.removeEventListener('keyup', up); };
   });
 
+  /* ---------- JOURNEY: стрелки/WASD двигают фишку напрямую (пока мой ход) ---------- */
+  useEffect(() => {
+    if (!isJourney) return;
+    const dirOf = (code: string): TokenDir | null => {
+      if (code === 'ArrowUp' || code === 'KeyW') return 'up';
+      if (code === 'ArrowDown' || code === 'KeyS') return 'down';
+      if (code === 'ArrowLeft' || code === 'KeyA') return 'left';
+      if (code === 'ArrowRight' || code === 'KeyD') return 'right';
+      return null;
+    };
+    const dn = (e: KeyboardEvent) => {
+      const d = dirOf(e.code);
+      if (!d || e.repeat) return;
+      e.preventDefault(); // стрелки не крутят страницу — они ведут фишку
+      journeyKeys.current.add(d);
+    };
+    const up = (e: KeyboardEvent) => { const d = dirOf(e.code); if (d) journeyKeys.current.delete(d); };
+    const blur = () => journeyKeys.current.clear();
+    window.addEventListener('keydown', dn);
+    window.addEventListener('keyup', up);
+    window.addEventListener('blur', blur);
+    return () => {
+      window.removeEventListener('keydown', dn);
+      window.removeEventListener('keyup', up);
+      window.removeEventListener('blur', blur);
+      journeyKeys.current.clear();
+    };
+  }, [isJourney]);
+
   const winner = s.winner ? s.players.find((p) => p.id === s.winner) : null;
-  /* трансляция: показываем последний кадр до 4 секунд (не «мигаем»),
-     а пометку LIVE держим, пока кадры идут чаще 1.2 с */
+  /* трансляция: показываем последний кадр до 4 секунд, а пока идёт задание —
+     НЕ прячем окно вовсе (кадры пропали — красный квадратик, без затемнений и надписей).
+     Пометка LIVE не нужна: внизу только «ТРАНСЛЯЦИЯ» + квадрат (зелёный — кадры идут, красный — ждём). */
   const streamAge = stream ? Date.now() - stream.ts : Infinity;
   const streamLive = !!stream && streamAge < 1200;
-  const streamShow = !!stream && streamAge < 4000;
+  const chRunning = !!ch && ch.started && (ch.status === 'playing' || ch.status === 'voting');
+  const streamShow = !!stream && (streamAge < 4000 || chRunning);
 
   /* Грани кубиков. У бросающего — своё перемешивание, затем результат приходит от
      хоста (с небольшой задержкой, зато игрок влияет на бросок временем удержания).
@@ -715,24 +818,38 @@ export default function GameScreen() {
       <div className="shrink-0 border-b-[3px] border-edge bg-[rgba(7,9,18,0.82)] px-3 py-2 flex items-center gap-2 flex-wrap z-20">
         <span className="font-pixel text-[9px] text-gold hidden sm:block">RETROPOLIA</span>
         <span className="hud-chip pixel-corners px-2.5 py-1 font-pixel text-[9px] text-sky">{s.code}</span>
+        {isSkill && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-magma">SKILL CHALLENGE</span>}
+        {isJourney && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal">JOURNEY</span>}
+        {isSkill && s.phase === 'playing' && (
+          <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-gold" title="Лимит ходов хоста в SKILL CHALLENGE">
+            ХОД {Math.min(s.turnNo ?? 1, SKILL_TURNS)}/{SKILL_TURNS}
+          </span>
+        )}
         <span className={`w-2 h-2 ${st.netInfo.online ? 'bg-teal' : 'bg-gold'}`} />
         <div className="flex items-center gap-1.5 flex-wrap flex-1">
           {s.players.map((p, i) => (
             <div
               key={p.id}
-              className={`hud-chip pixel-corners px-2.5 py-1.5 flex items-center gap-2 transition-all ${active?.id === p.id && s.phase === 'playing' ? 'border-gold shadow-[0_0_14px_rgba(255,207,63,0.35)]' : ''} ${!p.alive ? 'opacity-40 grayscale' : ''}`}
+              className={`hud-chip pixel-corners px-2.5 py-1.5 flex items-center gap-2 transition-all ${active?.id === p.id && s.phase === 'playing' ? 'border-gold shadow-[0_0_14px_rgba(255,207,63,0.35)]' : ''} ${!p.alive ? 'opacity-40 grayscale' : ''} ${p.spect ? 'opacity-70' : ''}`}
             >
               <span className="w-3.5 h-3.5 border border-abyss" style={{ background: PLAYER_COLORS[p.color] }} />
               <div className="leading-none">
                 <div className="font-display text-[10px] uppercase tracking-wide text-paper flex items-center gap-1">
                   {p.name}
                   {p.isHost && <span className="font-pixel text-[6px] text-gold">H</span>}
+                  {p.spect && <span className="font-pixel text-[6px] text-sky" title="Зритель — ходов не получает">👁 ЗРИТЕЛЬ</span>}
                   {!p.alive && <span className="text-coral">{Ic.skull(10)}</span>}
                 </div>
                 <div className="tick-label text-faint mt-1 flex items-center gap-1.5">
-                  <span className="text-sky">{fmtClock(p.secLeft)}</span>
-                  <span className="text-gold">{p.triesLeft} поп.</span>
-                  <span>№{p.pos + 1}</span>
+                  {p.spect ? (
+                    <span className="text-sky">смотрит трансляцию</span>
+                  ) : (
+                    <>
+                      <span className="text-sky">{fmtClock(p.secLeft)}</span>
+                      <span className="text-gold">{p.triesLeft} поп.</span>
+                      <span>№{p.pos + 1}</span>
+                    </>
+                  )}
                 </div>
               </div>
               {s.phase === 'rollOff' && s.rollOffValues[p.id] !== undefined && (
@@ -867,10 +984,8 @@ export default function GameScreen() {
           <div className="fixed right-3 bottom-3 w-[240px] pop-in z-[97]">
             <div className="hud-chip pixel-corners p-1.5">
               <div className="flex items-center gap-2 px-1 pb-1">
-                <span className={`w-2 h-2 ${streamLive ? 'bg-coral blink-hard' : 'bg-gold'}`} />
-                <span className={`font-pixel text-[7px] ${streamLive ? 'text-coral' : 'text-gold'}`}>
-                  {streamLive ? 'ТРАНСЛЯЦИЯ' : 'ЖДЁМ КАДРЫ'} · {stream!.name}
-                </span>
+                <span className={`w-2 h-2 shrink-0 ${streamLive ? 'bg-teal' : 'bg-coral'}`} title={streamLive ? 'Кадры идут' : 'Ждём кадры'} />
+                <span className="font-pixel text-[7px] text-paper">ТРАНСЛЯЦИЯ · {stream!.name}</span>
                 <button
                   onClick={() => setStreamBig(true)}
                   title="Увеличить трансляцию"
@@ -881,7 +996,7 @@ export default function GameScreen() {
                 src={stream!.data}
                 alt="Трансляция"
                 onClick={() => setStreamBig(true)}
-                className={`w-full border-2 border-edge cursor-zoom-in ${streamLive ? '' : 'opacity-60'}`}
+                className="w-full border-2 border-edge cursor-zoom-in"
                 style={{ imageRendering: 'auto' }}
               />
             </div>
@@ -894,20 +1009,18 @@ export default function GameScreen() {
             <div className="absolute inset-0 bg-[rgba(4,6,14,0.72)]" onClick={() => setStreamBig(false)} />
             <div className="relative pixel-panel pixel-corners pop-in p-2 w-[600px] max-w-[94vw]">
               <div className="flex items-center gap-2 px-1 pb-1.5">
-                <span className={`w-2 h-2 ${streamLive ? 'bg-coral blink-hard' : 'bg-gold'}`} />
-                <span className={`font-pixel text-[8px] ${streamLive ? 'text-coral' : 'text-gold'}`}>
-                  {streamLive ? 'ТРАНСЛЯЦИЯ' : 'ЖДЁМ КАДРЫ'} · {stream!.name}
-                </span>
+                <span className={`w-2 h-2 shrink-0 ${streamLive ? 'bg-teal' : 'bg-coral'}`} title={streamLive ? 'Кадры идут' : 'Ждём кадры'} />
+                <span className="font-pixel text-[8px] text-paper">ТРАНСЛЯЦИЯ · {stream!.name}</span>
                 <GhostBtn small className="ml-auto" onClick={() => setStreamBig(false)}>{Ic.cross(12)} Свернуть</GhostBtn>
               </div>
-              <img src={stream!.data} alt="Трансляция" className={`w-full border-2 border-edge ${streamLive ? '' : 'opacity-60'}`} />
+              <img src={stream!.data} alt="Трансляция" className="w-full border-2 border-edge" />
               <p className="text-[10px] text-dim text-center mt-1.5">Карта и торги никуда не делись — сверните трансляцию, чтобы вернуться</p>
             </div>
           </div>
         )}
 
-        {/* ---------- кубики ---------- */}
-        {s.phase === 'playing' && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && (
+        {/* ---------- кубики (в JOURNEY их нет — фишка ходит напрямую) ---------- */}
+        {s.phase === 'playing' && !isJourney && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2">
             <div className="flex gap-3">
               <DieFace v={dieA} dropping={!!s.dice && !dieRolling && !s.moving} rolling={dieRolling} />
@@ -974,14 +1087,69 @@ export default function GameScreen() {
           </div>
         )}
 
-        {/* ---------- жеребьёвка: все кубики видны сразу, бросают по очереди ---------- */}
-        {s.phase === 'rollOff' && !s.rollOffWinner && (
+        {/* ---------- JOURNEY: прямое управление фишкой ---------- */}
+        {s.phase === 'playing' && isJourney && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && (
+          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 z-10">
+            {myTurn ? (
+              <div className="flex items-center gap-4">
+                <div className="grid grid-cols-3 gap-1 select-none touch-none">
+                  <span />
+                  <button
+                    className="w-11 h-11 border-2 border-edge bg-panel text-paper font-pixel text-xs cursor-pointer select-none touch-none active:border-gold active:text-gold hover:border-edge2"
+                    onPointerDown={(e) => { e.preventDefault(); journeyPress('up', true); }}
+                    onPointerUp={() => journeyPress('up', false)}
+                    onPointerLeave={() => journeyPress('up', false)}
+                    onPointerCancel={() => journeyPress('up', false)}
+                  >▲</button>
+                  <span />
+                  <button
+                    className="w-11 h-11 border-2 border-edge bg-panel text-paper font-pixel text-xs cursor-pointer select-none touch-none active:border-gold active:text-gold hover:border-edge2"
+                    onPointerDown={(e) => { e.preventDefault(); journeyPress('left', true); }}
+                    onPointerUp={() => journeyPress('left', false)}
+                    onPointerLeave={() => journeyPress('left', false)}
+                    onPointerCancel={() => journeyPress('left', false)}
+                  >◀</button>
+                  <span />
+                  <button
+                    className="w-11 h-11 border-2 border-edge bg-panel text-paper font-pixel text-xs cursor-pointer select-none touch-none active:border-gold active:text-gold hover:border-edge2"
+                    onPointerDown={(e) => { e.preventDefault(); journeyPress('right', true); }}
+                    onPointerUp={() => journeyPress('right', false)}
+                    onPointerLeave={() => journeyPress('right', false)}
+                    onPointerCancel={() => journeyPress('right', false)}
+                  >▶</button>
+                  <span />
+                  <button
+                    className="w-11 h-11 border-2 border-edge bg-panel text-paper font-pixel text-xs cursor-pointer select-none touch-none active:border-gold active:text-gold hover:border-edge2"
+                    onPointerDown={(e) => { e.preventDefault(); journeyPress('down', true); }}
+                    onPointerUp={() => journeyPress('down', false)}
+                    onPointerLeave={() => journeyPress('down', false)}
+                    onPointerCancel={() => journeyPress('down', false)}
+                  >▼</button>
+                  <span />
+                </div>
+                <div className="flex flex-col items-center gap-1.5">
+                  <PxBtn color="gold" onClick={() => { journeyKeys.current.clear(); dispatch({ t: 'journeyEnd', id: me }); }}>Передать ход</PxBtn>
+                  <div className="tick-label text-faint text-center max-w-64">Стрелки/WASD или кнопки — фишка идёт сама. Наступите на ячейку задания — оно откроется сразу.</div>
+                </div>
+              </div>
+            ) : (
+              <div className="hud-chip pixel-corners px-4 py-2 text-[11px] text-dim">
+                {active?.name ?? '—'} идёт по карте…
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ---------- жеребьёвка: все кубики видны сразу, бросают по очереди (зрители — в стороне) ---------- */}
+        {s.phase === 'rollOff' && !s.rollOffWinner && (() => {
+          const roster = s.players.filter((p) => !p.spect);
+          return (
           <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.55)] z-10">
             <div className="pixel-panel pixel-corners pop-in p-6 max-w-lg w-full mx-4 text-center">
               <div className="font-display uppercase tracking-wider text-gold text-lg">Кто ходит первым?</div>
               <p className="text-[12px] text-dim mt-1 mb-1">Бросайте по очереди — у кого больше, тот и начинает. При равенстве — переброс.</p>
               <div className="flex justify-center gap-5 mt-4 mb-5 flex-wrap">
-                {s.players.map((p, i) => {
+                {roster.map((p, i) => {
                   const val = s.rollOffValues[p.id];
                   const isRoller = i === s.rollOffIdx;
                   const mine = isRoller && p.id === me;
@@ -1013,7 +1181,7 @@ export default function GameScreen() {
                   );
                 })}
               </div>
-              {s.players[s.rollOffIdx]?.id === me ? (
+              {roster[s.rollOffIdx]?.id === me ? (
                 <button
                   onPointerDown={startRoShake}
                   onPointerUp={endRoShake}
@@ -1024,19 +1192,21 @@ export default function GameScreen() {
                   {Ic.dice(16)} {roShake ? 'ОТПУСТИТЕ — БРОСОК!' : roWaiting ? 'КУБИК КРУТИТСЯ…' : 'ДЕРЖИТЕ, ЧТОБЫ СМЕШАТЬ'}
                 </button>
               ) : (
-                <div className="font-pixel text-[9px] text-dim blink-hard">БРОСАЕТ {s.players[s.rollOffIdx]?.name}…</div>
+                <div className="font-pixel text-[9px] text-dim blink-hard">БРОСАЕТ {roster[s.rollOffIdx]?.name}…</div>
               )}
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* ---------- победитель жеребьёвки: каждый подтверждает старт (и берёт фишку) ---------- */}
         {s.phase === 'rollOff' && s.rollOffWinner && (() => {
           const readyList = s.rollOffReady ?? [];
+          const roster = s.players.filter((p) => !p.spect);
           const winnerP = s.players.find((p) => p.id === s.rollOffWinner);
-          const allReady = s.players.every((p) => readyList.includes(p.id));
+          const allReady = roster.every((p) => readyList.includes(p.id));
           const mapToks = map.mapTokens ?? [];
-          const needToken = mapToks.length > 0; // фишки заданы картой — выбор обязателен
+          const needToken = mapToks.length > 0 && !mePlayer?.spect; // фишки заданы картой — выбор обязателен (зрителям — нет)
           const myTokenKey = s.players.find((p) => p.id === me)?.tokenKey;
           const tokenTakenBy = (tid: string) => s.players.find((p) => p.id !== me && p.tokenKey === tid);
           return (
@@ -1050,8 +1220,9 @@ export default function GameScreen() {
                 >
                   {winnerP?.name ?? '—'}
                 </div>
+                {isSkill && <p className="text-[11px] text-magma mt-2">SKILL CHALLENGE: играть будет только хост — вы зритель{mePlayer?.spect ? ' (и вы тоже)' : ''}.</p>}
                 <div className="flex justify-center gap-4 mt-5 flex-wrap">
-                  {s.players.map((p) => (
+                  {roster.map((p) => (
                     <div key={p.id} className="flex flex-col items-center gap-1">
                       <DieFace v={s.rollOffValues[p.id] ?? 1} frame={PLAYER_COLORS[p.color]} dropping={p.id === s.rollOffWinner} />
                       <span className="font-display text-[9px] uppercase" style={{ color: PLAYER_COLORS[p.color] }}>{p.name}</span>
@@ -1059,7 +1230,7 @@ export default function GameScreen() {
                   ))}
                 </div>
                 <div className="mt-5 space-y-2 text-left">
-                  {s.players.map((p) => {
+                  {roster.map((p) => {
                     const isReady = readyList.includes(p.id);
                     const pTok = needToken && p.tokenKey ? mapToks.find((t) => t.id === p.tokenKey) : null;
                     return (
@@ -1110,7 +1281,7 @@ export default function GameScreen() {
                 )}
 
                 <div className={`font-pixel text-[9px] mt-4 ${allReady ? 'text-teal' : 'text-dim blink-hard'}`}>
-                  {allReady ? 'СТАРТ!' : `ГОТОВЫ ${readyList.length} ИЗ ${s.players.length}`}
+                  {allReady ? 'СТАРТ!' : `ГОТОВЫ ${readyList.length} ИЗ ${roster.length}`}
                 </div>
               </div>
             </div>
@@ -1134,13 +1305,31 @@ export default function GameScreen() {
             ))}
             <div className="pixel-panel pixel-corners pop-in p-8 text-center max-w-md mx-4 relative">
               <span className="text-gold inline-block floaty">{Ic.trophy(48)}</span>
-              <div className="font-pixel text-gold text-sm mt-3 title-glow">ПОБЕДА</div>
-              <div className="font-display uppercase text-2xl text-paper mt-2" style={{ color: winner ? PLAYER_COLORS[winner.color] : undefined }}>
-                {winner?.name ?? 'НИЧЬЯ'}
-              </div>
-              <p className="text-[12px] text-dim mt-2">
-                {winner ? 'Соперники остались без ресурсов. Поле покорено!' : 'Ресурсы исчерпали все — партия annullée.'}
-              </p>
+              {isSkill ? (
+                <>
+                  <div className={`font-pixel text-sm mt-3 title-glow ${winner ? 'text-teal' : 'text-coral'}`}>
+                    {winner ? 'SKILL CHALLENGE ПРОЙДЕН' : 'SKILL CHALLENGE ПРОВАЛЕН'}
+                  </div>
+                  <div className="font-display uppercase text-2xl text-paper mt-2" style={{ color: winner ? PLAYER_COLORS[winner.color] : undefined }}>
+                    {winner?.name ?? 'РЕСУРСЫ ИСЧЕРПАНЫ'}
+                  </div>
+                  <p className="text-[12px] text-dim mt-2">
+                    {winner
+                      ? `${winner.name} выдержал ${SKILL_TURNS} ходов — ресурсы на месте!`
+                      : `Ресурсы исчерпаны раньше, чем истекли ${SKILL_TURNS} ходов.`}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="font-pixel text-gold text-sm mt-3 title-glow">ПОБЕДА</div>
+                  <div className="font-display uppercase text-2xl text-paper mt-2" style={{ color: winner ? PLAYER_COLORS[winner.color] : undefined }}>
+                    {winner?.name ?? 'НИЧЬЯ'}
+                  </div>
+                  <p className="text-[12px] text-dim mt-2">
+                    {winner ? 'Соперники остались без ресурсов. Поле покорено!' : 'Ресурсы исчерпали все — партия annullée.'}
+                  </p>
+                </>
+              )}
               <div className="flex gap-3 justify-center mt-6">
                 {room.isHost && <GhostBtn onClick={() => void saveSessionSnapshot(`${map.name} · итог`)}>{Ic.save(13)} В архив</GhostBtn>}
                 <PxBtn onClick={() => { st.leaveRoom(); st.setScreen('menu'); }}>{Ic.home(14)} В меню</PxBtn>
@@ -1345,12 +1534,10 @@ export default function GameScreen() {
                         </>
                       ) : streamShow ? (
                         <div className="border-[3px] border-edge bg-black">
-                          <img src={stream!.data} alt="Трансляция" className={`w-full ${streamLive ? '' : 'opacity-60'}`} />
+                          <img src={stream!.data} alt="Трансляция" className="w-full" />
                           <div className="px-2 py-1 flex items-center gap-2 bg-[rgba(7,9,18,0.9)]">
-                            <span className={`w-2 h-2 ${streamLive ? 'bg-coral blink-hard' : 'bg-gold'}`} />
-                            <span className={`font-pixel text-[7px] ${streamLive ? 'text-coral' : 'text-gold'}`}>
-                              {streamLive ? 'ТРАНСЛЯЦИЯ' : 'ЖДЁМ КАДРЫ'} · {stream!.name}
-                            </span>
+                            <span className={`w-2 h-2 shrink-0 ${streamLive ? 'bg-teal' : 'bg-coral'}`} title={streamLive ? 'Кадры идут' : 'Ждём кадры'} />
+                            <span className="font-pixel text-[7px] text-paper">ТРАНСЛЯЦИЯ · {stream!.name}</span>
                           </div>
                         </div>
                       ) : (
@@ -1358,7 +1545,7 @@ export default function GameScreen() {
                           <span className="text-dim">{Ic.eye(28)}</span>
                           <span className="font-pixel text-[8px] text-faint text-center px-4">
                             {options.broadcast
-                              ? 'ЖДЁМ КАДРЫ ТРАНСЛЯЦИИ…'
+                              ? 'ОЖИДАНИЕ ТРАНСЛЯЦИИ…'
                               : 'ТРАНСЛЯЦИЯ ВЫКЛЮЧЕНА В ОПЦИЯХ'}
                           </span>
                         </div>

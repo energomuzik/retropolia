@@ -5,7 +5,7 @@ import { cellAtPoint, drawBoard, fitView } from '../render';
 import { idbGet, idbPut, uid } from '../db';
 import { cartridgeArt, cardArt, fileToDataUrl } from '../assets';
 import type { CardDef, CardEffect, CellType, ChaosKind, EffectType, GameMap, SaveKind, TaskDef } from '../types';
-import { CHAOS_LIST, chaosLabel, mkChaosCard, JOY_LIST, SAVE_KIND_LABEL, saveKindOf } from '../types';
+import { CHAOS_LIST, chaosLabel, mkChaosCard, JOY_LIST, SAVE_KIND_CLS, SAVE_KIND_LABEL, SAVE_KIND_SHORT, saveKindOf } from '../types';
 import { renumberByPath, fixLinksAfterDelete } from '../render';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import { sfx } from '../sound';
@@ -186,6 +186,7 @@ export default function TaskEditor() {
    Показывается, когда редактируется ячейка-задание: папки-спойлеры,
    клик по рому выбирает его для задания. Никаких списков на сотни строк. */
   const [romFoldersOpen, setRomFoldersOpen] = useState<Record<string, boolean>>({});
+  const [romSavesOpen, setRomSavesOpen] = useState(true); // спойлер сохранений под выбранным ромом
   const romFolders = useMemo(() => [...new Set(roms.map((r) => r.folder ?? '').filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru')), [roms]);
   const looseRoms = useMemo(() => roms.filter((r) => !r.folder), [roms]);
   const romsIn = (folder: string) => roms.filter((r) => r.folder === folder);
@@ -198,18 +199,56 @@ export default function TaskEditor() {
     const sel = fRom === r.id;
     const svCount = saves.filter((s) => s.romId === r.id).length;
     return (
-      <button
-        key={r.id}
-        onClick={() => pickRom(r)}
-        title={`${r.name} — клик: выбрать ром для задания`}
-        className={`w-full text-left border-2 px-2.5 py-2 cursor-pointer transition-colors ${sel ? 'border-gold bg-gold/10' : 'border-edge bg-panel hover:border-edge2'}`}
-      >
-        <div className="flex items-center gap-2">
-          <span className={`font-pixel text-[7px] px-1 py-0.5 shrink-0 ${r.ext === 'nes' ? 'bg-sky text-abyss' : 'bg-magma text-abyss'}`}>{r.ext.toUpperCase()}</span>
-          <span className={`font-display text-[11px] uppercase truncate ${sel ? 'text-gold' : 'text-paper'}`}>{sel ? '✓ ' : ''}{r.name}</span>
-        </div>
-        <div className="tick-label text-faint mt-1">сохранений: {svCount}</div>
-      </button>
+      <div key={r.id}>
+        <button
+          onClick={() => pickRom(r)}
+          title={`${r.name} — клик: выбрать ром для задания`}
+          className={`w-full text-left border-2 px-2.5 py-2 cursor-pointer transition-colors ${sel ? 'border-gold bg-gold/10' : 'border-edge bg-panel hover:border-edge2'}`}
+        >
+          <div className="flex items-center gap-2">
+            <span className={`font-pixel text-[7px] px-1 py-0.5 shrink-0 ${r.ext === 'nes' ? 'bg-sky text-abyss' : 'bg-magma text-abyss'}`}>{r.ext.toUpperCase()}</span>
+            <span className={`font-display text-[11px] uppercase truncate ${sel ? 'text-gold' : 'text-paper'}`}>{sel ? '✓ ' : ''}{r.name}</span>
+          </div>
+          <div className="tick-label text-faint mt-1">сохранений: {svCount}</div>
+        </button>
+        {/* СПОЙЛЕР СОХРАНЕНИЙ под выбранным ромом — как в редакторе сохранений:
+            цветные метки видов (уровень/босс/моё задание/частное), клик выбирает сохранение */}
+        {sel && svCount > 0 && (
+          <div className="mt-1 border-2 border-edge bg-[rgba(11,14,28,0.6)] px-2 py-1.5">
+            <button
+              onClick={() => setRomSavesOpen((v) => !v)}
+              className="w-full flex items-center gap-1 text-left cursor-pointer hover:bg-[rgba(255,207,63,0.08)] px-0.5 py-0.5"
+              title={romSavesOpen ? 'Свернуть' : 'Развернуть'}
+            >
+              <span className={`text-[10px] shrink-0 ${romSavesOpen ? 'text-gold' : 'text-faint'}`}>{romSavesOpen ? '▾' : '▸'}</span>
+              <span className="tick-label text-dim">💾 Сохранения · {svCount}</span>
+              <span className="tick-label text-faint ml-auto">клик — выбрать</span>
+            </button>
+            {romSavesOpen && (
+              <div className="space-y-1 mt-1">
+                {saves.filter((sv) => sv.romId === r.id).map((sv) => {
+                  const k = saveKindOf(sv);
+                  const picked = fSave === sv.id;
+                  return (
+                    <button
+                      key={sv.id}
+                      onClick={() => { setFSave(sv.id); sfx.hover(); }}
+                      title={`Выбрать «${sv.name}» для этого задания`}
+                      className={`w-full text-left border-2 px-2 py-1.5 cursor-pointer transition-colors ${picked ? 'border-gold bg-gold/10' : 'border-edge bg-panel hover:border-edge2'}`}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span className={`font-pixel text-[7px] px-1 py-0.5 shrink-0 ${SAVE_KIND_CLS[k]}`}>{SAVE_KIND_SHORT[k]}</span>
+                        <span className={`font-display text-[10px] uppercase truncate ${picked ? 'text-gold' : 'text-paper'}`}>{picked ? '✓ ' : ''}{sv.name}</span>
+                      </div>
+                      <div className="tick-label text-faint mt-0.5">S{sv.slot} · {new Date(sv.createdAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     );
   };
 

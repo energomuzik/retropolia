@@ -307,11 +307,24 @@ export interface Stamp {
   layer?: number; // номер тайлового слоя (0 — нижний); нет = 0. Фон — ниже всех, ячейки/стрелки — выше всех
 }
 
+/* Режим игры, задаваемый АВТОРОМ КАРТЫ в редакторе (левая панель):
+   classic — обычная настолка с кубиками (как было);
+   skill   — SKILL CHALLENGE: играет только хост, у него 25 ходов; остальные подключаются и смотрят;
+   journey — JOURNEY: игроки ходят фишкой НАПРЯМУЮ (стрелки/WASD), наступили на ячейку — задание. */
+export type MapMode = 'classic' | 'skill' | 'journey';
+export const MAP_MODES: { id: MapMode; name: string; hint: string }[] = [
+  { id: 'classic', name: 'CLASSIC', hint: 'Обычная игра с кубиками — ход по маршруту, ячейки, задания.' },
+  { id: 'skill', name: 'SKILL CHALLENGE', hint: 'Играет только хост, лимит 25 ходов: остались ресурсы — челлендж пройден, нет — поражение. Остальные игроки подключаются как зрители.' },
+  { id: 'journey', name: 'JOURNEY', hint: 'Приключение: игроки ходят фишкой напрямую в любые стороны, пересёк ячейку — сразу задание. Кубики и их бонусы/штрафы не действуют, побеждает последний с ресурсами.' },
+];
+export const SKILL_TURNS = 25; // лимит ходов хоста в SKILL CHALLENGE
+
 export interface GameMap {
   id: string;
   name: string;
   cols: number;
   rows: number;
+  mode?: MapMode; // режим игры; нет = classic (старые карты)
   tiles: PlacedTile[]; // СТАРЫЙ формат тайлов (глобальная библиотека) — новые карты не используют
   cells: CellDef[];
   bonusCards: CardDef[];
@@ -394,6 +407,7 @@ export interface PlayerState {
   alive: boolean;
   skipTurns: number;
   extraTurn: boolean;
+  spect?: boolean; // зритель (SKILL CHALLENGE): подключён, наблюдает за трансляцией, ходов не получает
   tokenImg?: string | null; // dataUrl своей фишки (PNG); null = стандартный робот
   tokenKey?: string; // id фишки из map.mapTokens, взятой игроком (уникальна на партию)
   tokenSize?: number; // размер фишки на поле в px (по большей стороне); нет — стандарт 34
@@ -522,6 +536,7 @@ export interface GameSession {
   sessionTasks: Record<number, TaskDef>;
   trades: TradeOffer[]; // предложения обмена карточками (активные и последние закрытые)
   revealed: number[]; // индексы ячеек, на которые хоть раз ступали (для режима «скрытые ячейки»)
+  journeyPos?: Record<string, { x: number; y: number; dir?: 'up' | 'down' | 'left' | 'right'; ts?: number }>; // JOURNEY: авторитетные позиции фишек в px поля (пишет хост)
   winner: string | null;
   log: string[];
   startedAt: number;
