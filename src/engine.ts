@@ -1,7 +1,7 @@
-import type { CardDef, GameMap, GameOptions, GameSession, PlayerState, TaskDef, TradeOffer, TokenDir } from './types';
+import type { CardDef, GameFx, GameMap, GameOptions, GameSession, PlayerState, TaskDef, TradeOffer, TokenDir } from './types';
 import { APP_VERSION, SKIP_COST, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS } from './types';
 import type { JoyId } from './types';
-import { CELL, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
+import { CELL, cellAtPoint, cellCenter, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
 
 export type Action =
   | { t: 'hello'; id: string; name: string }
@@ -35,7 +35,8 @@ export type Action =
   | { t: 'quizDone'; id: string }
   | { t: 'cardAck'; id: string }
   | { t: 'journeyMove'; id: string; x: number; y: number; dir?: TokenDir } // JOURNEY: позиция фишки активного игрока (авторитет — хост)
-  | { t: 'journeyEnd'; id: string }; // JOURNEY: игрок сам передаёт ход
+  | { t: 'journeyEnd'; id: string } // JOURNEY: ход уходит дальше (кнопка убрана — шлёт авто-передача после 30 с без движения)
+  | { t: 'fxDone'; id: string }; // анимация fx (победа/поражение) у игрока закончилась — можно продолжать ход
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const rnd6 = () => 1 + Math.floor(Math.random() * 6);
@@ -152,6 +153,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     base.winner = base.winner ?? null;
     base.trades = Array.isArray(base.trades) ? base.trades : [];
     base.journeyPos = base.journeyPos ?? {};
+    base.fxs = Array.isArray(base.fxs) ? base.fxs : [];
+    base.broken = base.broken ?? {};
+    base.bossDown = base.bossDown ?? {};
     for (const pl of base.players) normPlayer(pl);
     base.log = [`♻️ Партия восстановлена из сохранения (игроков: ${base.players.length})`, ...(Array.isArray(base.log) ? base.log : [])].slice(0, 50);
     return base;
@@ -172,6 +176,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   if (!Array.isArray(s.log)) s.log = [];
   if (!Array.isArray(s.trades)) s.trades = [];
   if (s.journeyPos === undefined) s.journeyPos = {};
+  if (!Array.isArray(s.fxs)) s.fxs = [];
+  if (!s.broken) s.broken = {};
+  if (!s.bossDown) s.bossDown = {};
   for (const pl of s.players) normPlayer(pl);
   const log: Log = (t) => { s.log = [t, ...s.log].slice(0, 50); };
   /* ЗРИТЕЛИ (SKILL CHALLENGE): подключены и смотрят, но не играют — ходов
@@ -237,6 +244,25 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   const endTurnNow = () => {
     if (s.phase !== 'playing') return;
     s.turnNo = (s.turnNo ?? 1) + 1; // номер хода партии (для автосейвов)
+    /* РАЗБИТЫЕ ЯЧЕЙКИ: тик восстановления — каждый ХОД ЛЮБОГО игрока.
+       Без нового задания ячейка оживает через 2 хода (задание карты возвращается),
+       с заданием победителя — через 3 хода (его задание вступает в силу). */
+    for (const key of Object.keys(s.broken ?? {})) {
+      const idx = Number(key);
+      const br = s.broken![idx];
+      if (!br) continue;
+      br.left = (br.left ?? 0) - 1;
+      if (br.left <= 0) {
+        if (br.task) {
+          s.sessionTasks[idx] = br.task;
+          const nm = s.players.find((x) => x.id === br.by)?.name ?? '';
+          log(`🧱 Ячейка №${idx + 1} восстановилась — задание ${nm} вступило в силу`);
+        } else {
+          log(`🧱 Ячейка №${idx + 1} восстановилась сама`);
+        }
+        delete s.broken![idx];
+      }
+    }
     nextTurn();
     /* SKILL CHALLENGE: хост выдержал лимит ходов с ресурсами — челлендж пройден */
     if (map.mode === 'skill' && s.phase === 'playing' && (s.turnNo ?? 1) > SKILL_TURNS) {
@@ -283,6 +309,46 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     }
   };
 
+  /* ---------- FX: разовые анимации-спектакль (победа/поражение фишки, реакции боссов) ---------- */
+  const gatingFx = (): boolean => (s.fxs ?? []).some((f) => f.gate);
+  const clipMs = (clip?: { fps: number; frames: string[] } | null): number => {
+    if (!clip || !clip.frames.length) return 0;
+    const fps = Math.max(1, Math.min(24, clip.fps || 6));
+    return Math.max(400, Math.min(12000, Math.round((clip.frames.length / fps) * 1000)));
+  };
+  const tokAnimOf = (p: PlayerState) => {
+    const tk = p.tokenKey ? (map.mapTokens ?? []).find((x) => x.id === p.tokenKey) : null;
+    return tk?.anim ?? null;
+  };
+  const pushFx = (fx: Omit<GameFx, 'id' | 'ts'>) => {
+    s.fxs = [...(s.fxs ?? []).slice(-8), { ...fx, id: 'fx' + Math.random().toString(36).slice(2, 9), ts: Date.now() }];
+  };
+  /* Реакции боссов: игрок в радиусе (r) босса победил/проиграл задание —
+     босс ОДИН раз проигрывает клип win/lose со своим звуком. Побеждённый
+     (замеревший) босс больше не реагирует. */
+  const triggerBossFx = (cellIdx: number, success: boolean) => {
+    const bosses = map.bosses ?? [];
+    if (!bosses.length) return;
+    const blib = new Map((map.bossLib ?? []).map((b) => [b.id, b]));
+    const p = current();
+    const jp = map.mode === 'journey' ? (s.journeyPos?.[p.id] ?? null) : null;
+    const pc = cellCenter(map, p.pos);
+    const px = jp ? jp.x : pc.x;
+    const py = jp ? jp.y : pc.y;
+    for (const b of bosses) {
+      if (s.bossDown?.[b.id]) continue;
+      const def = blib.get(b.bid);
+      if (!def) continue;
+      if (!b.r || b.r <= 0) continue; // радиус не задан — босс молчит и не реагирует
+      if (Math.hypot(px - b.x, py - b.y) > b.r) continue;
+      const clip = success ? def.win : def.lose;
+      const ms = clipMs(clip);
+      if (!ms) continue;
+      pushFx({ kind: success ? 'bossWin' : 'bossLose', player: p.id, cellIdx, bossId: b.id, ms, after: 'none' });
+      log(success ? `👹 Босс «${def.name}» получает удар — повержен!` : `👹 Босс «${def.name}» отражает атаку — игрок пал!`);
+    }
+  };
+
   const finishChallenge = (success: boolean, spentSec: number, spentTries: number) => {
     const ch = s.challenge;
     if (!ch) return;
@@ -313,8 +379,15 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         log(`😈 Половина победы: ${p.name} прошёл задание, ячейка не захвачена, возврат ${parts || '0'}`);
       } else {
         s.captured[ch.cellIdx] = p.id;
-        log(`✅ ${p.name} захватывает ячейку №${cellNo}`);
+        /* ПОБЕДА: фишка играет 5-ю анимацию (со своим звуком), ячейка РАЗБИВАЕТСЯ.
+           Пока разбита — она пустая (передышка), хозяин — победитель. Окно выбора
+           («играть дальше / создать задание») откроется ПОСЛЕ анимации. */
+        s.broken = s.broken ?? {};
+        s.broken[ch.cellIdx] = { by: p.id, left: 2 };
+        log(`💥 ${p.name} побеждает и РАЗБИВАЕТ ячейку №${cellNo}!`);
         s.awaitPost = true;
+        const winMs = clipMs(tokAnimOf(p)?.win);
+        if (winMs) pushFx({ kind: 'tokenWin', player: p.id, cellIdx: ch.cellIdx, ms: winMs, gate: true, after: 'post' });
       }
       /* радость за прохождение задания (если назначена и не отменена «Без очков») */
       const joyId = t0?.joy;
@@ -325,12 +398,21 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           log(`🎉 ${p.name} получает радость «${meta.name}»`);
         }
       }
+      triggerBossFx(ch.cellIdx, true);
     } else {
       log(`⏭ ${p.name} пропускает задание на ячейке №${cellNo}`);
+      /* ПОРАЖЕНИЕ: фишка играет 6-ю анимацию (со своим звуком) ОДИН раз — и только
+           после неё ход уходит следующему игроку. Ячейка остаётся как была. */
+      triggerBossFx(ch.cellIdx, false);
+      const loseMs = clipMs(tokAnimOf(p)?.lose);
+      if (loseMs) pushFx({ kind: 'tokenLose', player: p.id, cellIdx: ch.cellIdx, ms: loseMs, gate: true, after: 'endTurn' });
     }
     s.challenge = null;
-    if (!success) endTurnNow();
-    else if (!s.awaitPost) endTurnNow(); // «Без очков»/«Половина победы»: права продолжить ход нет
+    if (!success) {
+      if (!gatingFx()) endTurnNow(); // есть анимация поражения — ход уйдёт после неё (fxDone)
+    } else if (!s.awaitPost && !gatingFx()) {
+      endTurnNow(); // «Без очков»/«Половина победы»: права продолжить ход нет
+    }
   };
 
   const othersCount = () => alive().length - 1;
@@ -350,6 +432,14 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     const p = current();
     const cell = map.cells[p.pos];
     if (!cell) { endTurnNow(); return; }
+    /* РАЗБИТАЯ ЯЧЕЙКА считается ПУСТОЙ: задание не открывается, карточек и квиза нет —
+       передышка, пока не восстановится (хозяин — победитель, он уже назначен). */
+    if (s.broken?.[p.pos]) {
+      log(`💥 Ячейка ${posName(p.pos)} разбита — передышка, пока идёт восстановление`);
+      s.notice = { text: `Ячейка ${posName(p.pos)} разбита и считается пустой — здесь ничего не происходит, пока она не восстановится.`, ts: Date.now() };
+      endTurnNow();
+      return;
+    }
     if (cell.type === 'bonus' || cell.type === 'trap') {
       const deck = cell.type === 'bonus' ? map.bonusCards : map.trapCards;
       if (deck.length === 0) {
@@ -601,6 +691,16 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     return true;
   };
 
+  /* ---------- Страховка: протухшие fx снимаем сами (сообщение fxDone потерялось,
+     игрок закрыл вкладку и т.п.). Блокирующие — с исполнением отложенного действия. ---------- */
+  const now0 = Date.now();
+  for (const fx of s.fxs ?? []) {
+    const expired = fx.gate ? now0 - fx.ts > fx.ms + 2500 : now0 - fx.ts > fx.ms + 3000;
+    if (!expired) continue;
+    s.fxs = (s.fxs ?? []).filter((f) => f.id !== fx.id);
+    if (fx.gate && fx.after === 'endTurn') endTurnNow();
+  }
+
   switch (a.t) {
     case 'hello': {
       /* SKILL CHALLENGE: зрители могут подключаться и ВО ВРЕМЯ партии —
@@ -697,6 +797,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       }
       if (s.phase !== 'playing') break;
       if (map.mode === 'journey') break; // JOURNEY: кубиков нет — ходят фишкой напрямую
+      if (gatingFx()) break; // идёт анимация победы/поражения — ждём её
       const p = current();
       if (!p || p.id !== a.id || s.moving || s.challenge || s.pendingCard || s.awaitPost || s.quiz) break;
       s.notice = null;
@@ -788,7 +889,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (s.phase !== 'playing' || map.mode !== 'journey') break;
       const p = current();
       if (!p || p.id !== a.id || p.spect) break;
-      if (s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost) break;
+      if (s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost || gatingFx()) break;
       const mszW = map.mw ?? map.cols * CELL_PX;
       const mszH = map.mh ?? map.rows * CELL_PX;
       const x = Math.max(0, Math.min(mszW, Number(a.x) || 0));
@@ -804,6 +905,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         for (let i = 0; i < map.cells.length; i++) {
           const c = map.cells[i];
           if (c.type !== 'task') continue;
+          if (s.broken?.[i]) continue; // разбитая ячейка пуста — задание не открывается
           const r = cellRectOf(map, i);
           if (!r) continue;
           const inNew = x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
@@ -829,9 +931,18 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (s.phase !== 'playing' || map.mode !== 'journey') break;
       const p = current();
       if (!p || p.id !== a.id || p.spect) break;
-      if (s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost) break;
+      if (s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost || gatingFx()) break;
       log(`➡ ${p.name} передаёт ход`);
       endTurnNow();
+      break;
+    }
+    case 'fxDone': {
+      // анимация победы/поражения у игрока закончилась — снимаем блокировку хода
+      const fx = (s.fxs ?? []).find((f) => f.gate);
+      if (!fx || fx.player !== a.id) break;
+      s.fxs = (s.fxs ?? []).filter((f) => f.id !== fx.id);
+      if (fx.after === 'endTurn') endTurnNow(); // после поражения ход уходит следующему
+      // after === 'post': awaitPost уже выставлен — окно выбора откроется само
       break;
     }
     case 'chooseMode': {
@@ -1039,6 +1150,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     case 'postChoice': {
       const p = current();
       if (!s.awaitPost || p.id !== a.id) break;
+      if (gatingFx()) break; // ждём окончания анимации победы
       s.awaitPost = false;
       if (a.choice === 'end') endTurnNow();
       else log(`${p.name} продолжает ход`);
@@ -1047,6 +1159,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     case 'setCellTask': {
       const p = current();
       if (!s.awaitPost || p.id !== a.id) break;
+      if (gatingFx()) break; // ждём окончания анимации победы
+      if (map.mode === 'skill') {
+        log('✖ В SKILL CHALLENGE своё задание не создаётся — вы играете один и сражаетесь только с собой');
+        break;
+      }
       const task: TaskDef = { ...a.task };
       // пакость из инвентаря: тратим карточку — следующий играющий на этой ячейке получит искажения
       if (a.cardId) {
@@ -1058,9 +1175,23 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           log(`😈 ${p.name} добавляет пакость «${card.name}» к заданию на ячейке №${a.cellIdx + 1}`);
         }
       }
-      s.sessionTasks[a.cellIdx] = task;
+      /* Задание вступает в силу через 3 ХОДА любого игрока: до тех пор ячейка
+         остаётся разбитой и пустой (хозяин — победитель). */
+      s.broken = s.broken ?? {};
+      s.broken[a.cellIdx] = { by: p.id, left: 3, task };
+      /* Боссы, стоящие на этой ячейке, ПОВЕРЖЕНЫ: их анимация остановится
+         на статичном кадре побеждённого босса. */
+      for (const b of map.bosses ?? []) {
+        if (s.bossDown?.[b.id]) continue;
+        const bi = cellAtPoint(map, b.x, b.y);
+        if (bi !== a.cellIdx) continue;
+        s.bossDown = s.bossDown ?? {};
+        s.bossDown[b.id] = true;
+        const bdef = (map.bossLib ?? []).find((x) => x.id === b.bid);
+        if (bdef) log(`👹 Босс «${bdef.name}» ПОВЕРЖЕН — замер побеждённым`);
+      }
       s.awaitPost = false;
-      log(`🛠 ${p.name} создаёт новое задание на ячейке №${a.cellIdx + 1} (доп. ход сгорает)`);
+      log(`🛠 ${p.name} создаёт задание на ячейке №${a.cellIdx + 1} — вступит в силу через 3 хода (доп. ход сгорает)`);
       endTurnNow();
       break;
     }
@@ -1069,6 +1200,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       // когда на столе пусто (до броска кубиков)
       if (s.phase !== 'playing') break;
       if (map.mode === 'journey') { log('✖ В JOURNEY карточки не действуют — игроки ходят напрямую'); break; }
+      if (gatingFx()) break; // идёт анимация победы/поражения — ждём её
       const p = actor();
       if (!p || !p.alive || p.id !== current().id) break;
       if (s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost) break;
@@ -1106,7 +1238,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (!p || !p.alive) break;
       // торгуются те, кто сейчас не в процессе хода; текущий игрок — только ДО броска
       // кубиков (пока !moving && !challenge && !pendingCard && !quiz && !awaitPost)
-      const turnBusy = !!(s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost);
+      const turnBusy = !!(s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost || gatingFx());
       if (p.id === current().id && turnBusy) { log('✖ Ход уже начался — торговать нельзя (торги открыты до броска кубиков)'); break; }
       const buyer = s.players.find((x) => x.id === (a as { to?: string }).to && x.alive);
       if (!buyer || buyer.id === p.id) break;

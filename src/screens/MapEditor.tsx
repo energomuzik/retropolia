@@ -2,13 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../store';
 import { AnimPreview, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
 import {
-  CELL, mapSize, drawBoard, fitView, cellAtPoint, stampAtPoint, animAtPoint, cellBox, cellCenter,
+  CELL, mapSize, drawBoard, fitView, cellAtPoint, stampAtPoint, animAtPoint, bossAtPoint, cellBox, cellCenter,
   renumberByPath, normCellsLegacy, fixLinksAfterDelete, startCellIdx,
 } from '../render';
 import { extractTilesFromImage } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimDef, CellDef, CellType, GameMap, PlacedAnim, Stamp, TokenDef, TileGroup, TileImg } from '../types';
+import type { AnimDef, BossAnimDef, CellDef, CellType, GameMap, PlacedAnim, PlacedBoss, Stamp, TokenDef, TileGroup, TileImg } from '../types';
 import { MAP_MODES } from '../types';
 import { HoldDeleteButton, rememberDeleted, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
@@ -96,7 +96,7 @@ function migrateMap(m: GameMap, libTiles: { id: string; dataUrl: string; gw: num
 
 /* ---------- инструменты ---------- */
 
-type Tool = 'select' | 'tile' | 'cell' | 'link' | 'hop' | 'anim' | 'erase' | 'pan';
+type Tool = 'select' | 'tile' | 'cell' | 'link' | 'hop' | 'anim' | 'boss' | 'erase' | 'pan';
 
 const TOOLS: { key: Tool; label: string; hint: string }[] = [
   { key: 'select', label: 'Выбор', hint: 'клик — выбрать тайл/ячейку/анимацию и тянуть мышью · пустое место — двигать камеру' },
@@ -105,6 +105,7 @@ const TOOLS: { key: Tool; label: string; hint: string }[] = [
   { key: 'link', label: 'Стрелка', hint: 'клик по ячейке А, затем по Б. У БЕЗНОМЕРНОЙ ячейки стрелка — куда шагает фишка; у ПРОНУМЕРОВАННОЙ — прыжок при остановке. Клик по той же ячейке — убрать' },
   { key: 'hop', label: 'Переход', hint: 'ВТОРАЯ стрелка: клик по ячейке А, затем по Б — когда фишка ОСТАНОВИТСЯ на А, она прыгнет на Б (выход из круга, штраф-телепорт). Клик по той же ячейке — убрать' },
   { key: 'anim', label: 'Анимация', hint: 'выберите анимацию в левой панели, кликните по карте — поставится проигрыватель анимации. Клик по уже стоящей — выбрать и тянуть' },
+  { key: 'boss', label: 'Босс', hint: 'вшейте босса в карту (спойлер «Боссы» слева), выберите его и кликните по карте — босс встанет на ячейку: живёт (idle), реагирует на победы/поражения игроков в радиусе' },
   { key: 'erase', label: 'Ластик', hint: 'клик или протяни с зажатой кнопкой — убирает ТАЙЛЫ под курсором. Ячейки и анимации ластик не трогает: выдели и нажми Delete' },
   { key: 'pan', label: 'Рука', hint: 'двигать камеру (колесо — зум под курсором)' },
 ];
@@ -129,7 +130,7 @@ const CELL_TYPES: { key: CellType; label: string; cls: string }[] = [
 ];
 
 export default function MapEditor() {
-  const { maps, tiles, tokens, anims, setScreen, refresh, toast } = useApp();
+  const { maps, tiles, tokens, anims, bossAnims, setScreen, refresh, toast } = useApp();
   const [map, setMap] = useState<GameMap | null>(null);
   const [tool, setTool] = useState<Tool>('select');
   const [tileId, setTileId] = useState('');
@@ -144,10 +145,13 @@ export default function MapEditor() {
   const [snap, setSnap] = useState(false);
   const [tokOpen, setTokOpen] = useState(true); // спойлер «Фишки партии» в левой панели
   const [animOpen, setAnimOpen] = useState(false); // спойлер «Анимации» в левой панели
+  const [bossOpen, setBossOpen] = useState(false); // спойлер «Боссы» в левой панели
   const [layersOpen, setLayersOpen] = useState(true); // спойлер «Слои» в левой панели
   const [activeLayer, setActiveLayer] = useState(0); // слой, на который ставятся НОВЫЕ тайлы (0 — нижний)
   const [placeAnimId, setPlaceAnimId] = useState(''); // вшитая анимация, выбранная для размещения
   const [selAnim, setSelAnim] = useState<string | null>(null); // выбранная размещённая анимация
+  const [placeBossId, setPlaceBossId] = useState(''); // вшитый босс, выбранный для размещения
+  const [selBoss, setSelBoss] = useState<string | null>(null); // выбранный размещённый босс
   const [extract, setExtract] = useState<{ file: File; src: string; name: string; busy: boolean; bgMode: 'auto' | 'custom'; bg: string; foundBg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; tiles: TileImg[] } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -157,11 +161,12 @@ export default function MapEditor() {
   const extRef = useRef<HTMLInputElement>(null);
   const ghostRef = useRef<HTMLImageElement | null>(null);
   const ghostAnimRef = useRef<HTMLImageElement | null>(null); // первый кадр выбранной для размещения анимации (натуральный размер)
+  const ghostBossRef = useRef<HTMLImageElement | null>(null); // первый кадр idle выбранного босса
   const viewRef = useRef(view); viewRef.current = view;
   const mapRef = useRef(map); mapRef.current = map;
   const dragRef = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
-  const objDragRef = useRef<{ kind: 'cell' | 'stamp' | 'anim'; idx: number; dx: number; dy: number; moved: boolean } | null>(null);
-  const resizeRef = useRef<{ kind: 'stamp' | 'anim'; idx: number } | null>(null); // ресайз тайла/анимации за уголок
+  const objDragRef = useRef<{ kind: 'cell' | 'stamp' | 'anim' | 'boss'; idx: number; dx: number; dy: number; moved: boolean } | null>(null);
+  const resizeRef = useRef<{ kind: 'stamp' | 'anim' | 'boss'; idx: number } | null>(null); // ресайз тайла/анимации/босса за уголок
   const downRef = useRef<{ x: number; y: number } | null>(null);
   const lastPlaceRef = useRef<{ x: number; y: number } | null>(null);
   const lastCellSize = useRef({ w: CELL, h: CELL }); // размер новых ячеек (запоминается при изменении)
@@ -195,6 +200,15 @@ export default function MapEditor() {
     img.onload = () => { ghostAnimRef.current = img; };
     img.src = e.clip.frames[0];
   }, [placeAnimId, map?.animLib]);
+
+  /* первый кадр idle выбранного для размещения босса */
+  useEffect(() => {
+    const e = (map?.bossLib ?? []).find((x) => x.id === placeBossId);
+    if (!e || !e.idle.frames.length) { ghostBossRef.current = null; return; }
+    const img = new Image();
+    img.onload = () => { ghostBossRef.current = img; };
+    img.src = e.idle.frames[0];
+  }, [placeBossId, map?.bossLib]);
 
   /* ---------- точка в мировых координатах ---------- */
   const toWorld = (e: { clientX: number; clientY: number }) => {
@@ -257,6 +271,61 @@ export default function MapEditor() {
       arr[idx] = { ...arr[idx], ...patch };
       return { ...m, anims: arr };
     });
+
+  /* ---------- боссы карты: вшиваем босса из библиотеки автора (уедет всем игрокам),
+     после — размещаем экземпляры на ячейках инструментом «Босс» ---------- */
+  const toggleMapBoss = (b: BossAnimDef) => {
+    if (!map) return;
+    const lib = map.bossLib ?? [];
+    if (lib.some((x) => x.id === b.id)) {
+      updMap({ bossLib: lib.filter((x) => x.id !== b.id), bosses: (map.bosses ?? []).filter((pb) => pb.bid !== b.id) });
+      if (placeBossId === b.id) setPlaceBossId('');
+      sfx.click();
+    } else {
+      updMap({ bossLib: [...lib, { id: b.id, name: b.name, idle: JSON.parse(JSON.stringify(b.idle)), ...(b.idleSnd ? { idleSnd: b.idleSnd } : {}), win: JSON.parse(JSON.stringify(b.win)), ...(b.winSnd ? { winSnd: b.winSnd } : {}), lose: JSON.parse(JSON.stringify(b.lose)), ...(b.loseSnd ? { loseSnd: b.loseSnd } : {}) }] });
+      setPlaceBossId(b.id);
+      setTool('boss');
+      sfx.coin();
+      toast('Босс вшит в карту — кликните по ячейке, чтобы поставить его (радиус зададите в его панели)', 'ok');
+    }
+    dirtyRef.current = true;
+  };
+  const updBoss = (idx: number, patch: Partial<PlacedBoss>) =>
+    setMap((m) => {
+      if (!m || !m.bosses || !m.bosses[idx]) return m;
+      const arr = m.bosses.slice();
+      arr[idx] = { ...arr[idx], ...patch };
+      return { ...m, bosses: arr };
+    });
+  const removeBossAt = (bid: string) => {
+    const m = mapRef.current;
+    const idx = m ? (m.bosses ?? []).findIndex((b) => b.id === bid) : -1;
+    if (m && idx >= 0) {
+      const snap = m.bosses![idx];
+      rememberDeleted({
+        label: `босса «${(m.bossLib ?? []).find((x) => x.id === snap.bid)?.name ?? 'с карты'}»`,
+        restore: async () => {
+          setMap((mm) => {
+            if (!mm || mm.id !== m.id) return mm;
+            const arr = (mm.bosses ?? []).slice();
+            arr.splice(Math.min(idx, arr.length), 0, snap);
+            return { ...mm, bosses: arr };
+          });
+          const cur = await idbGet<GameMap>('maps', m.id);
+          if (cur) {
+            const arr = (cur.bosses ?? []).slice();
+            arr.splice(Math.min(idx, arr.length), 0, snap);
+            await idbPut('maps', m.id, { ...cur, bosses: arr, updatedAt: Date.now() });
+            await useApp.getState().refresh();
+          }
+        },
+      });
+    }
+    setMap((mm) => (mm ? { ...mm, bosses: (mm.bosses ?? []).filter((b) => b.id !== bid) } : mm));
+    setSelBoss(null);
+    dirtyRef.current = true;
+    sfx.fail();
+  };
   const removeAnim = (aid: string) => {
     const m = mapRef.current;
     const idx = m ? (m.anims ?? []).findIndex((a) => a.id === aid) : -1;
@@ -753,8 +822,8 @@ export default function MapEditor() {
     if (!m) return;
     downRef.current = { x: e.clientX, y: e.clientY };
     const w = toWorld(e);
-    // ресайз тайла/анимации за жёлтый уголок — работает в «Выборе», «Тайле» и «Анимации»
-    if ((tool === 'select' || tool === 'tile' || tool === 'anim') && (selStamp || selAnim)) {
+    // ресайз тайла/анимации/босса за жёлтый уголок — работает в «Выборе», «Тайле», «Анимации» и «Боссе»
+    if ((tool === 'select' || tool === 'tile' || tool === 'anim' || tool === 'boss') && (selStamp || selAnim || selBoss)) {
       if (selStamp) {
         const si = (m.stamps ?? []).findIndex((s) => s.id === selStamp);
         if (si >= 0) {
@@ -785,6 +854,20 @@ export default function MapEditor() {
           }
         }
       }
+      if (selBoss) {
+        const bi = (m.bosses ?? []).findIndex((b) => b.id === selBoss);
+        if (bi >= 0) {
+          const b = m.bosses![bi];
+          const grab = 11 / viewRef.current.zoom;
+          const cs: [number, number][] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+          for (const [ox, oy] of cs) {
+            if (Math.abs(w.x - (b.x + (ox * b.w) / 2)) <= grab && Math.abs(w.y - (b.y + (oy * b.h) / 2)) <= grab) {
+              resizeRef.current = { kind: 'boss', idx: bi };
+              return;
+            }
+          }
+        }
+      }
     }
     // средняя/правая кнопка — всегда камера
     if (tool === 'pan' || e.button === 1 || e.button === 2) {
@@ -792,6 +875,17 @@ export default function MapEditor() {
       return;
     }
     if (tool === 'select') {
+      const bi = bossAtPoint(m, w.x, w.y);
+      if (bi >= 0) {
+        const pb = (m.bosses ?? [])[bi];
+        objDragRef.current = { kind: 'boss', idx: bi, dx: w.x - pb.x, dy: w.y - pb.y, moved: false };
+        setSelBoss(pb.id);
+        setSelAnim(null);
+        setSelCell(null);
+        setSelStamp(null);
+        sfx.hover();
+        return;
+      }
       const ai = animAtPoint(m, w.x, w.y);
       if (ai >= 0) {
         const pa = (m.anims ?? [])[ai];
@@ -823,6 +917,7 @@ export default function MapEditor() {
       setSelCell(null);
       setSelStamp(null);
       setSelAnim(null);
+      setSelBoss(null);
       dragRef.current = { sx: e.clientX, sy: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
       return;
     }
@@ -903,6 +998,38 @@ export default function MapEditor() {
       }
       return;
     }
+    if (tool === 'boss') {
+      // клик по уже стоящему боссу — выбрать и тянуть; иначе ставим выбранного в панели
+      const bi = bossAtPoint(m, w.x, w.y);
+      if (bi >= 0) {
+        const pb = (m.bosses ?? [])[bi];
+        objDragRef.current = { kind: 'boss', idx: bi, dx: w.x - pb.x, dy: w.y - pb.y, moved: false };
+        setSelBoss(pb.id);
+        setSelAnim(null);
+        setSelCell(null);
+        setSelStamp(null);
+        sfx.hover();
+        return;
+      }
+      if (placeBossId && (m.bossLib ?? []).some((x) => x.id === placeBossId)) {
+        const img = ghostBossRef.current;
+        const natW = img?.width || 64, natH = img?.height || 64;
+        const maxSide = Math.max(natW, natH);
+        const k = maxSide < 64 ? 64 / maxSide : maxSide > 128 ? 128 / maxSide : 1;
+        const p = snapPt(w.x, w.y);
+        const pb: PlacedBoss = { id: uid('boss'), bid: placeBossId, x: Math.round(p.x), y: Math.round(p.y), w: Math.round(natW * k), h: Math.round(natH * k), r: 160 };
+        setMap((mm) => (mm ? { ...mm, bosses: [...(mm.bosses ?? []), pb] } : mm));
+        setSelBoss(pb.id);
+        setSelAnim(null);
+        setSelCell(null);
+        setSelStamp(null);
+        dirtyRef.current = true;
+        sfx.step();
+      } else {
+        toast('Сначала вшейте босса в карту и выберите его в левой панели (спойлер «Боссы»)', 'info');
+      }
+      return;
+    }
     if (tool === 'erase') {
       const si = stampAtPoint(m, w.x, w.y);
       if (si >= 0) {
@@ -950,6 +1077,14 @@ export default function MapEditor() {
           updStamp(resizeRef.current.idx, rot ? { w: vh, h: vw } : { w: vw, h: vh });
           dirtyRef.current = true;
         }
+      } else if (resizeRef.current.kind === 'boss') {
+        const b = (m.bosses ?? [])[resizeRef.current.idx];
+        if (b) {
+          let vw = Math.max(12, Math.abs(w.x - b.x) * 2);
+          let vh = Math.max(12, Math.abs(w.y - b.y) * 2);
+          updBoss(resizeRef.current.idx, { w: Math.round(vw / 2) * 2, h: Math.round(vh / 2) * 2 });
+          dirtyRef.current = true;
+        }
       } else {
         const a = (m.anims ?? [])[resizeRef.current.idx];
         if (a) {
@@ -968,6 +1103,7 @@ export default function MapEditor() {
       dirtyRef.current = true;
       if (od.kind === 'cell') updCell(od.idx, { cx: Math.round(p.x), cy: Math.round(p.y) });
       else if (od.kind === 'anim') updAnim(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
+      else if (od.kind === 'boss') updBoss(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
       else updStamp(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
       return;
     }
@@ -1012,7 +1148,7 @@ export default function MapEditor() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') return;
-      if (e.key === 'Escape') { setLinkFrom(null); setSelCell(null); setSelStamp(null); setSelAnim(null); setPlaceAnimId(''); return; }
+      if (e.key === 'Escape') { setLinkFrom(null); setSelCell(null); setSelStamp(null); setSelAnim(null); setSelBoss(null); setPlaceAnimId(''); return; }
       if (!map) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (e.repeat) return; // удержание обрабатывает useKeyDelete (режим «долгое нажатие»)
@@ -1022,6 +1158,9 @@ export default function MapEditor() {
         } else if (selAnim) {
           const an = (map.anims ?? []).find((a) => a.id === selAnim);
           keyDel.keyDeleteStart(`анимацию «${(map.animLib ?? []).find((x) => x.id === an?.aid)?.name ?? 'с карты'}»`, () => removeAnim(selAnim));
+        } else if (selBoss) {
+          const b = (map.bosses ?? []).find((x) => x.id === selBoss);
+          keyDel.keyDeleteStart(`босса «${(map.bossLib ?? []).find((x) => x.id === b?.bid)?.name ?? 'с карты'}»`, () => removeBossAt(selBoss));
         } else if (selCell !== null) {
           keyDel.keyDeleteStart('ячейку маршрута', () => deleteCell(selCell));
         }
@@ -1267,6 +1406,9 @@ export default function MapEditor() {
   const selAnimIdx = map ? (map.anims ?? []).findIndex((a) => a.id === selAnim) : -1;
   const selAnimDef = map && selAnimIdx >= 0 ? map.anims![selAnimIdx] : null;
   const selAnimLib = map && selAnimDef ? (map.animLib ?? []).find((x) => x.id === selAnimDef.aid) : null;
+  const selBossIdx = map ? (map.bosses ?? []).findIndex((b) => b.id === selBoss) : -1;
+  const selBossDef = map && selBossIdx >= 0 ? map.bosses![selBossIdx] : null;
+  const selBossLib = map && selBossDef ? (map.bossLib ?? []).find((x) => x.id === selBossDef.bid) : null;
   const startsCount = map?.cells.filter((c) => c.type === 'start').length ?? 0;
   const taskCells = map?.cells.filter((c) => c.type === 'task').length ?? 0;
   const noTask = map?.cells.filter((c) => c.type === 'task' && !c.task).length ?? 0;
@@ -1629,6 +1771,62 @@ export default function MapEditor() {
                       </div>
                     )}
                     <p className="text-[10px] text-faint mt-1.5 leading-tight">Вшитые анимации уезжают всем игрокам вместе с картой. Экземпляры можно двигать мышью, менять размер за жёлтый угол и слоями. 🔊 — у анимации есть звук: у её экземпляров на карте задаётся радиус.</p>
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <button
+                  onClick={() => setBossOpen((v) => !v)}
+                  className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(192,122,255,0.08)] px-1 py-0.5"
+                  title={bossOpen ? 'Свернуть' : 'Развернуть'}
+                >
+                  <span className={`text-[10px] shrink-0 ${bossOpen ? 'text-gold' : 'text-faint'}`}>{bossOpen ? '▾' : '▸'}</span>
+                  <span className="tick-label">👹 Боссы · вшито {(map.bossLib ?? []).length}</span>
+                </button>
+                {bossOpen && (
+                  <div>
+                    {bossAnims.length > 0 ? (
+                      <div className="space-y-1 mb-2">
+                        {bossAnims.map((b) => {
+                          const on = (map.bossLib ?? []).some((x) => x.id === b.id);
+                          return (
+                            <div key={b.id} className={`flex items-center gap-1.5 border-2 px-1.5 py-1 ${on ? 'border-gold bg-[rgba(255,207,63,0.08)]' : 'border-edge'}`}>
+                              <div className="w-8 h-8 shrink-0 flex items-center justify-center" style={{ background: 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 8px 8px' }}>
+                                <AnimPreview frames={b.idle.frames} fps={b.idle.fps} size={28} />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="font-display text-[10px] uppercase text-paper truncate">{b.idleSnd ? '🔊 ' : ''}{b.name}</div>
+                                <div className="tick-label text-faint">🏆 {b.win.frames.length} к. · 💀 {b.lose.frames.length} к.</div>
+                              </div>
+                              <button
+                                onClick={() => toggleMapBoss(b)}
+                                title={on ? 'Убрать из карты (вместе с экземплярами на поле)' : 'Вшить в карту и размещать на поле'}
+                                className={`shrink-0 w-6 h-6 border-2 font-pixel text-[10px] cursor-pointer ${on ? 'border-gold text-gold' : 'border-edge text-dim hover:text-paper'}`}
+                              >{on ? '✓' : '+'}</button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="text-[10px] text-faint leading-tight mb-1.5">Боссов пока нет — создайте их в «Редакторе анимаций и фишек» (вкладка «👹 Боссы»): IDLE + реакции на победу/поражение игрока, затем вернитесь сюда.</p>
+                    )}
+                    {(map.bossLib ?? []).length > 0 && (
+                      <div>
+                        <div className="tick-label mb-1">Разместить (выбери, затем инструмент «Босс»):</div>
+                        <div className="flex flex-wrap gap-1">
+                          {(map.bossLib ?? []).map((e) => (
+                            <button
+                              key={e.id}
+                              onClick={() => { setPlaceBossId(e.id); setTool('boss'); setSelBoss(null); sfx.hover(); }}
+                              title={`Размещать «${e.name}» на карте`}
+                              className={`px-1.5 py-1 border-2 font-display text-[8px] uppercase cursor-pointer ${placeBossId === e.id ? 'border-gold text-gold' : 'border-edge text-dim hover:text-paper'}`}
+                            >{e.idleSnd ? '🔊 ' : ''}{e.name.slice(0, 10)}</button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <p className="text-[10px] text-faint mt-1.5 leading-tight">Босс живёт на ячейке: играет IDLE, а когда игрок в РАДИУСЕ побеждает/проигрывает задание — один раз реагирует клипом со своим звуком. Побеждённый (на его ячейке поставили своё задание) замерает статичным кадром. Радиус — в панели босса.</p>
                   </div>
                 )}
               </div>
@@ -2069,6 +2267,60 @@ export default function MapEditor() {
                     className="w-full py-1.5 border-2 border-coral/60 text-coral font-display text-[10px] uppercase hover:bg-coral/10 transition-colors cursor-pointer"
                   >
                     Удалить анимацию
+                  </HoldDeleteButton>
+                </div>
+              )}
+
+              {/* панель размещённого босса */}
+              {selBossDef && !selCellDef && !selStampDef && !selAnimDef && (
+                <div className="absolute top-14 right-3 w-[264px] pixel-panel pixel-corners p-3.5 space-y-3 pop-in shadow-[0_14px_40px_rgba(0,0,0,0.6)]">
+                  <div className="flex items-center justify-between">
+                    <span className="font-display uppercase text-[12px] text-gold truncate">👹 Босс · {selBossLib?.name ?? '?'}</span>
+                    <button onClick={() => { setSelBoss(null); sfx.hover(); }} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <div className="w-14 h-14 shrink-0 flex items-center justify-center border-2 border-edge" style={{ background: 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 10px 10px' }}>
+                      <AnimPreview frames={selBossLib?.idle.frames ?? []} fps={selBossLib?.idle.fps} size={48} />
+                    </div>
+                    <div className="text-[10px] text-dim">
+                      IDLE {selBossLib?.idle.frames.length ?? 0} к. · 🏆 {selBossLib?.win.frames.length ?? 0} к. · 💀 {selBossLib?.lose.frames.length ?? 0} к.
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between"><span className="text-[10px] text-dim">Ширина</span><Stepper value={Math.round(selBossDef.w)} onChange={(v) => { updBoss(selBossIdx, { w: v }); dirtyRef.current = true; }} min={12} max={2048} step={8} /></div>
+                    <div className="flex items-center justify-between"><span className="text-[10px] text-dim">Высота</span><Stepper value={Math.round(selBossDef.h)} onChange={(v) => { updBoss(selBossIdx, { h: v }); dirtyRef.current = true; }} min={12} max={2048} step={8} /></div>
+                  </div>
+
+                  <div className="space-y-1 border-2 border-[rgba(192,122,255,0.4)] px-2 py-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-[#c07aff]">👹 Радиус босса</span>
+                      <Stepper value={selBossDef.r ?? 0} onChange={(v) => { updBoss(selBossIdx, { r: v }); dirtyRef.current = true; }} min={0} max={3000} step={10} suffix=" px" />
+                    </div>
+                    <p className="text-[10px] text-[#c07aff] leading-tight">Игрок ВНУТРИ круга победил/проиграл задание — босс ОДИН раз реагирует клипом со своим звуком. Победили задание на ячейке босса и поставили своё — он повержен и замер статичным кадром. 0 = молчит и не реагирует. Круг виден только в редакторе.</p>
+                  </div>
+                  <p className="text-[10px] text-gold leading-tight">Тяните жёлтый УГОЛОК рамки — меняете размер мышью. Тяните тело — двигаете босса.</p>
+
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <GhostBtn small onClick={() => {
+                      const copy: PlacedBoss = { ...selBossDef, id: uid('boss'), x: selBossDef.x + 16, y: selBossDef.y + 16 };
+                      setMap((mm) => (mm ? { ...mm, bosses: [...(mm.bosses ?? []), copy] } : mm));
+                      setSelBoss(copy.id);
+                      dirtyRef.current = true;
+                      sfx.hover();
+                    }}>Дублировать</GhostBtn>
+                    <GhostBtn small onClick={() => { setPlaceBossId(selBossDef.bid); sfx.hover(); toast('Кликайте по полю — поставите ещё экземпляры этого босса', 'info'); }}>Ставить ещё</GhostBtn>
+                  </div>
+
+                  <HoldDeleteButton
+                    onFire={() => removeBossAt(selBossDef.id)}
+                    label={`босса «${selBossLib?.name ?? '?'}» с карты`}
+                    ariaLabel="Удалить босса с карты"
+                    title="Удалить босса с карты"
+                    className="w-full py-1.5 border-2 border-coral/60 text-coral font-display text-[10px] uppercase hover:bg-coral/10 transition-colors cursor-pointer"
+                  >
+                    Удалить босса
                   </HoldDeleteButton>
                 </div>
               )}

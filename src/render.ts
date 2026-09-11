@@ -69,7 +69,17 @@ export function animAtPoint(map: GameMap, wx: number, wy: number): number {
   return -1;
 }
 
-/* Текущий кадр клипа по времени (мс): кадр = floor(секунды × fps) по кругу */
+/* Размещённый босс под точкой: верхний — тот, что позже в массиве */
+export function bossAtPoint(map: GameMap, wx: number, wy: number): number {
+  const bs = map.bosses ?? [];
+  for (let i = bs.length - 1; i >= 0; i--) {
+    const b = bs[i];
+    if (wx >= b.x - b.w / 2 && wx < b.x + b.w / 2 && wy >= b.y - b.h / 2 && wy < b.y + b.h / 2) return i;
+  }
+  return -1;
+}
+
+/* Текущий кадр клипа анимации по времени (мс): кадр = floor(секунды × fps) по кругу */
 export function clipFrameIdx(clip: AnimClip, timeMs: number): number {
   const n = clip.frames.length;
   if (!n) return 0;
@@ -258,6 +268,8 @@ export interface TokenDraw {
   dir?: TokenDir;      // текущее направление движения (нет — стоит на месте → idle)
   phase?: number;      // сдвиг фазы проигрывания (чтобы фишки не мигали синхронно)
   size?: number;       // размер на поле в px по большей стороне (нет: анимированная 64, обычная 34)
+  override?: AnimClip;  // разовый клип fx (победа/поражение) — играется ОДИН раз вместо обычного
+  overrideStart?: number; // старт клипа override в мс rAF-часов (performance.now)
 }
 
 export interface BoardDrawOpts {
@@ -273,6 +285,10 @@ export interface BoardDrawOpts {
   hoverCell: number | null;
   mystery?: Set<number>; // ячейки, которые ещё не «открыты» — рисуем как «?»
   sndRadii?: boolean; // пунктирные круги радиуса звука у анимаций со звуком (только редактор карт; в игре не рисуем)
+  broken?: Record<number, { left: number }>; // разбитые ячейки: трещины + счётчик ходов до восстановления
+  bossDown?: Record<string, boolean>; // повержённые боссы: статичный кадр побеждённого
+  /* разовые реакции боссов (fx): клип играется ОДИН раз от start (rAF-мс), дойдя до последнего кадра — замирает */
+  bossFx?: Record<string, { frames: string[]; fps: number; start: number }>;
 }
 
 function px(ctx: CanvasRenderingContext2D, x: number, y: number, s: number, pattern: string[], color: string) {
@@ -720,6 +736,37 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.lineWidth = 3;
       ctx.strokeRect(-W / 2 - 3, -H / 2 - 3, W + 6, H + 6);
     }
+    /* РАЗБИТАЯ ЯЧЕЙКА: трещины, затемнение и счётчик ходов до восстановления */
+    const brk = o.broken?.[i];
+    if (brk) {
+      ctx.save();
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = '#070912';
+      ctx.fillRect(-W / 2, -H / 2, W, H);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = 'rgba(214,222,255,0.75)';
+      ctx.lineWidth = 2;
+      ctx.lineJoin = 'round';
+      const crack = (x0: number, y0: number, x1: number, y1: number, k: number) => {
+        const mx = (x0 + x1) / 2 + (k * W) / 8;
+        const my = (y0 + y1) / 2 - (k * H) / 10;
+        ctx.beginPath();
+        ctx.moveTo(x0, y0); ctx.lineTo(mx, my); ctx.lineTo(x1, y1);
+        ctx.stroke();
+      };
+      crack(-W / 2, -H / 4, W / 2 + 2, H / 4, 1);   // длинная диагональная
+      crack(-W / 2 + W * 0.2, -H / 2, W * 0.05, H / 2, -1); // поперечная
+      crack(W * 0.15, -H / 2, W / 2 - 2, H / 3, 0.6);
+      crack(-W * 0.3, H / 2, -W / 2 + 2, 0, -0.6);
+      ctx.restore();
+      // бейдж «сколько ходов до восстановления» (жёлтый, в правом нижнем углу)
+      ctx.fillStyle = '#ffcf3f';
+      ctx.fillRect(W / 2 - 22, H / 2 - 20, 18, 15);
+      ctx.fillStyle = '#0a0c18';
+      ctx.font = '10px "Press Start 2P", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(String(Math.max(0, brk.left ?? 0)), W / 2 - 13, H / 2 - 8);
+    }
     if (o.hoverCell === i) {
       ctx.strokeStyle = '#ffcf3f';
       ctx.lineWidth = 2;
@@ -751,6 +798,57 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     ctx.restore();
   }
 
+  // БОССЫ: анимации-персонажи на ячейках. Живой — играет idle (или реакцию fx ОДИН раз),
+  // повержённый — замер на статичном кадре побеждённого (последний кадр клипа win)
+  const blibDraw = new Map((map.bossLib ?? []).map((b) => [b.id, b]));
+  for (const pb of map.bosses ?? []) {
+    const def = blibDraw.get(pb.bid);
+    if (!def) continue;
+    // круг радиуса — только в редакторе карт (радиус работает и для реакций, и для звука ожидания)
+    if (o.sndRadii && pb.r && pb.r > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(pb.x, pb.y, pb.r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(192,122,255,0.06)';
+      ctx.fill();
+      ctx.setLineDash([10, 7]);
+      ctx.strokeStyle = 'rgba(192,122,255,0.8)';
+      ctx.lineWidth = 2 / Math.max(0.05, view.zoom);
+      ctx.stroke();
+      ctx.restore();
+    }
+    let frames: string[] | null = null;
+    let fps = 6;
+    let once = false; // клип-одноразка (реакция) — не зацикливать, замереть на последнем кадре
+    let startMs = 0;
+    const fxC = o.bossFx?.[pb.id];
+    if (fxC && fxC.frames.length) {
+      frames = fxC.frames; fps = fxC.fps; once = true; startMs = fxC.start;
+    } else if (o.bossDown?.[pb.id]) {
+      frames = def.win.frames.length ? def.win.frames : def.idle.frames;
+      fps = def.win.frames.length ? def.win.fps : def.idle.fps;
+      once = true; startMs = 0; // статичный кадр — берём последний
+    } else {
+      frames = def.idle.frames; fps = def.idle.fps;
+    }
+    if (!frames || !frames.length) continue;
+    let idx: number;
+    if (once) {
+      idx = startMs ? Math.floor(((o.time - startMs) / 1000) * Math.max(1, Math.min(24, fps || 6))) : frames.length - 1;
+      idx = Math.max(0, Math.min(frames.length - 1, idx));
+    } else {
+      idx = clipFrameIdx({ fps, frames }, o.time);
+    }
+    const img = getImage(frames[idx]);
+    if (!img) continue;
+    ctx.save();
+    ctx.translate(pb.x, pb.y);
+    ctx.imageSmoothingEnabled = true;
+    if (o.bossDown?.[pb.id] && !fxC) ctx.globalAlpha = 0.85; // побеждённый — чуть приглушён
+    ctx.drawImage(img, -pb.w / 2, -pb.h / 2, pb.w, pb.h);
+    ctx.restore();
+  }
+
   // токены
   for (let i = 0; i < o.tokens.length; i++) {
     const t = o.tokens[i];
@@ -777,9 +875,20 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.drawImage(img, -dw / 2, -dh / 2 - sz * 0.12, dw, dh);
     };
     const custom = t.img ? getImage(t.img) : null;
+    // FX (победа/поражение): разовый клип вместо обычной анимации — от локального старта, замереть на последнем кадре
+    let drawn = false;
+    if (t.override && t.override.frames.length && t.overrideStart !== undefined) {
+      const fpsO = Math.max(1, Math.min(24, t.override.fps || 6));
+      const idxO = Math.max(0, Math.min(t.override.frames.length - 1, Math.floor(((o.time - t.overrideStart) / 1000) * fpsO)));
+      const fimgO = getImage(t.override.frames[idxO]);
+      if (fimgO) {
+        ctx.imageSmoothingEnabled = false;
+        drawFit(fimgO);
+        drawn = true;
+      }
+    }
     // АНИМИРОВАННАЯ фишка: кадр клипа по направлению (нет — idle); не загрузился — статичное превью
     const clip = t.anim ? clipForToken(t.anim, t.dir) : null;
-    let drawn = false;
     if (clip && clip.frames.length) {
       const fimg = getImage(clip.frames[clipFrameIdx(clip, o.time + (t.phase ?? 0) * 1000)]);
       if (fimg) {

@@ -5,7 +5,7 @@ import PixelPaint, { emptyGrid, gridToDataUrl, imageToGrid } from '../PixelPaint
 import { extractTilesFromImage } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbAll, idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimClip, AnimDef, GameMap, SoundDef, TokenAnim, TokenDef, TileGroup, TileImg } from '../types';
+import type { AnimClip, AnimDef, BossAnimDef, GameMap, SoundDef, TokenAnim, TokenDef, TileGroup, TileImg } from '../types';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import { sfx } from '../sound';
 import { playOneShot, stopOneShot } from '../loopsnd';
@@ -54,19 +54,29 @@ const flipDataUrl = (dataUrl: string): Promise<string> =>
     img.src = dataUrl;
   });
 
-/* Клипы анимированной фишки: idle обязателен, направления — по наличии */
-type ClipKey = 'idle' | 'up' | 'down' | 'left' | 'right';
+/* Клипы анимированной фишки: idle обязателен, направления — по наличии.
+   win/lose — 5-я и 6-я анимации: победа над заданием и поражение (каждая со своим звуком) */
+type ClipKey = 'idle' | 'up' | 'down' | 'left' | 'right' | 'win' | 'lose';
 const CLIP_META: { key: ClipKey; label: string; hint: string }[] = [
   { key: 'idle', label: 'IDLE · СТОИТ', hint: 'обязательный клип — фишка стоит на месте' },
   { key: 'down', label: '↓ ВНИЗ', hint: 'фишка идёт вниз' },
   { key: 'up', label: '↑ ВВЕРХ', hint: 'фишка идёт вверх' },
   { key: 'left', label: '← ВЛЕВО', hint: 'фишка идёт влево' },
   { key: 'right', label: '→ ВПРАВО', hint: 'фишка идёт вправо' },
+  { key: 'win', label: '🏆 ПОБЕДА · 5-я', hint: 'проигрывается ОДИН раз после победы в задании — вместе с ней ячейка разбивается' },
+  { key: 'lose', label: '💀 ПОРАЖЕНИЕ · 6-я', hint: 'проигрывается ОДИН раз при провале задания — после неё ход уходит дальше' },
 ];
 
 interface ClipDraft { fps: number; frames: string[] }
 interface AnimDraft { id?: string; name: string; fps: number; frames: string[]; createdAt?: number; sndId?: string }
-interface TokDraft { id?: string; name: string; size: number; clips: Record<ClipKey, ClipDraft>; createdAt?: number; sndId?: string }
+interface TokDraft { id?: string; name: string; size: number; clips: Record<ClipKey, ClipDraft>; createdAt?: number; sndId?: string; winSndId?: string; loseSndId?: string }
+interface BossDraft { id?: string; name: string; clips: Record<BossClipKey, ClipDraft>; createdAt?: number; sndIds?: { idle?: string; win?: string; lose?: string } }
+type BossClipKey = 'idle' | 'win' | 'lose';
+const BOSS_CLIPS: { key: BossClipKey; label: string; hint: string }[] = [
+  { key: 'idle', label: 'IDLE · ЖДЁТ', hint: 'обязательный клип — босс жив, ждёт на ячейке' },
+  { key: 'win', label: '🏆 ИГРОК ПОБЕДИЛ', hint: 'босс получает удар игрока — один раз, когда игрок в радиусе победил задание' },
+  { key: 'lose', label: '💀 ИГРОК ПАЛ', hint: 'босс бьёт игрока — один раз, когда игрок в радиусе проиграл задание' },
+];
 
 const emptyClips = (): Record<ClipKey, ClipDraft> => ({
   idle: { fps: 6, frames: [] },
@@ -74,6 +84,13 @@ const emptyClips = (): Record<ClipKey, ClipDraft> => ({
   down: { fps: 6, frames: [] },
   left: { fps: 6, frames: [] },
   right: { fps: 6, frames: [] },
+  win: { fps: 6, frames: [] },
+  lose: { fps: 6, frames: [] },
+});
+const emptyBossClips = (): Record<BossClipKey, ClipDraft> => ({
+  idle: { fps: 6, frames: [] },
+  win: { fps: 6, frames: [] },
+  lose: { fps: 6, frames: [] },
 });
 
 const DEF_TOKEN_SIZE = 64; // размер фишки на карте по умолчанию = оригинальный размер тайла (клетка)
@@ -149,8 +166,8 @@ function SoundAttach({ sounds, value, onDetach }: { sounds: SoundDef[]; value?: 
 }
 
 export default function TokenEditor() {
-  const { tokens, anims, sounds, animTiles, animGroups, setScreen, refresh, toast } = useApp();
-  const [tab, setTab] = useState<'anims' | 'atokens' | 'tokens'>('anims');
+  const { tokens, anims, bossAnims, sounds, animTiles, animGroups, setScreen, refresh, toast } = useApp();
+  const [tab, setTab] = useState<'anims' | 'atokens' | 'tokens' | 'bosses'>('anims');
 
   /* ---------- пиксель-арт редактор ОБЫЧНОЙ фишки: создание И правка существующей.
      srcDataUrl — откуда взята картинка (тайл левой панели / прежняя фишка):
@@ -160,7 +177,13 @@ export default function TokenEditor() {
   /* ---------- черновики создателей ---------- */
   const [animDraft, setAnimDraft] = useState<AnimDraft | null>(null); // свободная анимация для карт
   const [tokDraft, setTokDraft] = useState<TokDraft | null>(null); // анимированная фишка
+  const [bossDraft, setBossDraft] = useState<BossDraft | null>(null); // босс (idle + победа + поражение)
   const [activeClip, setActiveClip] = useState<ClipKey>('idle'); // клип фишки, куда падают кадры
+  const [activeBossClip, setActiveBossClip] = useState<BossClipKey>('idle'); // клип босса, куда падают кадры
+  /* куда прилипает ЗВУК по клику в левой панели: у фишки три слота (ход/победа/поражение),
+     у босса — тоже три (ждёт/победа/поражение), у свободной анимации — один */
+  const [sndTarget, setSndTarget] = useState<'snd' | 'win' | 'lose'>('snd');
+  const [bossSndTarget, setBossSndTarget] = useState<'idle' | 'win' | 'lose'>('idle');
   const [mirrorMode, setMirrorMode] = useState(false); // ЗЕРКАЛО: следующий клик по тайлу добавит отражённый кадр
 
   /* ---------- нарезка тайлов (общий экстрактор из tilecut.ts) ---------- */
@@ -446,16 +469,33 @@ export default function TokenEditor() {
   const soundsIn = (folder: string) => sounds.filter((s) => s.folder === folder);
 
   /* ---------- ВЫБОР ЗВУКА ДЛЯ СОЗДАТЕЛЕЙ КЛИКОМ ПО ЛЕВОЙ ПАНЕЛИ ----------
-   Открыт создатель анимации или фишки → клик по звуку прикрепляет его
-   (повторный клик по тому же — отвязывает). Нет открытого создателя →
-   клик просто прослушивает. */
-  const draftSndId = animDraft?.sndId ?? tokDraft?.sndId ?? null;
+   Открыт создатель анимации/фишки/босса → клик по звуку прикрепляет его
+   к выбранному слоту (у фишки и босса слотов три), повторный клик по тому же —
+   отвязывает. Нет открытого создателя → клик просто прослушивает. */
+  const draftSndId = bossDraft
+    ? (bossDraft.sndIds?.[bossSndTarget] ?? null)
+    : tokDraft
+      ? (sndTarget === 'snd' ? tokDraft.sndId ?? null : sndTarget === 'win' ? tokDraft.winSndId ?? null : tokDraft.loseSndId ?? null)
+      : animDraft?.sndId ?? null;
   const pickSound = (s: SoundDef) => {
-    if (animDraft) {
-      setAnimDraft((d) => (d ? { ...d, sndId: d.sndId === s.id ? undefined : s.id } : d));
+    if (bossDraft) {
+      setBossDraft((d) => {
+        if (!d) return d;
+        const cur = d.sndIds ?? {};
+        const next = { ...cur, [bossSndTarget]: cur[bossSndTarget] === s.id ? undefined : s.id };
+        return { ...d, sndIds: next };
+      });
       sfx.hover();
     } else if (tokDraft) {
-      setTokDraft((d) => (d ? { ...d, sndId: d.sndId === s.id ? undefined : s.id } : d));
+      setTokDraft((d) => {
+        if (!d) return d;
+        if (sndTarget === 'win') return { ...d, winSndId: d.winSndId === s.id ? undefined : s.id };
+        if (sndTarget === 'lose') return { ...d, loseSndId: d.loseSndId === s.id ? undefined : s.id };
+        return { ...d, sndId: d.sndId === s.id ? undefined : s.id };
+      });
+      sfx.hover();
+    } else if (animDraft) {
+      setAnimDraft((d) => (d ? { ...d, sndId: d.sndId === s.id ? undefined : s.id } : d));
       sfx.hover();
     } else {
       togglePreview(s);
@@ -464,7 +504,7 @@ export default function TokenEditor() {
 
   const soundRow = (s: SoundDef) => {
     const sel = draftSndId === s.id;
-    const draftOpen = !!(animDraft || tokDraft);
+    const draftOpen = !!(animDraft || tokDraft || bossDraft);
     return (
       <div key={s.id} className={`flex items-center gap-1.5 border-2 px-1.5 py-1 transition-colors ${sel ? 'border-gold bg-gold/10' : 'border-edge bg-panel'}`}>
         <button
@@ -507,7 +547,7 @@ export default function TokenEditor() {
   /* ---------- клик по тайлу левой панели = ДОБАВИТЬ КАДР в открытый черновик,
      а на вкладке «Обычные фишки» (без черновика) — открыть тайл в пиксель-редакторе ---------- */
   const onTileClick = (t: TileImg) => {
-    if (!animDraft && !tokDraft && tab === 'tokens') {
+    if (!animDraft && !tokDraft && !bossDraft && tab === 'tokens') {
       openTileAsToken(t);
       return;
     }
@@ -515,6 +555,11 @@ export default function TokenEditor() {
       let src = t.dataUrl;
       if (mirrorMode) src = await flipDataUrl(src); // ЗЕРКАЛО по горизонтали
       const url = await shrinkFrame(src);
+      if (bossDraft) {
+        setBossDraft((d) => (d ? { ...d, clips: { ...d.clips, [activeBossClip]: { ...d.clips[activeBossClip], frames: [...d.clips[activeBossClip].frames, url] } } } : d));
+        sfx.coin();
+        return;
+      }
       if (animDraft) {
         setAnimDraft((d) => (d ? { ...d, frames: [...d.frames, url] } : d));
         sfx.coin();
@@ -525,7 +570,7 @@ export default function TokenEditor() {
         sfx.coin();
         return;
       }
-      toast('Сначала откройте «Новая анимация» или «Новая анимированная фишка» — тайлы станут кадрами', 'info');
+      toast('Сначала откройте «Новая анимация», «Новая анимированная фишка» или «Новый босс» — тайлы станут кадрами', 'info');
     };
     void add();
   };
@@ -646,13 +691,20 @@ export default function TokenEditor() {
     if (!tokDraft) return;
     if (!tokDraft.clips.idle.frames.length) { toast('Клип IDLE обязателен — добавьте в него кадры (это фишка, когда она стоит)', 'err'); sfx.fail(); return; }
     const tokSndUrl = tokDraft.sndId ? sounds.find((x) => x.id === tokDraft.sndId)?.dataUrl : undefined;
+    const winSndUrl = tokDraft.winSndId ? sounds.find((x) => x.id === tokDraft.winSndId)?.dataUrl : undefined;
+    const loseSndUrl = tokDraft.loseSndId ? sounds.find((x) => x.id === tokDraft.loseSndId)?.dataUrl : undefined;
+    const clipOf = (k: ClipKey) => ({ fps: Math.max(1, Math.min(24, tokDraft.clips[k].fps)), frames: tokDraft.clips[k].frames });
     const anim: TokenAnim = {
-      idle: { fps: Math.max(1, Math.min(24, tokDraft.clips.idle.fps)), frames: tokDraft.clips.idle.frames },
-      ...(tokDraft.clips.up.frames.length ? { up: { fps: Math.max(1, Math.min(24, tokDraft.clips.up.fps)), frames: tokDraft.clips.up.frames } } : {}),
-      ...(tokDraft.clips.down.frames.length ? { down: { fps: Math.max(1, Math.min(24, tokDraft.clips.down.fps)), frames: tokDraft.clips.down.frames } } : {}),
-      ...(tokDraft.clips.left.frames.length ? { left: { fps: Math.max(1, Math.min(24, tokDraft.clips.left.fps)), frames: tokDraft.clips.left.frames } } : {}),
-      ...(tokDraft.clips.right.frames.length ? { right: { fps: Math.max(1, Math.min(24, tokDraft.clips.right.fps)), frames: tokDraft.clips.right.frames } } : {}),
+      idle: clipOf('idle'),
+      ...(tokDraft.clips.up.frames.length ? { up: clipOf('up') } : {}),
+      ...(tokDraft.clips.down.frames.length ? { down: clipOf('down') } : {}),
+      ...(tokDraft.clips.left.frames.length ? { left: clipOf('left') } : {}),
+      ...(tokDraft.clips.right.frames.length ? { right: clipOf('right') } : {}),
+      ...(tokDraft.clips.win.frames.length ? { win: clipOf('win') } : {}), // 5-я анимация: победа над заданием
+      ...(tokDraft.clips.lose.frames.length ? { lose: clipOf('lose') } : {}), // 6-я анимация: поражение
       ...(tokSndUrl ? { snd: tokSndUrl } : {}),
+      ...(winSndUrl ? { winSnd: winSndUrl } : {}), // отдельный звук победы
+      ...(loseSndUrl ? { loseSnd: loseSndUrl } : {}), // отдельный звук поражения
     };
     const t: TokenDef = {
       id: tokDraft.id ?? uid('tok'),
@@ -666,7 +718,65 @@ export default function TokenEditor() {
     await refresh();
     setTokDraft(null);
     sfx.success();
-    toast(`Анимированная фишка «${t.name}» готова${anim.snd ? ' со звуком хода' : ''} — отмечайте её в картах`, 'ok');
+    toast(`Анимированная фишка «${t.name}» готова${anim.win ? ' · с анимацией ПОБЕДЫ' : ''}${anim.lose ? ' · с анимацией ПОРАЖЕНИЯ' : ''} — отмечайте её в картах`, 'ok');
+  };
+
+  /* УДАЛЁННЫЙ босс не должен оставаться вшитым в карты: чистим bossLib + экземпляры.
+     Возвращает снимки прежних списков — для отмены через Ctrl+Z */
+  const purgeBossFromMaps = async (bossId: string): Promise<Array<{ key: string; bossLib: unknown[]; bosses: unknown[] }>> => {
+    const all = await idbAll<GameMap>('maps');
+    const snapshots: Array<{ key: string; bossLib: unknown[]; bosses: unknown[] }> = [];
+    for (const { key, value: mp } of all) {
+      const lib = (mp.bossLib ?? []).filter((x) => x.id !== bossId);
+      const placed = (mp.bosses ?? []).filter((x) => x.bid !== bossId);
+      if (lib.length !== (mp.bossLib ?? []).length || placed.length !== (mp.bosses ?? []).length) {
+        snapshots.push({ key, bossLib: mp.bossLib ?? [], bosses: mp.bosses ?? [] });
+        await idbPut('maps', key, { ...mp, bossLib: lib, bosses: placed, updatedAt: Date.now() });
+      }
+    }
+    return snapshots;
+  };
+
+  const saveBoss = async () => {
+    if (!bossDraft) return;
+    if (!bossDraft.clips.idle.frames.length) { toast('Клип IDLE обязателен — добавьте кадры (живой босс на ячейке)', 'err'); sfx.fail(); return; }
+    if (!bossDraft.clips.win.frames.length || !bossDraft.clips.lose.frames.length) { toast('Нужны клипы ПОБЕДЫ и ПОРАЖЕНИЯ — это реакции босса на исходы заданий', 'err'); sfx.fail(); return; }
+    const sndUrl = (sid?: string) => (sid ? sounds.find((x) => x.id === sid)?.dataUrl : undefined);
+    const clipOf = (k: BossClipKey) => ({ fps: Math.max(1, Math.min(24, bossDraft.clips[k].fps)), frames: bossDraft.clips[k].frames });
+    const b: BossAnimDef = {
+      id: bossDraft.id ?? uid('boss'),
+      name: bossDraft.name.trim().toUpperCase() || 'БОСС',
+      idle: clipOf('idle'),
+      win: clipOf('win'),
+      lose: clipOf('lose'),
+      ...(sndUrl(bossDraft.sndIds?.idle) ? { idleSnd: sndUrl(bossDraft.sndIds?.idle) } : {}),
+      ...(sndUrl(bossDraft.sndIds?.win) ? { winSnd: sndUrl(bossDraft.sndIds?.win) } : {}),
+      ...(sndUrl(bossDraft.sndIds?.lose) ? { loseSnd: sndUrl(bossDraft.sndIds?.lose) } : {}),
+      createdAt: bossDraft.createdAt ?? Date.now(),
+    };
+    await idbPut('bossAnims', b.id, b);
+    await refresh();
+    setBossDraft(null);
+    sfx.success();
+    toast(`Босс «${b.name}» сохранён — вшивайте его в карты в редакторе карт`, 'ok');
+  };
+
+  const removeBoss = async (b: BossAnimDef) => {
+    const snaps = await purgeBossFromMaps(b.id);
+    await idbDel('bossAnims', b.id);
+    rememberDeleted({
+      label: `босса «${b.name}»`,
+      restore: async () => {
+        await idbPut('bossAnims', b.id, JSON.parse(JSON.stringify(b)));
+        for (const sn of snaps) {
+          const cur = await idbGet<GameMap>('maps', sn.key);
+          if (cur) await idbPut('maps', cur.id, { ...cur, bossLib: sn.bossLib as GameMap['bossLib'], bosses: sn.bosses as GameMap['bosses'], updatedAt: Date.now() });
+        }
+        await refresh();
+      },
+    });
+    await refresh();
+    toast(`Босс «${b.name}» удалён — также убран из всех карт, где был вшит (Ctrl+Z вернёт)`, 'err');
   };
 
   const removeTok = async (t: TokenDef) => {
@@ -744,7 +854,8 @@ export default function TokenEditor() {
             <GhostBtn onClick={() => newBlank(16)}>{Ic.plus(14)} Нарисовать</GhostBtn>
           )}
           {tab === 'anims' && <PxBtn color="sky" onClick={() => { setAnimDraft({ name: '', fps: 6, frames: [] }); sfx.click(); }}>{Ic.plus(14)} Новая анимация</PxBtn>}
-          {tab === 'atokens' && <PxBtn color="sky" onClick={() => { setTokDraft({ name: '', size: DEF_TOKEN_SIZE, clips: emptyClips() }); setActiveClip('idle'); sfx.click(); }}>{Ic.plus(14)} Новая анимированная фишка</PxBtn>}
+          {tab === 'atokens' && <PxBtn color="sky" onClick={() => { setTokDraft({ name: '', size: DEF_TOKEN_SIZE, clips: emptyClips() }); setActiveClip('idle'); setSndTarget('snd'); sfx.click(); }}>{Ic.plus(14)} Новая анимированная фишка</PxBtn>}
+          {tab === 'bosses' && <PxBtn color="sky" onClick={() => { setBossDraft({ name: '', clips: emptyBossClips() }); setActiveBossClip('idle'); setBossSndTarget('idle'); sfx.click(); }}>{Ic.plus(14)} Новый босс</PxBtn>}
         </div>
       </div>
 
@@ -786,7 +897,7 @@ export default function TokenEditor() {
                         key={t.id}
                         title={`${t.name} — клик: добавить кадром (или открыть в пикс-редакторе на вкладке «Обычные фишки»)`}
                         onClick={() => onTileClick(t)}
-                        className={`relative aspect-square border-2 border-gold/40 overflow-hidden cursor-pointer transition-transform hover:scale-105 ${(animDraft || tokDraft) ? 'hover:border-gold' : ''}`}
+                        className={`relative aspect-square border-2 border-gold/40 overflow-hidden cursor-pointer transition-transform hover:scale-105 ${(animDraft || tokDraft || bossDraft) ? 'hover:border-gold' : ''}`}
                       >
                         <img src={t.dataUrl} alt={t.name} className="w-full h-full object-cover" style={{ imageRendering: 'pixelated' }} />
                         <HoldDeleteButton as="span" onFire={() => void delTile(t.id)} label={t.name} ariaLabel="удалить тайл" title="Удалить тайл" className="absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center opacity-0 hover:opacity-100 cursor-pointer">×</HoldDeleteButton>
@@ -824,7 +935,7 @@ export default function TokenEditor() {
                           key={t.id}
                           title={`${t.name} — клик: добавить кадром`}
                           onClick={() => onTileClick(t)}
-                          className={`relative aspect-square border-2 overflow-hidden cursor-pointer transition-transform hover:scale-105 ${(animDraft || tokDraft) ? 'border-edge hover:border-gold' : 'border-edge'}`}
+                          className={`relative aspect-square border-2 overflow-hidden cursor-pointer transition-transform hover:scale-105 ${(animDraft || tokDraft || bossDraft) ? 'border-edge hover:border-gold' : 'border-edge'}`}
                         >
                           <img src={t.dataUrl} alt={t.name} className="w-full h-full object-cover" style={{ imageRendering: 'pixelated' }} />
                           <HoldDeleteButton as="span" onFire={() => void delTile(t.id)} label={t.name} ariaLabel="удалить тайл" title="Удалить тайл" className="absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center opacity-0 hover:opacity-100 cursor-pointer">×</HoldDeleteButton>
@@ -847,8 +958,8 @@ export default function TokenEditor() {
               <div className="tick-label">🔊 Звуки · {sounds.length}</div>
               <button onClick={() => sndFilesRef.current?.click()} className="text-[10px] text-sky hover:text-paper cursor-pointer">+ файлы</button>
             </div>
-            {(animDraft || tokDraft) && (
-              <p className="text-[10px] text-gold leading-tight mb-2 border-2 border-gold/40 px-1.5 py-1">Создатель открыт: КЛИКНИТЕ звук — он прикрепится к {(animDraft ? 'анимации' : 'фишке')}. Повторный клик по нему — отвяжет.</p>
+            {(animDraft || tokDraft || bossDraft) && (
+              <p className="text-[10px] text-gold leading-tight mb-2 border-2 border-gold/40 px-1.5 py-1">Создатель открыт: КЛИКНИТЕ звук — он прикрепится к выбранному слоту {(bossDraft ? 'босса' : tokDraft ? 'фишки' : 'анимации')}. Повторный клик по тому же — отвяжет.</p>
             )}
             <GhostBtn small className="w-full mb-2" onClick={() => sndFolderRef.current?.click()}>{Ic.upload(12)} Папка со звуками</GhostBtn>
             {soundFolders.map((f) => {
@@ -972,14 +1083,104 @@ export default function TokenEditor() {
                     </div>
                   );
                 })}
-                <div className="pt-1 border-t-2 border-edge space-y-1">
-                  <div className="tick-label">🔊 Звук хода — прикрепляется кликом по ЛЕВОЙ панели</div>
+                <div className="pt-1 border-t-2 border-edge space-y-2">
+                  <div className="tick-label">🔊 Звуки фишки — прикрепляются кликом по ЛЕВОЙ панели</div>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="tick-label text-faint shrink-0">Куда прикреплять клик:</span>
+                    {([
+                      { k: 'snd', label: 'ХОД' },
+                      { k: 'win', label: '🏆 ПОБЕДУ' },
+                      { k: 'lose', label: '💀 ПОРАЖЕНИЕ' },
+                    ] as const).map((o) => (
+                      <button
+                        key={o.k}
+                        onClick={() => { setSndTarget(o.k); sfx.hover(); }}
+                        className={`px-2 py-1 font-display text-[9px] uppercase border-2 cursor-pointer ${sndTarget === o.k ? 'border-gold text-gold bg-gold/10' : 'border-edge text-dim hover:text-paper'}`}
+                      >{sndTarget === o.k ? '● ' : ''}{o.label}</button>
+                    ))}
+                  </div>
                   <SoundAttach sounds={sounds} value={tokDraft.sndId} onDetach={() => setTokDraft((d) => (d ? { ...d, sndId: undefined } : d))} />
-                  <p className="text-[10px] text-faint leading-tight">Звук хода фишки: играет, ПОКА фишка движется (вместо стандартных «щелчков» шагов). Короткие звуки будут повторяться, пока фишка идёт.</p>
+                  <SoundAttach sounds={sounds} value={tokDraft.winSndId} onDetach={() => setTokDraft((d) => (d ? { ...d, winSndId: undefined } : d))} />
+                  <SoundAttach sounds={sounds} value={tokDraft.loseSndId} onDetach={() => setTokDraft((d) => (d ? { ...d, loseSndId: undefined } : d))} />
+                  <p className="text-[10px] text-faint leading-tight">ХОД — играет, пока фишка движется. 🏆 ПОБЕДА — один раз после победы в задании (вместе с разбиванием ячейки). 💀 ПОРАЖЕНИЕ — один раз при провале (после неё ход уйдёт дальше). Каждый звук вшивается КОПИЕЙ.</p>
                 </div>
                 <div className="flex justify-end gap-2">
                   <GhostBtn onClick={() => { stopOneShot(); setTokDraft(null); }}>Отмена</GhostBtn>
                   <PxBtn color="sky" onClick={() => void saveTok()}>{Ic.check(14)} Сохранить фишку</PxBtn>
+                </div>
+              </div>
+            </div>
+          ) : bossDraft ? (
+            /* ---------- создатель босса: idle + победа игрока + поражение игрока ---------- */
+            <div className="max-w-3xl mx-auto p-4 space-y-4">
+              <div className="flex items-center gap-2">
+                <GhostBtn onClick={() => setBossDraft(null)}>← К списку</GhostBtn>
+                <span className="font-display uppercase text-paper text-sm">Босс · анимация на ячейке</span>
+              </div>
+              <div className="pixel-panel pixel-corners p-4 space-y-3">
+                <div className="flex items-end gap-3 flex-wrap">
+                  <div className="flex-1 min-w-[180px]">
+                    <Field label="Название">
+                      <input className="field-in w-full px-3 py-2 text-sm" maxLength={20} value={bossDraft.name} onChange={(e) => setBossDraft({ ...bossDraft, name: e.target.value.toUpperCase() })} placeholder="ДРАКОН" />
+                    </Field>
+                  </div>
+                  <div>
+                    <span className="tick-label block mb-1.5">Превью idle</span>
+                    <div className="w-16 h-16 border-2 border-edge flex items-center justify-center" style={checker}>
+                      <AnimPreview frames={bossDraft.clips.idle.frames} fps={bossDraft.clips.idle.fps} size={56} />
+                    </div>
+                  </div>
+                </div>
+                <p className="text-[11px] text-gold leading-tight">Босс ставится на любую ячейку в редакторе карт и ЖДЁТ (idle). Когда игрок В РАДИУСЕ его звука побеждает или проигрывает задание — босс ОДИН раз проигрывает реакцию со своим звуком: «🏆 победа» — босс получает удар игрока, «💀 поражение» — босс бьёт игрока. Если игрок победил задание НА ЯЧЕЙКЕ БОССА и поставил СВОЁ — босс повержен: замер на статичном кадре победы.</p>
+                {BOSS_CLIPS.map((cm) => {
+                  const c = bossDraft.clips[cm.key];
+                  const on = activeBossClip === cm.key;
+                  return (
+                    <div key={cm.key} className={`border-2 p-2.5 space-y-2 ${on ? 'border-gold bg-[rgba(255,207,63,0.06)]' : 'border-edge'}`}>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          onClick={() => { setActiveBossClip(cm.key); sfx.hover(); }}
+                          title={on ? 'Кадры пойдут в этот клип' : 'Выбрать: кадры пойдут сюда'}
+                          className={`px-2 py-1 font-display text-[9px] uppercase border-2 cursor-pointer ${on ? 'border-gold text-gold' : 'border-edge text-dim hover:text-paper'}`}
+                        >{on ? '● СЮДА' : '○ СЮДА'}</button>
+                        <span className="font-display text-[11px] uppercase text-paper">{cm.label}</span>
+                        <span className="tick-label text-faint">{cm.hint} · {c.frames.length} кадр.</span>
+                        <div className="ml-auto flex items-center gap-2">
+                          <span className="tick-label text-faint">скорость</span>
+                          <Stepper value={c.fps} onChange={(v) => setBossDraft({ ...bossDraft, clips: { ...bossDraft.clips, [cm.key]: { ...c, fps: v } } })} min={1} max={24} suffix=" кадр/с" />
+                          <div className="w-10 h-10 border-2 border-edge flex items-center justify-center" style={checker}>
+                            <AnimPreview frames={c.frames} fps={c.fps} size={34} />
+                          </div>
+                        </div>
+                      </div>
+                      <FrameStrip clip={c} onFrames={(frames) => setBossDraft({ ...bossDraft, clips: { ...bossDraft.clips, [cm.key]: { ...c, frames } } })} size={44} />
+                    </div>
+                  );
+                })}
+                <div className="pt-1 border-t-2 border-edge space-y-2">
+                  <div className="tick-label">🔊 Звуки босса — прикрепляются кликом по ЛЕВОЙ панели</div>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="tick-label text-faint shrink-0">Куда прикреплять клик:</span>
+                    {([
+                      { k: 'idle', label: 'ЖДЁТ' },
+                      { k: 'win', label: '🏆 ПОБЕДУ' },
+                      { k: 'lose', label: '💀 ПОРАЖЕНИЕ' },
+                    ] as const).map((o) => (
+                      <button
+                        key={o.k}
+                        onClick={() => { setBossSndTarget(o.k); sfx.hover(); }}
+                        className={`px-2 py-1 font-display text-[9px] uppercase border-2 cursor-pointer ${bossSndTarget === o.k ? 'border-gold text-gold bg-gold/10' : 'border-edge text-dim hover:text-paper'}`}
+                      >{bossSndTarget === o.k ? '● ' : ''}{o.label}</button>
+                    ))}
+                  </div>
+                  <SoundAttach sounds={sounds} value={bossDraft.sndIds?.idle} onDetach={() => setBossDraft((d) => (d ? { ...d, sndIds: { ...d.sndIds, idle: undefined } } : d))} />
+                  <SoundAttach sounds={sounds} value={bossDraft.sndIds?.win} onDetach={() => setBossDraft((d) => (d ? { ...d, sndIds: { ...d.sndIds, win: undefined } } : d))} />
+                  <SoundAttach sounds={sounds} value={bossDraft.sndIds?.lose} onDetach={() => setBossDraft((d) => (d ? { ...d, sndIds: { ...d.sndIds, lose: undefined } } : d))} />
+                  <p className="text-[10px] text-faint leading-tight">ЖДЁТ — фоновый звук живого босса (у экземпляра на карте задаётся радиус). 🏆 и 💀 — звучат ОДИН раз вместе с реакцией, если игрок в радиусе. Все звуки вшиваются КОПИЕЙ.</p>
+                </div>
+                <div className="flex justify-end gap-2">
+                  <GhostBtn onClick={() => { stopOneShot(); setBossDraft(null); }}>Отмена</GhostBtn>
+                  <PxBtn color="sky" onClick={() => void saveBoss()}>{Ic.check(14)} Сохранить босса</PxBtn>
                 </div>
               </div>
             </div>
@@ -990,6 +1191,7 @@ export default function TokenEditor() {
                 {([
                   { k: 'anims', label: `Анимации для карт · ${anims.length}` },
                   { k: 'atokens', label: `Анимированные фишки · ${animToks.length}` },
+                  { k: 'bosses', label: `👹 Боссы · ${bossAnims.length}` },
                   { k: 'tokens', label: `Обычные фишки · ${staticToks.length}` },
                 ] as const).map((t) => (
                   <button
@@ -1026,7 +1228,7 @@ export default function TokenEditor() {
               {tab === 'atokens' && (
                 <div>
                   <p className="text-[12px] text-dim mb-3 max-w-2xl">
-                    Анимированная фишка — это пять клипов: IDLE (стоит) и движения вверх/вниз/влево/вправо. Отметьте её в редакторе карты («Фишки партии») — после жеребьёвки игроки увидят её в списке и игра будет проигрывать кадры походки. Чтобы фишка шла без прыжков, включите в карте ход «Плавно». Размер фишки на поле задаётся при создании (по умолчанию — как тайл).
+                    Анимированная фишка — это СЕМЬ клипов: IDLE (стоит), четыре направления движения, 🏆 ПОБЕДА (5-я анимация — один раз после победы в задании, ячейка разбивается) и 💀 ПОРАЖЕНИЕ (6-я — один раз при провале, после неё ход уходит дальше). У каждого клипа свои кадры и скорость, у фишки — три звука: ход, победа и поражение. Отметьте её в редакторе карты («Фишки партии»).
                   </p>
                   <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
                     {animToks.map((t) => (
@@ -1035,12 +1237,13 @@ export default function TokenEditor() {
                           <AnimPreview frames={t.anim!.idle.frames} fps={t.anim!.idle.fps} size={72} />
                         </div>
                         <div className="font-display text-[11px] uppercase text-paper truncate mt-2">{t.name}</div>
-                        <div className="tick-label text-faint">{(['up', 'down', 'left', 'right'] as const).filter((d) => t.anim![d]?.frames.length).length} напр. · {t.anim!.idle.frames.length} кадр. idle</div>
+                        <div className="tick-label text-faint">{(['up', 'down', 'left', 'right'] as const).filter((d) => t.anim![d]?.frames.length).length} напр.{t.anim!.win?.frames.length ? ' · 🏆' : ''}{t.anim!.lose?.frames.length ? ' · 💀' : ''} · {t.anim!.idle.frames.length} кадр. idle</div>
                         <div className="flex justify-center gap-2 mt-2">
                           <GhostBtn small onClick={() => {
                             const a = JSON.parse(JSON.stringify(t.anim)) as TokenAnim;
-                            setTokDraft({ id: t.id, name: t.name, createdAt: t.createdAt, size: t.size ?? DEF_TOKEN_SIZE, sndId: sounds.find((x) => x.dataUrl === a.snd)?.id, clips: { idle: a.idle, up: a.up ?? { fps: 6, frames: [] }, down: a.down ?? { fps: 6, frames: [] }, left: a.left ?? { fps: 6, frames: [] }, right: a.right ?? { fps: 6, frames: [] } } });
+                            setTokDraft({ id: t.id, name: t.name, createdAt: t.createdAt, size: t.size ?? DEF_TOKEN_SIZE, sndId: sounds.find((x) => x.dataUrl === a.snd)?.id, winSndId: sounds.find((x) => x.dataUrl === a.winSnd)?.id, loseSndId: sounds.find((x) => x.dataUrl === a.loseSnd)?.id, clips: { idle: a.idle, up: a.up ?? { fps: 6, frames: [] }, down: a.down ?? { fps: 6, frames: [] }, left: a.left ?? { fps: 6, frames: [] }, right: a.right ?? { fps: 6, frames: [] }, win: a.win ?? { fps: 6, frames: [] }, lose: a.lose ?? { fps: 6, frames: [] } } });
                             setActiveClip('idle');
+                            setSndTarget('snd');
                             sfx.hover();
                           }} className="!px-2">Изменить</GhostBtn>
                           <HoldDeleteButton onFire={() => void removeTok(t)} label={t.name} ariaLabel="Удалить фишку">{Ic.trash(15)}</HoldDeleteButton>
@@ -1050,6 +1253,40 @@ export default function TokenEditor() {
                     {animToks.length === 0 && (
                       <div className="pixel-corners border-[3px] border-dashed border-edge p-6 text-center text-dim text-sm col-span-full">
                         Анимированных фишек пока нет. Нажмите «Новая анимированная фишка»: соберите IDLE и направления из тайлов левой панели.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {tab === 'bosses' && (
+                <div>
+                  <p className="text-[12px] text-dim mb-3 max-w-2xl">
+                    Босс — анимация-персонаж для ячейки карты: живой босс играет IDLE, а когда игрок в радиусе его звука побеждает или проигрывает задание, босс ОДИН раз реагирует клипом победы/поражения со своим звуком. Победил задание на ячейке босса и поставил своё — босс повержен и замер на статичном кадре.
+                  </p>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+                    {bossAnims.map((b) => (
+                      <div key={b.id} className="pixel-panel pixel-corners p-3 text-center">
+                        <div className="mx-auto w-20 h-20 flex items-center justify-center border-2 border-edge" style={checker}>
+                          <AnimPreview frames={b.idle.frames} fps={b.idle.fps} size={72} />
+                        </div>
+                        <div className="font-display text-[11px] uppercase text-paper truncate mt-2">{b.idleSnd ? '🔊 ' : ''}{b.name}</div>
+                        <div className="tick-label text-faint">🏆 {b.win.frames.length} к. · 💀 {b.lose.frames.length} к.</div>
+                        <div className="flex justify-center gap-2 mt-2">
+                          <GhostBtn small onClick={() => {
+                            const findSnd = (url?: string) => sounds.find((x) => x.dataUrl === url)?.id;
+                            setBossDraft({ id: b.id, name: b.name, createdAt: b.createdAt, clips: { idle: JSON.parse(JSON.stringify(b.idle)), win: JSON.parse(JSON.stringify(b.win)), lose: JSON.parse(JSON.stringify(b.lose)) }, sndIds: { idle: findSnd(b.idleSnd), win: findSnd(b.winSnd), lose: findSnd(b.loseSnd) } });
+                            setActiveBossClip('idle');
+                            setBossSndTarget('idle');
+                            sfx.hover();
+                          }} className="!px-2">Изменить</GhostBtn>
+                          <HoldDeleteButton onFire={() => void removeBoss(b)} label={b.name} ariaLabel="Удалить босса">{Ic.trash(15)}</HoldDeleteButton>
+                        </div>
+                      </div>
+                    ))}
+                    {bossAnims.length === 0 && (
+                      <div className="pixel-corners border-[3px] border-dashed border-edge p-6 text-center text-dim text-sm col-span-full">
+                        Боссов пока нет. Нажмите «Новый босс»: соберите IDLE и реакции победы/поражения из тайлов левой панели, прикрепите звуки.
                       </div>
                     )}
                   </div>

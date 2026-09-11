@@ -8,18 +8,18 @@ import { cardArt, cartridgeArt } from '../assets';
 import SegaBox, { type SegaApi } from '../SegaBox';
 import KeyBinder from '../KeyBinder';
 import {
-  loadEmuPrefs, PREFS_EVENT, codeToEjsKey,
+  loadEmuPrefs, PREFS_EVENT, codeToEjsKey, listGamepads,
   PAD_ACTIONS, SEGA_ACTIONS,
   NES_TO_RETRO, SEGA_TO_RETRO,
 } from '../input';
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
-import { PLAYER_COLORS, SKIP_COST, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf } from '../types';
-import type { CardDef, ChaosKind, TaskDef, TokenDir } from '../types';
+import { PLAYER_COLORS, SKIP_COST, SKILL_TURNS, JOURNEY_AUTO_PASS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf } from '../types';
+import type { AnimClip, CardDef, ChaosKind, TaskDef, TokenDir } from '../types';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
-import { startLoop, stopLoop, syncLoops, stopGroup, killGroup, stopOneShot } from '../loopsnd';
+import { startLoop, stopLoop, syncLoops, stopGroup, killGroup, stopOneShot, playOneShot } from '../loopsnd';
 
 export default function GameScreen() {
   const st = useApp();
@@ -124,6 +124,15 @@ export default function GameScreen() {
   const journeyKeys = useRef<Set<TokenDir>>(new Set());
   const journeySelf = useRef<{ x: number; y: number; dir?: TokenDir; moving: boolean; dirty: boolean; lastSent: number } | null>(null);
   const journeyPress = (d: TokenDir, on: boolean) => { if (on) journeyKeys.current.add(d); else journeyKeys.current.delete(d); };
+  /* ---------- FX: разовые анимации-спектакль (5-я/6-я фишки, реакции боссов) ----------
+     fxStart — локальный старт клипа (rAF-мс) по id fx; звук и fxDone — по ОДНОМУ разу */
+  const fxStartRef = useRef<Map<string, number>>(new Map());
+  const fxDoneSentRef = useRef<Set<string>>(new Set());
+  const fxSndRef = useRef<Set<string>>(new Set());
+  /* ---------- JOURNEY: стрелки ДЖОЙСТИКА (геймпад) + авто-передача хода ---------- */
+  const journeyPadRef = useRef<Set<TokenDir>>(new Set());
+  const journeyLastMoveRef = useRef(Date.now());
+  const [autoPassLeft, setAutoPassLeft] = useState(JOURNEY_AUTO_PASS);
 
   const mePlayer = s?.players.find((p) => p.id === me);
   const active = s ? s.players[s.turn % s.players.length] : null;
@@ -273,6 +282,14 @@ export default function GameScreen() {
           if (!e?.snd || !pa.r || pa.r <= 0) continue;
           if (Math.hypot(d.x - pa.x, d.y - pa.y) <= pa.r) wanted.set(pa.id, e.snd);
         }
+        /* БОССЫ: звук ожидания живого босса — по тому же радиусу; повержённый молчит */
+        const blib = new Map((m.bossLib ?? []).map((b) => [b.id, b]));
+        for (const pb of m.bosses ?? []) {
+          if (sess.bossDown?.[pb.id]) continue;
+          const def = blib.get(pb.bid);
+          if (!def?.idleSnd || !pb.r || pb.r <= 0) continue;
+          if (Math.hypot(d.x - pb.x, d.y - pb.y) <= pb.r) wanted.set('boss-' + pb.id, def.idleSnd);
+        }
       }
       syncLoops('amb-', wanted);
     }, 250);
@@ -346,6 +363,35 @@ export default function GameScreen() {
     }
   }, [s?.moving?.ts]);
 
+  /* ---------- FX: разовые ЗВУКИ победы/поражения ----------
+     5-я/6-я анимации фишки — её winSnd/loseSnd; реакции боссов — winSnd/loseSnd босса.
+     Каждый fx озвучивается ОДИН раз по факту появления в сессии. */
+  useEffect(() => {
+    const fxList = s?.fxs ?? [];
+    if (!fxList.length) return;
+    const m = useApp.getState().sessionMap;
+    if (!m) return;
+    for (const fx of fxList) {
+      if (fxSndRef.current.has(fx.id)) continue;
+      fxSndRef.current.add(fx.id);
+      let snd: string | undefined;
+      if (fx.kind === 'tokenWin' || fx.kind === 'tokenLose') {
+        const pl = s!.players.find((x) => x.id === fx.player);
+        const tk = pl?.tokenKey ? (m.mapTokens ?? []).find((x) => x.id === pl.tokenKey) : null;
+        snd = fx.kind === 'tokenWin' ? tk?.anim?.winSnd : tk?.anim?.loseSnd;
+      } else {
+        const b = (m.bosses ?? []).find((x) => x.id === fx.bossId);
+        const def = b ? (m.bossLib ?? []).find((x) => x.id === b.bid) : null;
+        snd = fx.kind === 'bossWin' ? def?.winSnd : def?.loseSnd;
+      }
+      if (snd) playOneShot(snd);
+    }
+    if (fxSndRef.current.size > fxList.length) {
+      const ids = new Set(fxList.map((f) => f.id));
+      for (const k of [...fxSndRef.current]) if (!ids.has(k)) fxSndRef.current.delete(k);
+    }
+  }, [s?.fxs]);
+
   /* ---------- осмотр карты своим ходом сбрасывается при броске/челлендже ---------- */
   useEffect(() => {
     if (s?.moving || s?.challenge || s?.pendingCard || s?.quiz || s?.awaitPost) {
@@ -402,6 +448,23 @@ export default function GameScreen() {
         const mszJ = journeyMode ? mapSize(m) : null;
         let anyoneMoving = false;
         const mapToks = m.mapTokens ?? [];
+        /* ---------- FX: локальный старт разовых анимаций (по id) ----------
+           Клипы играются от ЛОКАЛЬНОГО кадра появления fx; протухшие id чистим.
+           Блокирующая (gate) анимация у ИГРОКА-виновника доиграла — шлём fxDone. */
+        const fxList = sess.fxs ?? [];
+        for (const fx of fxList) if (!fxStartRef.current.has(fx.id)) fxStartRef.current.set(fx.id, t);
+        if (fxStartRef.current.size > fxList.length) {
+          const ids = new Set(fxList.map((f) => f.id));
+          for (const k of [...fxStartRef.current.keys()]) if (!ids.has(k)) fxStartRef.current.delete(k);
+        }
+        for (const fx of fxList) {
+          if (!fx.gate || fx.player !== me || fxDoneSentRef.current.has(fx.id)) continue;
+          const st0 = fxStartRef.current.get(fx.id) ?? t;
+          if (t - st0 >= fx.ms) {
+            fxDoneSentRef.current.add(fx.id);
+            dispatch({ t: 'fxDone', id: me });
+          }
+        }
         const tokens = sess.players.map((p, pi) => {
           const center = cellCenter(m, p.pos);
           let d = dispRef.current[p.id];
@@ -418,9 +481,9 @@ export default function GameScreen() {
               let self = journeySelf.current;
               if (!self) self = journeySelf.current = { x: jp?.x ?? center.x, y: jp?.y ?? center.y, dir: undefined, moving: false, dirty: false, lastSent: 0 };
               let vx = 0, vy = 0;
-              const canWalk = !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost;
+              const canWalk = !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate);
               if (canWalk) {
-                for (const kd of journeyKeys.current) {
+                for (const kd of [...journeyKeys.current, ...journeyPadRef.current]) {
                   if (kd === 'up') vy -= 1; else if (kd === 'down') vy += 1;
                   else if (kd === 'left') vx -= 1; else if (kd === 'right') vx += 1;
                 }
@@ -435,6 +498,7 @@ export default function GameScreen() {
                 self.moving = true;
                 self.dirty = true;
                 jdir = self.dir;
+                journeyLastMoveRef.current = Date.now(); // авто-передача хода отсчитывается ОТ последнего движения
               } else {
                 self.moving = false;
               }
@@ -457,6 +521,12 @@ export default function GameScreen() {
             }
             const tokDefJ = p.tokenKey ? mapToks.find((x) => x.id === p.tokenKey) : null;
             const tokSizeJ = tokDefJ ? (tokDefJ.size ?? (tokDefJ.anim ? 64 : 34)) : (p.tokenSize ?? 34);
+            // FX: пока играет 5-я/6-я анимация этого игрока — клип идёт ОДИН раз вместо обычной анимации
+            const fxA = fxList.find((f) => f.player === p.id && (f.kind === 'tokenWin' || f.kind === 'tokenLose'));
+            const fxASt = fxA ? fxStartRef.current.get(fxA.id) : undefined;
+            const fxAClip: AnimClip | undefined = fxA && fxASt !== undefined
+              ? (fxA.kind === 'tokenWin' ? tokDefJ?.anim?.win : tokDefJ?.anim?.lose)
+              : undefined;
             return {
               x: d.x, y: d.y, color: PLAYER_COLORS[p.color],
               active: act?.id === p.id, alive: p.alive, label: p.name,
@@ -465,6 +535,8 @@ export default function GameScreen() {
               dir: jdir,
               phase: pi * 0.53,
               size: tokSizeJ,
+              override: fxAClip?.frames.length ? fxAClip : undefined,
+              overrideStart: fxAClip?.frames.length ? fxASt : undefined,
             };
           }
 
@@ -560,6 +632,12 @@ export default function GameScreen() {
           prevDispRef.current[p.id] = { x: d.x, y: d.y };
           const tokDef = p.tokenKey ? mapToks.find((x) => x.id === p.tokenKey) : null;
           const tokSize = tokDef ? (tokDef.size ?? (tokDef.anim ? 64 : 34)) : (p.tokenSize ?? 34);
+          // FX: 5-я/6-я анимация этого игрока — разовый клип вместо обычной анимации
+          const fxB = fxList.find((f) => f.player === p.id && (f.kind === 'tokenWin' || f.kind === 'tokenLose'));
+          const fxBSt = fxB ? fxStartRef.current.get(fxB.id) : undefined;
+          const fxBClip: AnimClip | undefined = fxB && fxBSt !== undefined
+            ? (fxB.kind === 'tokenWin' ? tokDef?.anim?.win : tokDef?.anim?.lose)
+            : undefined;
           return {
             x: d.x, y: d.y + lift, color: PLAYER_COLORS[p.color],
             active: act?.id === p.id, alive: p.alive, label: p.name,
@@ -568,6 +646,8 @@ export default function GameScreen() {
             dir,
             phase: pi * 0.53,
             size: tokSize,
+            override: fxBClip?.frames.length ? fxBClip : undefined,
+            overrideStart: fxBClip?.frames.length ? fxBSt : undefined,
           };
         });
 
@@ -599,6 +679,20 @@ export default function GameScreen() {
         const colorById: Record<string, string> = {};
         sess.players.forEach((p) => { colorById[p.id] = PLAYER_COLORS[p.color]; });
 
+        // FX: разовые реакции боссов — клип играется ОДИН раз от локального старта
+        const bossFx: Record<string, { frames: string[]; fps: number; start: number }> = {};
+        for (const fx of fxList) {
+          if (fx.kind !== 'bossWin' && fx.kind !== 'bossLose') continue;
+          const b = (m.bosses ?? []).find((x) => x.id === fx.bossId);
+          if (!b) continue;
+          const def = (m.bossLib ?? []).find((x) => x.id === b.bid);
+          if (!def) continue;
+          const clip = fx.kind === 'bossWin' ? def.win : def.lose;
+          const st = fxStartRef.current.get(fx.id);
+          if (!clip.frames.length || st === undefined) continue;
+          bossFx[b.id] = { frames: clip.frames, fps: clip.fps, start: st };
+        }
+
         drawBoard(ctx, m, {
           view: v, width: w, height: h,
           tileById: tileMapRef.current,
@@ -607,6 +701,9 @@ export default function GameScreen() {
           showNumbers: options.showCellNumbers,
           tokens, time: t, hoverCell: null,
           mystery: mysteryRef.current,
+          broken: sess.broken,
+          bossDown: sess.bossDown,
+          bossFx,
         });
       }
       raf = requestAnimationFrame(loop);
@@ -784,6 +881,65 @@ export default function GameScreen() {
       journeyKeys.current.clear();
     };
   }, [isJourney]);
+
+  /* ---------- JOURNEY: СТРЕЛКИ ДЖОЙСТИКА (геймпад) двигают фишку ----------
+     Крестовина (кнопки 12..15), ЛЕВЫЙ СТИК и пользовательская раскладка из
+     «Управления» (если направление переназначено на другую кнопку). Опрос
+     ~15 раз/с; направления складываются с клавиатурой и экранным D-pad. */
+  useEffect(() => {
+    if (!isJourney) return;
+    const iv = window.setInterval(() => {
+      const prefs = loadEmuPrefs();
+      const dirs = new Set<TokenDir>();
+      if (prefs.gamepad !== false) {
+        const pads = listGamepads();
+        const addBtn = (gp: Gamepad, idx: number | undefined, d: TokenDir) => {
+          if (idx === undefined || idx < 0 || idx > 17) return;
+          if (gp.buttons[idx]?.pressed) dirs.add(d);
+        };
+        for (const gp of pads) {
+          addBtn(gp, 12, 'up'); addBtn(gp, 13, 'down'); addBtn(gp, 14, 'left'); addBtn(gp, 15, 'right');
+          addBtn(gp, prefs.gpad?.UP, 'up'); addBtn(gp, prefs.gpad?.DOWN, 'down');
+          addBtn(gp, prefs.gpad?.LEFT, 'left'); addBtn(gp, prefs.gpad?.RIGHT, 'right');
+          addBtn(gp, prefs.segaPad?.UP, 'up'); addBtn(gp, prefs.segaPad?.DOWN, 'down');
+          addBtn(gp, prefs.segaPad?.LEFT, 'left'); addBtn(gp, prefs.segaPad?.RIGHT, 'right');
+          const ax = gp.axes[0] ?? 0, ay = gp.axes[1] ?? 0; // левый стик
+          if (ax < -0.45) dirs.add('left');
+          if (ax > 0.45) dirs.add('right');
+          if (ay < -0.45) dirs.add('up');
+          if (ay > 0.45) dirs.add('down');
+        }
+      }
+      journeyPadRef.current = dirs;
+    }, 66);
+    return () => { clearInterval(iv); journeyPadRef.current.clear(); };
+  }, [isJourney]);
+
+  /* ---------- JOURNEY: авто-передача хода (отдельной кнопки передачи больше нет) ----------
+     Стоите на месте 30 секунд (JOURNEY_AUTO_PASS) — ход уходит следующему игроку сам.
+     Отсчёт сбрасывается движением фишки, сменой хода и любым событием партии. */
+  useEffect(() => {
+    if (!isJourney) return;
+    journeyLastMoveRef.current = Date.now();
+    setAutoPassLeft(JOURNEY_AUTO_PASS);
+    const iv = window.setInterval(() => {
+      const cur = useApp.getState();
+      const sess = cur.session;
+      const actP = sess && sess.phase === 'playing' ? sess.players[sess.turn % sess.players.length] : null;
+      if (!actP || actP.id !== cur.selfId) { setAutoPassLeft(JOURNEY_AUTO_PASS); return; }
+      const blocked = !!sess && !!(sess.moving || sess.challenge || sess.pendingCard || sess.quiz || sess.awaitPost || (sess.fxs ?? []).some((f) => f.gate));
+      if (blocked) { journeyLastMoveRef.current = Date.now(); setAutoPassLeft(JOURNEY_AUTO_PASS); return; }
+      const left = Math.max(0, JOURNEY_AUTO_PASS - Math.floor((Date.now() - journeyLastMoveRef.current) / 1000));
+      setAutoPassLeft(left);
+      if (left <= 0) {
+        journeyLastMoveRef.current = Date.now(); // следующая попытка — снова через полный интервал
+        journeyKeys.current.clear();
+        journeyPadRef.current.clear();
+        dispatch({ t: 'journeyEnd', id: cur.selfId });
+      }
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [isJourney, s?.turn, s?.moving?.ts, s?.challenge, s?.pendingCard, s?.quiz, s?.awaitPost]);
 
   const winner = s.winner ? s.players.find((p) => p.id === s.winner) : null;
   /* трансляция: показываем последний кадр до 4 секунд, а пока идёт задание —
@@ -1128,8 +1284,12 @@ export default function GameScreen() {
                   <span />
                 </div>
                 <div className="flex flex-col items-center gap-1.5">
-                  <PxBtn color="gold" onClick={() => { journeyKeys.current.clear(); dispatch({ t: 'journeyEnd', id: me }); }}>Передать ход</PxBtn>
-                  <div className="tick-label text-faint text-center max-w-64">Стрелки/WASD или кнопки — фишка идёт сама. Наступите на ячейку задания — оно откроется сразу.</div>
+                  {autoPassLeft <= 5 ? (
+                    <div className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[8px] text-magma blink-hard">ХОД УЙДЁТ САМ: {autoPassLeft} С</div>
+                  ) : (
+                    <div className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[8px] text-dim">ХОД УЙДЁТ САМ: {autoPassLeft} С</div>
+                  )}
+                  <div className="tick-label text-faint text-center max-w-72">Стрелки/WASD, ДЖОЙСТИК (крестовина или стик) или кнопки — фишка идёт сама. Наступите на ячейку задания — оно откроется сразу. Стоите 30 с — ход уйдёт следующему сам.</div>
                 </div>
               </div>
             ) : (
@@ -1691,29 +1851,42 @@ export default function GameScreen() {
         </div>
       )}
 
-      {/* ---------- выбор после захвата ---------- */}
-      {s.awaitPost && myTurn && !ch && (() => {
+      {/* ---------- выбор после захвата (окно открывается ПОСЛЕ анимации победы) ---------- */}
+      {s.awaitPost && myTurn && !ch && !(s.fxs ?? []).some((f) => f.gate) && (() => {
         const postTask = active ? cellTaskOf(s, map, active.pos) : null;
         const dice0Hint = postTask?.chaos === 'dice0';
         return (
           <Modal title={dice0Hint ? 'Задание пройдено!' : 'Ячейка захвачена!'} icon={Ic.trophy(16)} w="max-w-lg" locked>
             <p className="text-[13px] text-dim mb-4">
-              {dice0Hint
-                ? 'Задание с «Кубиками-0» пройдено. Пока вы не замените его, все, кто встанет на ячейку, будут бросать 0 и застревать. Вы — хозяин, вас проклятие не держит.'
-                : 'Теперь эта ячейка ваша: соперники, попавшие на неё, отдают потраченные ресурсы вам. Что дальше?'}
+              {isSkill
+                ? 'Челлендж пройден — вы сражались только с собой и победили. Ячейка разбита и пока пуста: она восстановится через 2 хода.'
+                : dice0Hint
+                  ? 'Задание с «Кубиками-0» пройдено. Пока вы не замените его, все, кто встанет на ячейку, будут бросать 0 и застревать. Вы — хозяин, вас проклятие не держит.'
+                  : 'Победа! Фишка разбила ячейку: пока она пуста (восстановится через 2 хода), хозяин — вы. Что дальше?'}
             </p>
-            <div className="grid grid-cols-2 gap-3">
-              <button onClick={() => { sfx.coin(); dispatch({ t: 'postChoice', id: me, choice: 'continue' }); }} className="pixel-panel pixel-corners p-4 text-left hover:border-gold hover:-translate-y-0.5 transition-all cursor-pointer group">
-                <span className="text-gold">{Ic.dice(22)}</span>
-                <div className="font-display uppercase text-paper group-hover:text-gold mt-2 text-sm">Играть дальше</div>
-                <div className="text-[10px] text-dim mt-1">Сохраняется право броска — продолжите ход</div>
-              </button>
-              <button onClick={() => { sfx.click(); setTplOpen(true); }} className="pixel-panel pixel-corners p-4 text-left hover:border-magma hover:-translate-y-0.5 transition-all cursor-pointer group">
-                <span className="text-magma">{Ic.cart(22)}</span>
-                <div className="font-display uppercase text-paper group-hover:text-magma mt-2 text-sm">Новое задание</div>
-                <div className="text-[10px] text-dim mt-1">{dice0Hint ? 'Замените задание — снимете проклятие с ячейки' : 'Заменить задание ячейки из шаблонов (доп. ход сгорит)'}</div>
-              </button>
-            </div>
+            {isSkill ? (
+              <div className="space-y-3">
+                <p className="text-[11px] text-magma border-2 border-magma/40 px-2 py-1.5">Создать задание нельзя: в SKILL CHALLENGE вы играете ОДИН и сражаетесь только с собой — заменять некому.</p>
+                <button onClick={() => { sfx.coin(); dispatch({ t: 'postChoice', id: me, choice: 'continue' }); }} className="pixel-panel pixel-corners p-4 text-left hover:border-gold hover:-translate-y-0.5 transition-all cursor-pointer group w-full">
+                  <span className="text-gold">{Ic.dice(22)}</span>
+                  <div className="font-display uppercase text-paper group-hover:text-gold mt-2 text-sm">Играть дальше</div>
+                  <div className="text-[10px] text-dim mt-1">Сохраняется право броска — продолжите ход</div>
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <button onClick={() => { sfx.coin(); dispatch({ t: 'postChoice', id: me, choice: 'continue' }); }} className="pixel-panel pixel-corners p-4 text-left hover:border-gold hover:-translate-y-0.5 transition-all cursor-pointer group">
+                  <span className="text-gold">{Ic.dice(22)}</span>
+                  <div className="font-display uppercase text-paper group-hover:text-gold mt-2 text-sm">Играть дальше</div>
+                  <div className="text-[10px] text-dim mt-1">Сохраняется право броска — продолжите ход</div>
+                </button>
+                <button onClick={() => { sfx.click(); setTplOpen(true); }} className="pixel-panel pixel-corners p-4 text-left hover:border-magma hover:-translate-y-0.5 transition-all cursor-pointer group">
+                  <span className="text-magma">{Ic.cart(22)}</span>
+                  <div className="font-display uppercase text-paper group-hover:text-magma mt-2 text-sm">Новое задание</div>
+                  <div className="text-[10px] text-dim mt-1">{dice0Hint ? 'Замените задание — снимете проклятие с ячейки' : 'Задание вступит в силу через 3 хода, ячейка до этого — разбита и пуста (доп. ход сгорит)'}</div>
+                </button>
+              </div>
+            )}
           </Modal>
         );
       })()}
