@@ -15,7 +15,7 @@ import {
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
-import { PLAYER_COLORS, SKIP_COST, CHAOS_LIST, chaosLabel, JOY_LIST } from '../types';
+import { PLAYER_COLORS, SKIP_COST, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf } from '../types';
 import type { CardDef, ChaosKind, TaskDef } from '../types';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
@@ -1592,6 +1592,11 @@ function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => v
   const [chaosCardId, setChaosCardId] = useState('');
   const [joyId, setJoyId] = useState('');
   const romSaves = saves.filter((x) => x.romId === romId);
+  /* в игре выбираются ТОЛЬКО уровни/боссы/моё задание — частные живут в редакторе заданий */
+  const pickableSaves = romSaves.filter((x) => saveKindOf(x) !== 'private');
+  /* ромы группируются по папкам — как в «Запуске эмулятора» и редакторе заданий */
+  const romFolders = [...new Set(roms.map((r) => r.folder ?? '').filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru'));
+  const looseRoms = roms.filter((r) => !r.folder);
   const mePlayer = session?.players.find((p) => p.id === selfId);
   const chaosCards = (mePlayer?.inventory ?? []).filter((c) => !!c.chaos);
 
@@ -1621,17 +1626,35 @@ function TemplateModal({ cellIdx, onClose }: { cellIdx: number; onClose: () => v
         </div>
         <p className="text-[11px] text-dim mb-3">Ром и сохранение из библиотеки — как в папках с шаблонами. Задание действует до конца этой сессии.</p>
         <div className="space-y-3">
-          <Field label="Ром">
+          <Field label="Ром (по папкам)">
             <select className="field-in w-full px-2 py-2 text-sm" value={romId} onChange={(e) => { setRomId(e.target.value); setSaveId(''); }}>
               <option value="">— выбрать —</option>
-              {roms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+              {romFolders.map((f) => (
+                <optgroup key={`f-${f}`} label={`📁 ${f}`}>
+                  {roms.filter((r) => r.folder === f).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                </optgroup>
+              ))}
+              {looseRoms.length > 0 && (
+                romFolders.length
+                  ? <optgroup label="Без папки">{looseRoms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</optgroup>
+                  : looseRoms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)
+              )}
             </select>
           </Field>
-          <Field label="Сохранение">
+          <Field label="Сохранение (уровни / боссы / моё задание)">
             <select className="field-in w-full px-2 py-2 text-sm" value={saveId} onChange={(e) => setSaveId(e.target.value)}>
               <option value="">— без сохранения (старт с начала) —</option>
-              {romSaves.map((x) => <option key={x.id} value={x.id}>Слот {x.slot} · {x.name}</option>)}
+              {(['level', 'boss', 'mytask'] as const).map((k) => {
+                const list = pickableSaves.filter((x) => saveKindOf(x) === k);
+                if (!list.length) return null;
+                return (
+                  <optgroup key={k} label={SAVE_KIND_LABEL[k]}>
+                    {list.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+                  </optgroup>
+                );
+              })}
             </select>
+            <p className="text-[10px] text-faint mt-1">Частные сохранения в игре не выбираются — они доступны только в редакторе заданий.</p>
           </Field>
           <Field label="Название">
             <input className="field-in w-full px-3 py-2 text-sm" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Chip'n'Dale 2 — босс" />

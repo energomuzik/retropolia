@@ -141,6 +141,12 @@ async function sendLibrary(room: Room, map: GameMap): Promise<void> {
   }
   const st = useApp.getState();
   const roms = st.roms.filter((r) => romIds.has(r.id));
+  /* Гости должны видеть в игре (после захвата ячейки) все «уровни / боссы / моё задание»
+     используемых ромов — шлём их ЦЕЛИКОМ. Частные сохранения уезжают только если на
+     них напрямую ссылается какая-то ячейка (выбор частных возможен лишь в редакторе). */
+  for (const s of st.saves) {
+    if (romIds.has(s.romId) && (s.kind ?? 'level') !== 'private') saveIds.add(s.id);
+  }
   const saves = st.saves.filter((s) => saveIds.has(s.id));
   const blobs: Record<string, string> = {};
   for (const r of roms) {

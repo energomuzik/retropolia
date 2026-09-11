@@ -82,16 +82,21 @@ export function killGroup(prefix: string) {
   }
 }
 
-/** Привести группу к желаемому состоянию: ключи из wanted играют (фейд-ин),
-    остальные группы — гаснут. wanted: ключ(без префикса) → src. */
+/** Привести группу к желаемому состоянию: ключи из wanted играют (фейд-ин или
+    ПРОДОЛЖЕНИЕ после паузы), остальные группы — гаснут. wanted: ключ(без префикса) → src.
+    Важно: луп, который уже есть и уже играл (затух и встал на паузу), при повторном
+    появлении в wanted ПРОДОЛЖАЕТСЯ с места паузы — так звук радиуса звучит при каждом
+    входе в круг и возобновляется, когда в круге передали ход. */
 export function syncLoops(prefix: string, wanted: Map<string, string>, spd?: number) {
   for (const [key, e] of loops) {
     if (!key.startsWith(prefix)) continue;
     const id = key.slice(prefix.length);
     const src = wanted.get(id);
+    // чужие/сменённые источники гасим и убираем из wanted — ниже для них стартует новый луп
     if (!src || e.src !== src) { e.target = 0; wanted.delete(id); }
-    else wanted.delete(id);
   }
+  // startLoop для ВСЕХ wanted: существующий луп просто вернёт target=1 и снимется с паузы,
+  // уже играющий не пострадает (play() у играющего аудио — нет-оп)
   for (const [id, src] of wanted) startLoop(prefix + id, src, { spd });
   ensureTimer();
 }

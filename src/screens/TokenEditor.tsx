@@ -113,33 +113,37 @@ function FrameStrip({ clip, onFrames, size = 52 }: {
   );
 }
 
-/* Выбор звука из библиотеки для анимации/фишки: список + кнопка прослушивания.
-   Сохраняется КОПИЯ dataUrl — звук из библиотеки потом можно удалить. */
-function SoundPicker({ sounds, value, onChange }: { sounds: SoundDef[]; value: string; onChange: (id: string) => void }) {
+/* Звук, прикреплённый к анимации/фишке. Сам выбор происходит КЛИКОМ по звуку
+   в ЛЕВОЙ панели (как выбор тайлов-кадров) — здесь только плашка с именем,
+   прослушиванием и отвязкой. Сохраняется КОПИЯ dataUrl — звук из библиотеки
+   потом можно удалить. */
+function SoundAttach({ sounds, value, onDetach }: { sounds: SoundDef[]; value?: string; onDetach: () => void }) {
   const [playing, setPlaying] = useState(false);
-  const url = sounds.find((s) => s.id === value)?.dataUrl ?? null;
+  const s = sounds.find((x) => x.id === value) ?? null;
   useEffect(() => () => stopOneShot(), []);
-  return (
-    <div className="flex items-end gap-2 flex-wrap">
-      <div className="flex-1 min-w-[180px]">
-        <Field label="Звук (необязательно)">
-          <select
-            className="field-in w-full px-3 py-2 text-sm cursor-pointer"
-            value={value}
-            onChange={(e) => { stopOneShot(); setPlaying(false); onChange(e.target.value); }}
-          >
-            <option value="">Без звука</option>
-            {sounds.map((s) => <option key={s.id} value={s.id}>{s.folder ? `${s.folder} / ${s.name}` : s.name}</option>)}
-          </select>
-        </Field>
+  if (!s) {
+    return (
+      <div className="border-2 border-dashed border-edge px-3 py-2.5 text-[11px] text-dim leading-tight">
+        Звук не прикреплён — откройте слева раздел «🔊 Звуки» и КЛИКНИТЕ по звуку: он прилипнет сюда. Повторный клик по тому же звуку — отвяжет.
       </div>
-      {url && (
-        <GhostBtn onClick={() => {
+    );
+  }
+  return (
+    <div className="flex items-center gap-2 border-2 border-gold/60 bg-gold/5 px-2.5 py-2">
+      <button
+        onClick={() => {
           if (playing) { stopOneShot(); setPlaying(false); return; }
-          playOneShot(url);
+          playOneShot(s.dataUrl);
           setPlaying(true);
-        }} title="Прослушать выбранный звук">{playing ? Ic.pause(14) : Ic.play(14)} {playing ? 'Стоп' : 'Прослушать'}</GhostBtn>
-      )}
+        }}
+        title={playing ? 'Остановить' : 'Прослушать'}
+        className="shrink-0 w-7 h-7 border-2 border-gold text-gold bg-gold/10 font-pixel text-[10px] cursor-pointer"
+      >{playing ? '■' : '▶'}</button>
+      <div className="flex-1 min-w-0">
+        <div className="font-display text-[10px] uppercase text-gold truncate">✓ {s.name}</div>
+        <div className="tick-label text-faint">{fmtBytes(s.size)} · прикреплён, при сохранении вшьётся копией</div>
+      </div>
+      <GhostBtn small onClick={() => { stopOneShot(); setPlaying(false); onDetach(); }} title="Отвязать звук">{Ic.cross(11)}</GhostBtn>
     </div>
   );
 }
@@ -441,20 +445,45 @@ export default function TokenEditor() {
   const looseSounds = useMemo(() => sounds.filter((s) => !s.folder), [sounds]);
   const soundsIn = (folder: string) => sounds.filter((s) => s.folder === folder);
 
-  const soundRow = (s: SoundDef) => (
-    <div key={s.id} className="flex items-center gap-1.5 border-2 border-edge bg-panel px-1.5 py-1">
-      <button
-        onClick={() => togglePreview(s)}
-        title={previewId === s.id ? 'Остановить' : 'Прослушать'}
-        className={`shrink-0 w-6 h-6 border-2 font-pixel text-[9px] cursor-pointer ${previewId === s.id ? 'border-gold text-gold bg-gold/10' : 'border-edge text-dim hover:text-paper'}`}
-      >{previewId === s.id ? '■' : '▶'}</button>
-      <div className="flex-1 min-w-0">
-        <div className="font-display text-[10px] uppercase text-paper truncate">{s.name}</div>
-        <div className="tick-label text-faint">{fmtBytes(s.size)}</div>
+  /* ---------- ВЫБОР ЗВУКА ДЛЯ СОЗДАТЕЛЕЙ КЛИКОМ ПО ЛЕВОЙ ПАНЕЛИ ----------
+   Открыт создатель анимации или фишки → клик по звуку прикрепляет его
+   (повторный клик по тому же — отвязывает). Нет открытого создателя →
+   клик просто прослушивает. */
+  const draftSndId = animDraft?.sndId ?? tokDraft?.sndId ?? null;
+  const pickSound = (s: SoundDef) => {
+    if (animDraft) {
+      setAnimDraft((d) => (d ? { ...d, sndId: d.sndId === s.id ? undefined : s.id } : d));
+      sfx.hover();
+    } else if (tokDraft) {
+      setTokDraft((d) => (d ? { ...d, sndId: d.sndId === s.id ? undefined : s.id } : d));
+      sfx.hover();
+    } else {
+      togglePreview(s);
+    }
+  };
+
+  const soundRow = (s: SoundDef) => {
+    const sel = draftSndId === s.id;
+    const draftOpen = !!(animDraft || tokDraft);
+    return (
+      <div key={s.id} className={`flex items-center gap-1.5 border-2 px-1.5 py-1 transition-colors ${sel ? 'border-gold bg-gold/10' : 'border-edge bg-panel'}`}>
+        <button
+          onClick={() => togglePreview(s)}
+          title={previewId === s.id ? 'Остановить' : 'Прослушать'}
+          className={`shrink-0 w-6 h-6 border-2 font-pixel text-[9px] cursor-pointer ${previewId === s.id ? 'border-gold text-gold bg-gold/10' : 'border-edge text-dim hover:text-paper'}`}
+        >{previewId === s.id ? '■' : '▶'}</button>
+        <button
+          onClick={() => pickSound(s)}
+          title={sel ? 'Прикреплён — кликните ещё раз, чтобы отвязать' : draftOpen ? 'Клик: прикрепить этот звук' : 'Клик: прослушать (откройте создателя анимации/фишки, чтобы прикрепить)'}
+          className="flex-1 min-w-0 text-left cursor-pointer"
+        >
+          <div className={`font-display text-[10px] uppercase truncate ${sel ? 'text-gold' : 'text-paper'}`}>{sel ? '✓ ' : ''}{s.name}</div>
+          <div className="tick-label text-faint">{fmtBytes(s.size)}{sel ? ' · прикреплён' : ''}</div>
+        </button>
+        <HoldDeleteButton onFire={() => void delSound(s)} label={`звук «${s.name}»`} ariaLabel="Удалить звук" title="Удалить звук из библиотеки" className="text-faint hover:text-coral cursor-pointer shrink-0 px-0.5">{Ic.cross(10)}</HoldDeleteButton>
       </div>
-      <HoldDeleteButton onFire={() => void delSound(s)} label={`звук «${s.name}»`} ariaLabel="Удалить звук" title="Удалить звук из библиотеки" className="text-faint hover:text-coral cursor-pointer shrink-0 px-0.5">{Ic.cross(10)}</HoldDeleteButton>
-    </div>
-  );
+    );
+  };
 
 
   const addExtractToLibrary = async () => {
@@ -818,6 +847,9 @@ export default function TokenEditor() {
               <div className="tick-label">🔊 Звуки · {sounds.length}</div>
               <button onClick={() => sndFilesRef.current?.click()} className="text-[10px] text-sky hover:text-paper cursor-pointer">+ файлы</button>
             </div>
+            {(animDraft || tokDraft) && (
+              <p className="text-[10px] text-gold leading-tight mb-2 border-2 border-gold/40 px-1.5 py-1">Создатель открыт: КЛИКНИТЕ звук — он прикрепится к {(animDraft ? 'анимации' : 'фишке')}. Повторный клик по нему — отвяжет.</p>
+            )}
             <GhostBtn small className="w-full mb-2" onClick={() => sndFolderRef.current?.click()}>{Ic.upload(12)} Папка со звуками</GhostBtn>
             {soundFolders.map((f) => {
               const list = soundsIn(f);
@@ -848,7 +880,7 @@ export default function TokenEditor() {
               </div>
             )}
             {sounds.length === 0 && (
-              <p className="text-[10px] text-faint leading-tight">Пока звуков нет. Загрузите ПАПКУ (.mp3, .wav, .ogg, .m4a) или отдельные файлы — затем прикрепите звук к анимации или анимированной фишке в их создателях.</p>
+              <p className="text-[10px] text-faint leading-tight">Пока звуков нет. Загрузите ПАПКУ (.mp3, .wav, .ogg, .m4a) или отдельные файлы — затем КЛИКНИТЕ звук в этом списке, прикрепив его к анимации или анимированной фишке.</p>
             )}
             <p className="text-[10px] text-gold leading-tight mt-1">Звук вшивается в анимацию КОПИЕЙ — файл из библиотеки потом можно удалить, вшитое не сломается. Длинные записи сделают карту тяжелее: она уезжает игрокам целиком.</p>
           </div>
@@ -884,8 +916,9 @@ export default function TokenEditor() {
                 <p className="text-[11px] text-gold leading-tight">Выбирайте анимацию КАДР ЗА КАДРОМ: кликайте тайлы в ЛЕВОЙ панели — они встанут по порядку. Стрелками ← → меняйте порядок кадров, × — уберите лишний.</p>
                 <FrameStrip clip={{ fps: animDraft.fps, frames: animDraft.frames }} onFrames={(frames) => setAnimDraft({ ...animDraft, frames })} size={64} />
                 <div className="pt-1 border-t-2 border-edge space-y-1">
-                  <SoundPicker sounds={sounds} value={animDraft.sndId ?? ''} onChange={(id) => setAnimDraft((d) => (d ? { ...d, sndId: id || undefined } : d))} />
-                  <p className="text-[10px] text-faint leading-tight">У анимации со звуком на карте задаётся РАДИУС: фишка играющего вошла в круг — звук играет (только у него), а в задании приглушается.</p>
+                  <div className="tick-label">🔊 Звук — прикрепляется кликом по ЛЕВОЙ панели</div>
+                  <SoundAttach sounds={sounds} value={animDraft.sndId} onDetach={() => setAnimDraft((d) => (d ? { ...d, sndId: undefined } : d))} />
+                  <p className="text-[10px] text-faint leading-tight">У анимации со звуком на карте задаётся РАДИУС: фишка играющего вошла в круг — звук играет (только у него), при повторном входе и передаче хода в круге — продолжается; в задании приглушается.</p>
                 </div>
                 <div className="flex justify-end gap-2">
                   <GhostBtn onClick={() => { stopOneShot(); setAnimDraft(null); }}>Отмена</GhostBtn>
@@ -940,7 +973,8 @@ export default function TokenEditor() {
                   );
                 })}
                 <div className="pt-1 border-t-2 border-edge space-y-1">
-                  <SoundPicker sounds={sounds} value={tokDraft.sndId ?? ''} onChange={(id) => setTokDraft((d) => (d ? { ...d, sndId: id || undefined } : d))} />
+                  <div className="tick-label">🔊 Звук хода — прикрепляется кликом по ЛЕВОЙ панели</div>
+                  <SoundAttach sounds={sounds} value={tokDraft.sndId} onDetach={() => setTokDraft((d) => (d ? { ...d, sndId: undefined } : d))} />
                   <p className="text-[10px] text-faint leading-tight">Звук хода фишки: играет, ПОКА фишка движется (вместо стандартных «щелчков» шагов). Короткие звуки будут повторяться, пока фишка идёт.</p>
                 </div>
                 <div className="flex justify-end gap-2">

@@ -4,7 +4,8 @@ import { EmuVolumeChip, Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
 import SegaBox, { type SegaApi } from '../SegaBox';
 import KeyBinder from '../KeyBinder';
 import { idbDel, idbPut, uid } from '../db';
-import type { RomDef, SaveDef } from '../types';
+import type { RomDef, SaveDef, SaveKind } from '../types';
+import { SAVE_KIND_CLS, SAVE_KIND_SHORT, saveKindOf, saveKindNum } from '../types';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import {
   keyLabel, loadEmuPrefs, PREFS_EVENT, listGamepads,
@@ -215,16 +216,46 @@ export default function EmulatorLauncher() {
     void launch();
   };
 
-  const createSave = async () => {
+  const createSave = async (kind: SaveKind) => {
     if (!rom) return;
     const st = (await ejsApiRef.current?.snapshot()) ?? null;
     if (!st) { toast('Эмулятор ещё не готов — дайте игре запуститься и попробуйте снова', 'err'); return; }
+    const nextNum = (k: SaveKind) => {
+      const nums = romSaves.filter((s) => saveKindOf(s) === k).map(saveKindNum);
+      return nums.length ? Math.max(...nums) + 1 : 1;
+    };
     const slot = romSaves.length ? Math.max(...romSaves.map((s) => s.slot)) + 1 : 1;
-    const sv: SaveDef = { id: uid('save'), romId: rom.id, slot, name: `Уровень ~${slot}`, state: st, createdAt: Date.now() };
+    /* «Моё задание» — единственное сохранение этого вида на ром: перезаписывается */
+    if (kind === 'mytask') {
+      const ex = romSaves.find((s) => saveKindOf(s) === 'mytask');
+      const sv: SaveDef = ex
+        ? { ...ex, state: st, createdAt: Date.now() }
+        : { id: uid('save'), romId: rom.id, slot, name: 'Моё задание', kind: 'mytask', state: st, createdAt: Date.now() };
+      await idbPut('saves', sv.id, sv);
+      await refresh();
+      sfx.success();
+      toast(ex ? '«Моё задание» перезаписано (оно одно на игру)' : '«Моё задание» записано (одно на игру — при повторе перезапишется)', 'ok');
+      return;
+    }
+    const name = kind === 'level' ? `Уровень ${nextNum('level')}` : kind === 'boss' ? `Босс ${nextNum('boss')}` : `Назови меня ${nextNum('private')}`;
+    const sv: SaveDef = { id: uid('save'), romId: rom.id, slot, name, kind, state: st, createdAt: Date.now() };
     await idbPut('saves', sv.id, sv);
     await refresh();
     sfx.success();
-    toast(`Сохранение (слот ${slot}) записано`, 'ok');
+    toast(`Сохранено: «${name}»${kind === 'private' ? ' — переименуйте его кнопкой ✏ в списке ниже' : ''}`, 'ok');
+  };
+
+  /* переименование ЧАСТНОГО сохранения («Назови меня N» → любое имя создателя) */
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameVal, setRenameVal] = useState('');
+  const doRename = async (s: SaveDef) => {
+    const name = renameVal.trim().slice(0, 40);
+    setRenamingId(null);
+    if (!name || name === s.name) return;
+    await idbPut('saves', s.id, { ...s, name });
+    await refresh();
+    sfx.coin();
+    toast(`Сохранение переименовано: «${name}»`, 'ok');
   };
 
   const delRom = async (r: RomDef) => {
@@ -342,9 +373,13 @@ export default function EmulatorLauncher() {
           <input ref={fileRef} type="file" accept=".nes,.md,.gen,.sms,.gg,.bin" multiple className="hidden" onChange={(e) => { void onUpload(e.target.files); e.target.value = ''; }} />
         </div>
         <p className="text-[13px] text-dim mb-6 max-w-3xl">
-          Тестовый стенд: гоняйте ромы (NES и SEGA), проходите до нужного места и жмите <span className="text-gold font-display uppercase">«Сохранить состояние»</span> —
-          слоты потом выбираются в редакторе заданий. Ромы раскладываются по папкам-спойлерам (как тайлы):
-          создайте папку кнопкой «+ Папка», выберите её в списке и загрузите сразу пачку файлов.
+          Тестовый стенд: гоняйте ромы (NES и SEGA), проходите до нужного места и записывайте состояние одной из ЧЕТЫРЁХ кнопок:
+          <span className="text-gold font-display uppercase"> «Сохранить уровень»</span> (Уровень 1, 2, …),
+          <span className="text-coral font-display uppercase"> «Сохранить босса»</span> (Босс 1, 2, …),
+          <span className="text-teal font-display uppercase"> «Сохранить моё задание»</span> (одно на игру, перезаписывается) и
+          <span className="text-sky font-display uppercase"> «Частное сохранение»</span> («Назови меня N» — переименовывается ✏).
+          В игре после захвата ячейки выбираются уровни/боссы/моё задание; частные — только в редакторе заданий.
+          Ромы раскладываются по папкам-спойлерам (как тайлы): создайте папку кнопкой «+ Папка», выберите её в списке и загрузите сразу пачку файлов.
           Удаление папок, ромов и сохранений подчиняется режиму из «Опций», а Ctrl+Z вернёт последнее удалённое.
         </p>
 
@@ -463,8 +498,13 @@ export default function EmulatorLauncher() {
                         <div className="absolute bottom-3 left-1/2 -translate-x-1/2 tick-label text-faint opacity-70 pointer-events-none">ESC — выход из полного экрана</div>
                       )}
                     </div>
-                    <div className="flex gap-2 mt-3 flex-wrap">
-                      <PxBtn color="gold" onClick={() => void createSave()}>{Ic.save(14)} Сохранить состояние</PxBtn>
+                    <div className="grid grid-cols-2 gap-2 mt-3">
+                      <PxBtn color="gold" onClick={() => void createSave('level')} title="Новое сохранение «Уровень N» — обычные точки заданий">{Ic.save(14)} Сохранить уровень</PxBtn>
+                      <PxBtn color="coral" onClick={() => void createSave('boss')} title="Новое сохранение «Босс N» — схватки с боссами">{Ic.skull(14)} Сохранить босса</PxBtn>
+                      <PxBtn color="teal" onClick={() => void createSave('mytask')} title="Одно сохранение «Моё задание» на игру — перезаписывается при повторном нажатии">{Ic.cart(14)} Сохранить моё задание</PxBtn>
+                      <PxBtn color="sky" onClick={() => void createSave('private')} title="Сохранение «Назови меня N» — переименуйте его кнопкой ✏ в списке ниже; в игре НЕ выбирается">{Ic.pen(14)} Частное сохранение</PxBtn>
+                    </div>
+                    <div className="flex gap-2 mt-2 flex-wrap">
                       <GhostBtn onClick={() => { setControlsOpen(true); sfx.click(); }}>{Ic.gear(13)} Управление</GhostBtn>
                       <GhostBtn onClick={toggleFs} title="Развернуть экран игры на весь монитор (выход — Esc)">{isFs ? Ic.cross(12) : Ic.map(12)} {isFs ? 'Свернуть' : 'Во весь экран'}</GhostBtn>
                       <GhostBtn onClick={() => resetEmu()}>{Ic.rotate(13)} Сброс (с начала)</GhostBtn>
@@ -475,8 +515,9 @@ export default function EmulatorLauncher() {
                       <EmuVolumeChip />
                     </div>
                     <p className="text-[11px] text-dim mt-2 leading-relaxed">
-                      Дойдите до нужного места и жмите «Сохранить состояние» — слот появится в списке ниже и будет доступен
-                      в редакторе заданий. Раскладка клавиш и геймпад — кнопка «Управление». Громкость — ползунок «Звук эмулятора» и общие опции.
+                      Дойдите до нужного места и запишите состояние: «Уровень N» и «Босс N» создаются по счёту, «Моё задание» одно на игру (перезаписывается),
+                      частное («Назови меня N») можно переименовать кнопкой ✏ прямо в списке. Сохранения доступны в редакторе заданий;
+                      уровни/боссы/моё задание выбираются и в игре — когда игрок захватывает ячейку и создаёт новое задание. Раскладка клавиш и геймпад — кнопка «Управление».
                     </p>
                   </div>
                 )}
@@ -509,23 +550,46 @@ export default function EmulatorLauncher() {
             {rom && (
               <Panel title={`Сохранения «${rom.name}» · ${romSaves.length}`} icon={Ic.save(16)}>
                 <div className="p-3 grid sm:grid-cols-2 gap-2">
-                  {romSaves.map((s) => (
-                    <div key={s.id} className="border-2 border-edge bg-panel px-3 py-2.5 flex items-center gap-3">
-                      <span className="font-pixel text-[9px] text-gold shrink-0">S{s.slot}</span>
-                      <div className="min-w-0 flex-1">
-                        <div className="font-display text-[11px] uppercase text-paper truncate">{s.name}</div>
-                        <div className="tick-label text-faint">{new Date(s.createdAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</div>
+                  {romSaves.map((s) => {
+                    const k = saveKindOf(s);
+                    return (
+                      <div key={s.id} className="border-2 border-edge bg-panel px-3 py-2.5 flex items-center gap-2">
+                        <span className={`font-pixel text-[7px] px-1 py-0.5 shrink-0 ${SAVE_KIND_CLS[k]}`}>{SAVE_KIND_SHORT[k]}</span>
+                        {renamingId === s.id ? (
+                          <div className="flex-1 min-w-0 flex items-center gap-1">
+                            <input
+                              autoFocus
+                              className="field-in w-full min-w-0 px-2 py-1 text-[12px]"
+                              value={renameVal}
+                              maxLength={40}
+                              placeholder="Название сохранения"
+                              onChange={(e) => setRenameVal(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === 'Enter') void doRename(s); if (e.key === 'Escape') setRenamingId(null); }}
+                            />
+                            <GhostBtn small onClick={() => void doRename(s)} title="Записать имя">{Ic.check(11)}</GhostBtn>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="min-w-0 flex-1">
+                              <div className="font-display text-[11px] uppercase text-paper truncate">{s.name}</div>
+                              <div className="tick-label text-faint">S{s.slot} · {new Date(s.createdAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</div>
+                            </div>
+                            <GhostBtn small onClick={() => loadSave(s)}>{Ic.play(11)}</GhostBtn>
+                            {k === 'private' && (
+                              <GhostBtn small onClick={() => { setRenamingId(s.id); setRenameVal(s.name); }} title="Переименовать частное сохранение">{Ic.pen(11)}</GhostBtn>
+                            )}
+                            <HoldDeleteButton
+                              onFire={() => void delSave(s)}
+                              label={`сохранение «${s.name}» (слот ${s.slot})`}
+                              ariaLabel="Удалить сохранение"
+                              title="Удалить сохранение"
+                              className="text-faint hover:text-coral cursor-pointer"
+                            >{Ic.trash(14)}</HoldDeleteButton>
+                          </>
+                        )}
                       </div>
-                      <GhostBtn small onClick={() => loadSave(s)}>{Ic.play(11)}</GhostBtn>
-                      <HoldDeleteButton
-                        onFire={() => void delSave(s)}
-                        label={`сохранение «${s.name}» (слот ${s.slot})`}
-                        ariaLabel="Удалить сохранение"
-                        title="Удалить сохранение"
-                        className="text-faint hover:text-coral cursor-pointer"
-                      >{Ic.trash(14)}</HoldDeleteButton>
-                    </div>
-                  ))}
+                    );
+                  })}
                   {romSaves.length === 0 && <div className="text-[12px] text-dim sm:col-span-2 py-3 text-center">Сохранений нет — запустите ром и запишите первое состояние</div>}
                 </div>
               </Panel>

@@ -4,8 +4,8 @@ import { Field, GhostBtn, Ic, Panel, PxBtn, Stepper } from '../ui';
 import { cellAtPoint, drawBoard, fitView } from '../render';
 import { idbGet, idbPut, uid } from '../db';
 import { cartridgeArt, cardArt, fileToDataUrl } from '../assets';
-import type { CardDef, CardEffect, CellType, ChaosKind, EffectType, GameMap, TaskDef } from '../types';
-import { CHAOS_LIST, chaosLabel, mkChaosCard, JOY_LIST } from '../types';
+import type { CardDef, CardEffect, CellType, ChaosKind, EffectType, GameMap, SaveKind, TaskDef } from '../types';
+import { CHAOS_LIST, chaosLabel, mkChaosCard, JOY_LIST, SAVE_KIND_LABEL, saveKindOf } from '../types';
 import { renumberByPath, fixLinksAfterDelete } from '../render';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import { sfx } from '../sound';
@@ -181,6 +181,37 @@ export default function TaskEditor() {
   const romSaves = saves.filter((s) => s.romId === fRom);
   const cell = map && selCell !== null ? map.cells[selCell] : null;
   const romName = (id: string) => roms.find((r) => r.id === id)?.name ?? '—';
+
+  /* ---------- ЛЕВАЯ ПАНЕЛЬ РОМОВ (как в «Запуске эмулятора») ----------
+   Показывается, когда редактируется ячейка-задание: папки-спойлеры,
+   клик по рому выбирает его для задания. Никаких списков на сотни строк. */
+  const [romFoldersOpen, setRomFoldersOpen] = useState<Record<string, boolean>>({});
+  const romFolders = useMemo(() => [...new Set(roms.map((r) => r.folder ?? '').filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru')), [roms]);
+  const looseRoms = useMemo(() => roms.filter((r) => !r.folder), [roms]);
+  const romsIn = (folder: string) => roms.filter((r) => r.folder === folder);
+  const pickRom = (r: { id: string }) => {
+    setFRom(r.id);
+    setFSave('');
+    sfx.hover();
+  };
+  const romPanelRow = (r: { id: string; name: string; ext: string; fileName: string }) => {
+    const sel = fRom === r.id;
+    const svCount = saves.filter((s) => s.romId === r.id).length;
+    return (
+      <button
+        key={r.id}
+        onClick={() => pickRom(r)}
+        title={`${r.name} — клик: выбрать ром для задания`}
+        className={`w-full text-left border-2 px-2.5 py-2 cursor-pointer transition-colors ${sel ? 'border-gold bg-gold/10' : 'border-edge bg-panel hover:border-edge2'}`}
+      >
+        <div className="flex items-center gap-2">
+          <span className={`font-pixel text-[7px] px-1 py-0.5 shrink-0 ${r.ext === 'nes' ? 'bg-sky text-abyss' : 'bg-magma text-abyss'}`}>{r.ext.toUpperCase()}</span>
+          <span className={`font-display text-[11px] uppercase truncate ${sel ? 'text-gold' : 'text-paper'}`}>{sel ? '✓ ' : ''}{r.name}</span>
+        </div>
+        <div className="tick-label text-faint mt-1">сохранений: {svCount}</div>
+      </button>
+    );
+  };
 
   const saveTask = async () => {
     if (!map || selCell === null) return;
@@ -413,6 +444,46 @@ export default function TaskEditor() {
       </div>
 
       <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
+        {/* левая панель ромов — только когда редактируется ячейка-задание */}
+        {cell?.type === 'task' && (
+          <div className="w-full lg:w-[264px] shrink-0 border-t-[3px] lg:border-t-0 lg:border-r-[3px] border-edge bg-[rgba(11,14,28,0.85)] overflow-y-auto p-3 max-h-[38vh] lg:max-h-none">
+            <div className="flex items-center justify-between mb-2">
+              <div className="tick-label">📼 Ромы · {roms.length}</div>
+              <span className="tick-label text-faint">клик — выбрать</span>
+            </div>
+            {romFolders.map((f) => {
+              const inF = romsIn(f);
+              const open = romFoldersOpen[f] ?? false;
+              return (
+                <div key={`rf-${f}`} className="mb-2">
+                  <button
+                    onClick={() => setRomFoldersOpen((s) => ({ ...s, [f]: !open }))}
+                    className="w-full flex items-center gap-1 text-left cursor-pointer hover:bg-[rgba(255,93,115,0.08)] px-1 py-0.5"
+                    title={open ? 'Свернуть' : 'Развернуть'}
+                  >
+                    <span className={`text-[10px] shrink-0 ${open ? 'text-gold' : 'text-faint'}`}>{open ? '▾' : '▸'}</span>
+                    <span className="text-[10px] text-faint shrink-0">📁</span>
+                    <span className="font-display text-[10px] uppercase text-dim truncate">{f}</span>
+                    <span className="tick-label text-faint shrink-0">· {inF.length}</span>
+                  </button>
+                  {open && <div className="space-y-1.5 mt-1">{inF.map((r) => romPanelRow(r))}</div>}
+                </div>
+              );
+            })}
+            {looseRoms.length > 0 && (
+              <div className="mb-2">
+                <div className={`tick-label mb-1 px-1 ${romFolders.length ? 'text-faint' : 'text-dim'}`}>Без папки · {looseRoms.length}</div>
+                <div className="space-y-1.5">{looseRoms.map((r) => romPanelRow(r))}</div>
+              </div>
+            )}
+            {roms.length === 0 && (
+              <p className="text-[11px] text-magma leading-tight">Ромов нет — загрузите их в «Запуске эмулятора» (там же они раскладываются по папкам).</p>
+            )}
+            {roms.length > 0 && romFolders.length > 0 && (
+              <p className="text-[10px] text-gold leading-tight mt-1">Папки раскрываются кликом — внутри ромы; клик по рому выбирает его для этого задания.</p>
+            )}
+          </div>
+        )}
         <div className="flex-1 min-w-0 relative">
           <canvas
             ref={canvasRef}
@@ -543,11 +614,17 @@ export default function TaskEditor() {
               ) : cell.type === 'task' ? (
                 <Panel title="Задание ячейки" icon={Ic.cart(16)}>
                   <div className="p-3 space-y-3">
-                    <Field label={`Ром · в библиотеке ${roms.length}`}>
-                      <select className="field-in w-full px-2 py-2 text-sm" value={fRom} onChange={(e) => { setFRom(e.target.value); setFSave(''); }}>
-                        <option value="">— выберите ром —</option>
-                        {roms.map((r) => <option key={r.id} value={r.id}>{r.name}{r.ext !== 'nes' ? ' (SEGA)' : ''}</option>)}
-                      </select>
+                    <Field label="Ром (выбирается в ЛЕВОЙ панели «Ромы»)">
+                      {fRom ? (
+                        <div className="flex items-center gap-2 border-2 border-gold/60 bg-gold/5 px-2.5 py-2">
+                          <span className={`font-pixel text-[7px] px-1 py-0.5 shrink-0 ${roms.find((r) => r.id === fRom)?.ext === 'nes' ? 'bg-sky text-abyss' : 'bg-magma text-abyss'}`}>{(roms.find((r) => r.id === fRom)?.ext ?? '?').toUpperCase()}</span>
+                          <span className="font-display text-[11px] uppercase text-gold truncate">✓ {romName(fRom)}</span>
+                        </div>
+                      ) : (
+                        <div className="border-2 border-dashed border-edge px-3 py-2.5 text-[11px] text-dim leading-tight">
+                          Ром не выбран — откройте слева панель «📼 Ромы», раскройте папку и кликните по рому.
+                        </div>
+                      )}
                     </Field>
                     {roms.length === 0 && (
                       <p className="text-[11px] text-magma">Ромов пока нет — загрузите их в «Запуске эмулятора».</p>
@@ -555,9 +632,20 @@ export default function TaskEditor() {
                     <Field label={`Сохранение · ${romSaves.length}`}>
                       <select className="field-in w-full px-2 py-2 text-sm" value={fSave} onChange={(e) => setFSave(e.target.value)}>
                         <option value="">— без сохранения (старт с начала) —</option>
-                        {romSaves.map((s) => <option key={s.id} value={s.id}>Слот {s.slot} · {s.name}</option>)}
+                        {(['level', 'boss', 'mytask', 'private'] as SaveKind[]).map((k) => {
+                          const list = romSaves.filter((s) => saveKindOf(s) === k);
+                          if (!list.length) return null;
+                          return (
+                            <optgroup key={k} label={SAVE_KIND_LABEL[k]}>
+                              {list.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                            </optgroup>
+                          );
+                        })}
                       </select>
                     </Field>
+                    {fRom && romSaves.some((s) => saveKindOf(s) === 'private') && (
+                      <p className="text-[10.5px] text-sky leading-tight">Частные сохранения выбираются ТОЛЬКО здесь — в игре они не предлагаются.</p>
+                    )}
                     {fRom && romSaves.length === 0 && (
                       <p className="text-[11px] text-gold">
                         У этого рома нет сохранений — запустите его в эмуляторе и запишите состояния (и для NES, и для SEGA).

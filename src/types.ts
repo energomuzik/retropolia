@@ -1,5 +1,36 @@
 export type CellType = 'start' | 'task' | 'rest' | 'bonus' | 'trap' | 'quiz'; // rest — пустая клетка-передышка: ничего не происходит, ром не нужен
 
+/* ---------- Типы сохранений (кнопки в «Запуске эмулятора») ----------
+   level — «Уровень N» (обычные точки заданий), boss — «Босс N»,
+   mytask — единственное на ром «Моё задание» (перезаписывается),
+   private — «Назови меня N» (создатель переименовывает; в игре НЕ выбирается,
+   доступно только в редакторе заданий). Старые сохранения без kind = level. */
+export type SaveKind = 'level' | 'boss' | 'mytask' | 'private';
+export const SAVE_KIND_LABEL: Record<SaveKind, string> = {
+  level: 'Уровни',
+  boss: 'Боссы',
+  mytask: 'Моё задание',
+  private: 'Частные (только в редакторе заданий)',
+};
+export const SAVE_KIND_SHORT: Record<SaveKind, string> = {
+  level: 'УРОВЕНЬ',
+  boss: 'БОСС',
+  mytask: 'МОЁ ЗАДАНИЕ',
+  private: 'ЧАСТНОЕ',
+};
+export const SAVE_KIND_CLS: Record<SaveKind, string> = {
+  level: 'bg-gold/15 text-gold',
+  boss: 'bg-coral/15 text-coral',
+  mytask: 'bg-teal/15 text-teal',
+  private: 'bg-sky/15 text-sky',
+};
+export const saveKindOf = (s: { kind?: SaveKind }): SaveKind => s.kind ?? 'level';
+/** Номер из подписи сохранения («Уровень 3» → 3, «Уровень ~7» → 7, «Моё задание» → 0). */
+export const saveKindNum = (s: { name: string }): number => {
+  const m = s.name.match(/(\d+)\s*$/);
+  return m ? parseInt(m[1], 10) : 0;
+};
+
 export interface PlacedTile {
   x: number;
   y: number;
@@ -335,6 +366,7 @@ export interface SaveDef {
   name: string;
   state: unknown; // JSON снапшот jsnes
   createdAt: number;
+  kind?: SaveKind; // уровень / босс / моё задание / частное; нет = старое сохранение = уровень
 }
 
 export interface SessionSnapshot {
