@@ -10,7 +10,7 @@ import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimDef, BossAnimDef, CellDef, CellType, GameMap, PlacedAnim, PlacedBoss, Stamp, TokenDef, TileGroup, TileImg } from '../types';
 import { MAP_MODES } from '../types';
-import { HoldDeleteButton, rememberDeleted, useKeyDelete } from '../delGuard';
+import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
 
 /* ---------- импорт картинок: сжимаем до разумного размера, чтобы карта не весила десятки МБ ---------- */
@@ -502,8 +502,9 @@ export default function MapEditor() {
     sfx.fail();
   };
 
-  /* МГНОВЕННОЕ изменение размера тайла палитры (+/− под тайлом): 1 px по большей
-     стороне, без диалогов. Вырезатель иногда завышает размер — правится на месте.
+  /* ИЗМЕНЕНИЕ РАЗМЕРА тайла палитры (+/− под тайлом): 1 px по большей стороне,
+     с теми же правилами, что у крестика удаления (режим из Опций). Вырезатель
+     иногда завышает размер — правится на месте.
      Уже поставленные штампы не двигаются (у них свой размер), новые ставятся по новому. */
   const resizePalTile = async (t: TileImg, dir: 1 | -1) => {
     const nd = await scaleTileImg(t.dataUrl, dir);
@@ -1614,14 +1615,8 @@ export default function MapEditor() {
                                 title="Удалить тайл"
                                 className={`absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center cursor-pointer ${tileId === t.id ? 'opacity-90' : 'opacity-0 hover:opacity-100'}`}
                               >×</HoldDeleteButton>
-                              <span className="absolute bottom-0 left-0 right-0 flex" onClick={(e) => e.stopPropagation()}>
-                                <span role="button" aria-label="Уменьшить тайл" title="Уменьшить тайл на 1 px (мгновенно)"
-                                  className="flex-1 h-3.5 bg-[rgba(6,8,18,0.82)] font-pixel text-[9px] leading-none text-dim hover:text-gold cursor-pointer select-none flex items-center justify-center"
-                                  onClick={(e) => { e.stopPropagation(); void resizePalTile(t, -1); }}>−</span>
-                                <span role="button" aria-label="Увеличить тайл" title="Увеличить тайл на 1 px (мгновенно)"
-                                  className="flex-1 h-3.5 bg-[rgba(6,8,18,0.82)] font-pixel text-[9px] leading-none text-dim hover:text-gold cursor-pointer select-none flex items-center justify-center border-l border-[rgba(90,169,255,0.25)]"
-                                  onClick={(e) => { e.stopPropagation(); void resizePalTile(t, 1); }}>+</span>
-                              </span>
+                              {/* +/− размера — ОДНИ правила с крестиком удаления (delGuard) */}
+                              <TileSizeBtns name={t.name} onSize={(dir) => void resizePalTile(t, dir)} />
                             </button>
                           ))}
                         </div>

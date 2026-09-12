@@ -81,6 +81,7 @@ export const useApp = create<AppState>()((set, get) => ({
     relayHub: '',
     turn: '',
     delMode: 'confirm', // защита от случайного удаления: с окошком по умолчанию
+    hideRoomCode: false, // код комнаты виден (переключается глазиком в лобби/игре, выбор запоминается)
   },
   setOptions: (p) => {
     const options = { ...get().options, ...p };

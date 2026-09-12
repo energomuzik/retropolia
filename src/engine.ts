@@ -34,7 +34,7 @@ export type Action =
   | { t: 'quizTimeout' }
   | { t: 'quizDone'; id: string }
   | { t: 'cardAck'; id: string }
-  | { t: 'journeyMove'; id: string; x: number; y: number; dir?: TokenDir } // JOURNEY: позиция фишки активного игрока (авторитет — хост)
+  | { t: 'journeyMove'; id: string; x: number; y: number; dir?: TokenDir; mv?: boolean } // JOURNEY: позиция фишки активного игрока (авторитет — хост); mv=false — фишка встала
   | { t: 'journeyEnd'; id: string } // JOURNEY: ход уходит дальше (кнопка убрана — шлёт авто-передача после 30 с без движения)
   | { t: 'fxDone'; id: string } // анимация fx (победа/поражение) у игрока закончилась — можно продолжать ход
   | { t: 'fxBreak'; id: string } // спектакль победы дошёл до разбития ячейки (пауза 1 с прошла — анимации начались)
@@ -927,10 +927,13 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const x = Math.max(0, Math.min(mszW, Number(a.x) || 0));
       const y = Math.max(0, Math.min(mszH, Number(a.y) || 0));
       const prev = s.journeyPos?.[p.id] ?? null;
-      // защита от телепортаций: одно обновление не дальше 2.5 клеток от прошлой позиции
-      if (prev && Math.hypot(x - prev.x, y - prev.y) > CELL_PX * 2.5) break;
+      /* защита от телепортаций: одно обновление не дальше 2.5 клеток от прошлой позиции.
+         СТОП-обновление (mv=false) принимаем всегда — игрок реально стоит в этой точке,
+         иначе при сетевом заторе цепочка отклонённых апдейтов «застревала» надолго. */
+      const stopped = a.mv === false;
+      if (prev && !stopped && Math.hypot(x - prev.x, y - prev.y) > CELL_PX * 2.5) break;
       s.journeyPos = s.journeyPos ?? {};
-      s.journeyPos[p.id] = { x, y, dir: a.dir, ts: Date.now() };
+      s.journeyPos[p.id] = { x, y, dir: a.dir, ts: Date.now(), mv: a.mv !== false };
       /* пересёк ячейку? вход = прошлый центр был ВНЕ прямоугольника, новый — ВНУТРИ.
         Задание открывается сразу — «всё как раньше», выбор попытки/времени */
       if (!s.challenge) {

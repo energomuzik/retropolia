@@ -6,7 +6,7 @@ import { extractTilesFromImage, scaleTileImg, shiftTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbAll, idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimClip, AnimDef, BossAnimDef, GameMap, SoundDef, TokenAnim, TokenDef, TileGroup, TileImg } from '../types';
-import { HoldDeleteButton, rememberDeleted } from '../delGuard';
+import { HoldDeleteButton, rememberDeleted, TileSizeBtns } from '../delGuard';
 import { sfx } from '../sound';
 import { playOneShot, stopOneShot } from '../loopsnd';
 
@@ -97,19 +97,8 @@ const DEF_TOKEN_SIZE = 64; // размер фишки на карте по ум�
 
 const checker = { background: 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 10px 10px' } as React.CSSProperties;
 
-/* +/− ВНИЗУ ТАЙЛА: мгновенно меняют размер картинки тайла на 1 px по большей стороне
-   (без спроса) — вырезатель иногда даёт позе не тот размер, и она не совпадает с другими */
-function TileSizeBtns({ onSize }: { onSize: (dir: 1 | -1) => void }) {
-  const b = 'flex-1 h-3.5 bg-[rgba(6,8,18,0.82)] font-pixel text-[9px] leading-none text-dim hover:text-gold cursor-pointer select-none flex items-center justify-center';
-  return (
-    <span className="absolute bottom-0 left-0 right-0 flex" onClick={(e) => e.stopPropagation()}>
-      <span role="button" aria-label="Уменьшить тайл" title="Уменьшить тайл на 1 px (мгновенно)" className={b}
-        onClick={(e) => { e.stopPropagation(); onSize(-1); }}>−</span>
-      <span role="button" aria-label="Увеличить тайл" title="Увеличить тайл на 1 px (мгновенно)" className={`${b} border-l border-[rgba(90,169,255,0.25)]`}
-        onClick={(e) => { e.stopPropagation(); onSize(1); }}>+</span>
-    </span>
-  );
-}
+/* +/− ВНИЗУ ТАЙЛА теперь ОБЩИЙ компонент из delGuard.tsx — ОДНИ правила с крестиком
+   удаления (режим из Опций: сразу / с окошком / удержанием). */
 
 /* Лента кадров: перестановка стрелками, удаление; СДВИГ ПОЛОЖЕНИЯ — крохотные
    стрелки ВОКРУГ тайла (спрайт может падать/переезжать, не меняясь сам);
@@ -386,8 +375,9 @@ export default function TokenEditor() {
     sfx.fail();
   };
 
-  /* МГНОВЕННОЕ изменение размера тайла библиотеки (+/− под тайлом): на 1 px по большей
-     стороне, без диалогов. Уже добавленные кадры не трогает (они — копии), новые клики
+  /* ИЗМЕНЕНИЕ РАЗМЕРА тайла библиотеки (+/− под тайлом): на 1 px по большей
+     стороне, с теми же правилами, что у крестика удаления (режим из Опций).
+     Уже добавленные кадры не трогает (они — копии), новые клики
      берут уже новый размер. Вырезатель иногда завышает размер позы — здесь правится. */
   const resizeLibTile = async (t: TileImg, dir: 1 | -1) => {
     const nd = await scaleTileImg(t.dataUrl, dir);
@@ -682,6 +672,23 @@ export default function TokenEditor() {
     toast(`Анимация «${a.name}» сохранена${a.snd ? ' со звуком' : ''} — вшивайте её в карты в редакторе карт`, 'ok');
   };
 
+  /* ОБНОВЛЁННАЯ фишка обязана обновиться и ВНУТРИ карт: при вшивании в карту фишка
+     копируется СНИМКОМ, и редактирование фишки (например, добавление 5-й/6-й анимаций
+   победы/поражения) не доходило до карт — спектакль не находил клип и фишка продолжала
+     играть idle. Теперь сохранение подтягивает свежую версию во все карты, где фишка вшита. */
+  const syncTokToMaps = async (t: TokenDef): Promise<Array<{ key: string; mapTokens: TokenDef[] }>> => {
+    const all = await idbAll<GameMap>('maps');
+    const snapshots: Array<{ key: string; mapTokens: TokenDef[] }> = [];
+    for (const { key, value: mp } of all) {
+      const cur = mp.mapTokens ?? [];
+      if (!cur.some((x) => x.id === t.id)) continue;
+      const next = cur.map((x) => (x.id === t.id ? JSON.parse(JSON.stringify(t)) : x));
+      snapshots.push({ key, mapTokens: cur.map((x) => ({ ...x })) });
+      await idbPut('maps', key, { ...mp, mapTokens: next, updatedAt: Date.now() });
+    }
+    return snapshots;
+  };
+
   /* УДАЛЁННАЯ фишка не должна оставаться вшитой в карты: чистим mapTokens всех карт,
      иначе при запуске карты удалённую фишку всё ещё можно выбрать.
      Возвращает снимки прежних списков — для отмены через Ctrl+Z */
@@ -762,10 +769,11 @@ export default function TokenEditor() {
       size: Math.max(16, Math.min(320, tokDraft.size)),
     };
     await idbPut('tokens', t.id, t);
+    const touchedMaps = (await syncTokToMaps(t)).length; // свежая версия фишки — сразу во все карты, где она вшита
     await refresh();
     setTokDraft(null);
     sfx.success();
-    toast(`Анимированная фишка «${t.name}» готова${anim.win ? ' · с анимацией ПОБЕДЫ' : ''}${anim.lose ? ' · с анимацией ПОРАЖЕНИЯ' : ''} — отмечайте её в картах`, 'ok');
+    toast(`Анимированная фишка «${t.name}» готова${anim.win ? ' · с анимацией ПОБЕДЫ' : ''}${anim.lose ? ' · с анимацией ПОРАЖЕНИЯ' : ''}${touchedMaps ? ` · обновлена в ${touchedMaps} ${touchedMaps === 1 ? 'карте' : 'картах'}` : ''}${touchedMaps ? '' : ' — отмечайте её в картах'}`, 'ok');
   };
 
   /* УДАЛЁННЫЙ босс не должен оставаться вшитым в карты: чистим bossLib + экземпляры.
@@ -948,7 +956,7 @@ export default function TokenEditor() {
                       >
                         <img src={t.dataUrl} alt={t.name} className="w-full h-full object-cover" style={{ imageRendering: 'pixelated' }} />
                         <HoldDeleteButton as="span" onFire={() => void delTile(t.id)} label={t.name} ariaLabel="удалить тайл" title="Удалить тайл" className="absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center opacity-0 hover:opacity-100 cursor-pointer">×</HoldDeleteButton>
-                        <TileSizeBtns onSize={(dir) => void resizeLibTile(t, dir)} />
+                        <TileSizeBtns name={t.name} onSize={(dir) => void resizeLibTile(t, dir)} />
                       </button>
                     ))}
                   </div>
@@ -987,7 +995,7 @@ export default function TokenEditor() {
                         >
                           <img src={t.dataUrl} alt={t.name} className="w-full h-full object-cover" style={{ imageRendering: 'pixelated' }} />
                           <HoldDeleteButton as="span" onFire={() => void delTile(t.id)} label={t.name} ariaLabel="удалить тайл" title="Удалить тайл" className="absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center opacity-0 hover:opacity-100 cursor-pointer">×</HoldDeleteButton>
-                          <TileSizeBtns onSize={(dir) => void resizeLibTile(t, dir)} />
+                          <TileSizeBtns name={t.name} onSize={(dir) => void resizeLibTile(t, dir)} />
                         </button>
                       ))}
                     </div>

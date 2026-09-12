@@ -5,10 +5,11 @@ import { GhostBtn, Ic, Modal, PxBtn } from './ui';
 import { sfx } from './sound';
 
 /* ---------- ЗАЩИТА ОТ СЛУЧАЙНОГО УДАЛЕНИЯ + ОТМЕНА (Ctrl+Z) ----------
-   Режим удаления задаётся в Опциях (options.delMode):
-   • instant — клик удаляет сразу (как раньше)
+   Режим действия задаётся в Опциях (options.delMode) и действует на ВСЕ
+   «опасные» кнопки — и на крестики удаления, и на +/− размера тайла:
+   • instant — клик действует сразу (как раньше)
    • confirm — клик открывает окошко с предупреждением (по умолчанию)
-   • hold    — удалить можно, только удерживая крестик ~0.8 с
+   • hold    — действие только при удержании кнопки ~0.8 с
    Каждое удаление через rememberDeleted() запоминается — Ctrl+Z возвращает
    ПОСЛЕДНЮЮ удалённую вещь (один шаг, глубже не храним).
    ВАЖНО: если в className передан absolute — НЕ добавляем свой relative,
@@ -38,7 +39,8 @@ export const undoLastDelete = async (): Promise<DeletedEntry | null> => {
   return e;
 };
 
-/* ---------- кнопка-крестик/урна, подчиняющаяся режиму из опций ---------- */
+/* ---------- кнопка-крестик/урна (и ЛЮБОЕ другое действие «с правилами»),
+   подчиняющаяся режиму из опций ---------- */
 export function HoldDeleteButton({
   onFire,
   label,
@@ -47,14 +49,24 @@ export function HoldDeleteButton({
   className = 'text-faint hover:text-coral cursor-pointer transition-colors',
   children,
   as = 'button', // span — когда крестик лежит ВНУТРИ другой кнопки (например, на превью тайла)
+  verb = 'Удалить', // глагол для окошка подтверждения: «Удалить X?» / «Уменьшить X?»
+  confirmTitle = 'Подтвердите удаление',
+  accent = 'coral', // цвет акцентов: coral — удаление, gold — изменение размера
+  icon, // иконка в окошке подтверждения (по умолчанию — урна)
+  hintWord, // слово для подсказки в режиме hold: «…тогда удалю» / «…тогда изменю размер»
 }: {
-  onFire: () => void; // само удаление (внутри: rememberDeleted + удаление)
-  label: string; // что удаляем — для окошка и подсказок
+  onFire: () => void; // само действие (для удаления — внутри: rememberDeleted + удаление)
+  label: string; // что делаем — для окошка и подсказок
   title?: string;
   ariaLabel?: string;
   className?: string;
   children: ReactNode;
   as?: 'button' | 'span';
+  verb?: string;
+  confirmTitle?: string;
+  accent?: 'coral' | 'gold';
+  icon?: ReactNode;
+  hintWord?: string;
 }) {
   const delMode = useApp((s) => s.options.delMode);
   const toast = useApp((s) => s.toast);
@@ -66,7 +78,7 @@ export function HoldDeleteButton({
     if (timerRef.current) { window.clearTimeout(timerRef.current); timerRef.current = null; }
     setHolding(false);
     setConfirming(false);
-    sfx.fail();
+    if (accent === 'gold') sfx.hover(); else sfx.fail();
     onFire();
   };
 
@@ -79,28 +91,30 @@ export function HoldDeleteButton({
     const pending = timerRef.current !== null;
     if (timerRef.current) { window.clearTimeout(timerRef.current); timerRef.current = null; }
     setHolding(false);
-    if (hint && pending) holdHint(toast);
+    if (hint && pending) holdHint(toast, hintWord ?? 'удалю');
   };
   const cancelHold = () => endHold(false);
 
   const modeTitle =
-    delMode === 'hold' ? 'Удерживайте, чтобы удалить' :
+    delMode === 'hold' ? `Удерживайте, чтобы ${verb.toLowerCase()}` :
     delMode === 'confirm' ? `${title} (с подтверждением)` : title;
 
   /* если вызывающий сам задаёт позиционирование (absolute) — не мешаем ему:
      свой relative добавляем только когда его нет, иначе Tailwind сломает позиционирование */
   const isAbsolute = /(?:^|\s)absolute(?:\s|$)/.test(className);
   const posCls = isAbsolute ? '' : 'relative ';
-  const fillCls = 'absolute left-0 top-0 h-full'; // полоска заполнения при удержании
+  const fillCls = 'absolute left-0 top-0 h-full pointer-events-none'; // полоска заполнения при удержании
+  const fillCol = accent === 'gold' ? 'rgba(255,207,63,0.30)' : 'rgba(255,93,115,0.35)';
+  const hotCls = accent === 'gold' ? 'text-gold' : 'text-coral';
 
   const inner = (
     <>
-      <span className={`relative z-10 inline-flex ${holding ? 'text-coral' : ''}`}>{children}</span>
+      <span className={`relative z-10 inline-flex ${holding ? hotCls : ''}`}>{children}</span>
       {delMode === 'hold' && (
         <span
           aria-hidden
-          className={`bg-[rgba(255,93,115,0.35)] pointer-events-none ${fillCls}`}
-          style={{ width: holding ? '100%' : '0%', transition: `width ${HOLD_MS}ms linear` }}
+          className={`pointer-events-none ${fillCls}`}
+          style={{ background: fillCol, width: holding ? '100%' : '0%', transition: `width ${HOLD_MS}ms linear` }}
         />
       )}
     </>
@@ -154,17 +168,19 @@ export function HoldDeleteButton({
 
       {confirming && delMode !== 'instant' && createPortal(
         <div onClick={(e) => e.stopPropagation()}>
-          <Modal title="Подтвердите удаление" icon={<span className="text-coral">{Ic.trash(18)}</span>} onClose={() => setConfirming(false)} w="max-w-md">
+          <Modal title={confirmTitle} icon={icon ?? <span className={accent === 'gold' ? 'text-gold' : 'text-coral'}>{Ic.trash(18)}</span>} onClose={() => setConfirming(false)} w="max-w-md">
             <div className="p-5 space-y-4">
               <p className="text-[13px] text-paper leading-relaxed">
-                Удалить <span className="text-coral font-display uppercase">{label}</span>?
+                {verb} <span className={`${accent === 'gold' ? 'text-gold' : 'text-coral'} font-display uppercase`}>{label}</span>?
               </p>
-              <p className="text-[11px] text-dim leading-relaxed">
-                Случайно удалили? Ctrl+Z вернёт последнюю удалённую вещь (на один шаг назад).
-              </p>
+              {accent === 'coral' && (
+                <p className="text-[11px] text-dim leading-relaxed">
+                  Случайно удалили? Ctrl+Z вернёт последнюю удалённую вещь (на один шаг назад).
+                </p>
+              )}
               <div className="flex justify-end gap-2">
                 <GhostBtn onClick={() => { sfx.hover(); setConfirming(false); }}>Отмена</GhostBtn>
-                <PxBtn color="coral" onClick={fire}>{Ic.trash(14)} Удалить</PxBtn>
+                <PxBtn color={accent} onClick={fire}>{verb}</PxBtn>
               </div>
             </div>
           </Modal>
@@ -265,7 +281,45 @@ export function useKeyDelete() {
 }
 
 /* подсказка при неудавшемся коротком нажатии в режиме «долгое нажатие» */
-export const holdHint = (toast: (m: string, k?: 'ok' | 'err' | 'info') => void) =>
-  toast('Держите кнопку нажатой, пока полоска не заполнится — тогда удалю', 'info');
+export const holdHint = (toast: (m: string, k?: 'ok' | 'err' | 'info') => void, word = 'удалю') =>
+  toast(`Держите кнопку нажатой, пока полоска не заполнится — тогда ${word}`, 'info');
 
 export { HOLD_MS };
+
+/* ---------- +/− РАЗМЕРА ТАЙЛА: ОДНИ правила с крестиком удаления ----------
+   Те же три режима из Опций (instant / confirm / hold): мгновенный клик,
+   окошко подтверждения или удержание с полоской. Меняют размер картинки
+   тайла на 1 px по большей стороне. Используются в палитрах ОБОИХ редакторов
+   (карт и анимаций) — поведение и внешний вид везде одинаковые. */
+export function TileSizeBtns({ name, onSize }: { name: string; onSize: (dir: 1 | -1) => void }) {
+  const b = 'flex-1 h-3.5 bg-[rgba(6,8,18,0.82)] font-pixel text-[9px] leading-none text-dim hover:text-gold cursor-pointer select-none flex items-center justify-center';
+  const lbl = `тайл «${name}» на 1 px`;
+  return (
+    <span className="absolute bottom-0 left-0 right-0 flex z-10" onClick={(e) => e.stopPropagation()}>
+      <HoldDeleteButton
+        as="span"
+        verb="Уменьшить"
+        confirmTitle="Подтвердите уменьшение"
+        accent="gold"
+        hintWord="изменю размер"
+        onFire={() => onSize(-1)}
+        label={lbl}
+        ariaLabel="Уменьшить тайл"
+        title="Уменьшить тайл на 1 px"
+        className={b}
+      >−</HoldDeleteButton>
+      <HoldDeleteButton
+        as="span"
+        verb="Увеличить"
+        confirmTitle="Подтвердите увеличение"
+        accent="gold"
+        hintWord="изменю размер"
+        onFire={() => onSize(1)}
+        label={lbl}
+        ariaLabel="Увеличить тайл"
+        title="Увеличить тайл на 1 px"
+        className={`${b} border-l border-[rgba(90,169,255,0.25)]`}
+      >+</HoldDeleteButton>
+    </span>
+  );
+}

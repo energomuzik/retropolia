@@ -605,7 +605,7 @@ export interface GameSession {
   sessionTasks: Record<number, TaskDef>;
   trades: TradeOffer[]; // предложения обмена карточками (активные и последние закрытые)
   revealed: number[]; // индексы ячеек, на которые хоть раз ступали (для режима «скрытые ячейки»)
-  journeyPos?: Record<string, { x: number; y: number; dir?: 'up' | 'down' | 'left' | 'right'; ts?: number }>; // JOURNEY: авторитетные позиции фишек в px поля (пишет хост)
+  journeyPos?: Record<string, { x: number; y: number; dir?: 'up' | 'down' | 'left' | 'right'; ts?: number; mv?: boolean }>; // JOURNEY: авторитетные позиции фишек в px поля (пишет хост); mv — «идёт сейчас» (false = стоит)
   fxs?: GameFx[]; // разовые анимации-спектакль (последние несколько)
   /* Разбитые ячейки: победитель разбил ячейку победой над заданием. Пока ячейка
      разбита — она считается ПУСТОЙ (передышка), хозяин — победитель. Без нового
@@ -634,6 +634,7 @@ export interface GameOptions {
   relayHub: string; // игровой хаб (WebSocket): весь трафик через сервер; приоритетнее PeerJS
   turn: string; // TURN для жёсткого NAT: «user:pass@host:port», несколько — через запятую (пусто = только STUN)
   delMode: 'instant' | 'confirm' | 'hold'; // защита от случайного удаления в редакторах: сразу / с окошком / долгим нажатием
+  hideRoomCode: boolean; // скрывать код комнаты: большой код в лобби и код в шапке во время игры показываются как «••••»
 }
 
 export interface NetMsg {

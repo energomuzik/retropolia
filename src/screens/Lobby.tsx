@@ -4,14 +4,32 @@ import { Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
 import { openRoom, dispatch } from '../useGame';
 import { genRoomCode } from '../net';
 import { newSession, fmtClock } from '../engine';
-import { idbDel, idbGet, idbPut, uid } from '../db';
+import { idbAll, idbDel, idbGet, idbPut, uid } from '../db';
 import { downloadHostBat } from '../host/hostPackage';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
-import type { GameMap, MapMode, SessionSnapshot } from '../types';
+import type { GameMap, MapMode, SessionSnapshot, TokenDef } from '../types';
 import { PLAYER_COLORS, PLAYER_NAMES } from '../types';
 import { sfx } from '../sound';
 
 /* ---------- создание игры ---------- */
+
+/* КАРТА ПЕРЕД ПАРТИЕЙ: перечитываем её из базы и подтягиваем СВЕЖИЕ снимки фишек
+   из библиотеки. Фишка при вшивании в карту копируется СНИМКОМ — если фишку потом
+   редактировали (например, добавили 5-ю/6-ю анимации победы/поражения), партия жила
+   со старым снимком, и спектакль не находил клип фишки. Теперь при создании/восстановлении
+   комнаты версия из библиотеки подставляется автоматически; фишек, которых в библиотеке
+   уже нет, не трогаем (играет то, что вшито в карту). */
+const freshMapWithTokens = async (mapId: string): Promise<GameMap | null> => {
+  try {
+    const fresh = await idbGet<GameMap>('maps', mapId);
+    if (!fresh) return null;
+    const lib = (await idbAll<TokenDef>('tokens')).map((e) => e.value);
+    const libById = new Map(lib.map((t) => [t.id, t]));
+    const toks = fresh.mapTokens ?? [];
+    if (!toks.some((t) => libById.has(t.id))) return fresh;
+    return { ...fresh, mapTokens: toks.map((t) => (libById.has(t.id) ? (JSON.parse(JSON.stringify(libById.get(t.id))) as TokenDef) : t)) };
+  } catch { return null; }
+};
 
 export function CreateScreen() {
   const { maps, roms, setScreen, toast } = useApp();
@@ -83,13 +101,16 @@ export function CreateScreen() {
 
   const create = () => {
     const st = useApp.getState();
-    const map = ready.find((m) => m.id === sel);
-    if (!map) return;
-    const code = genRoomCode();
-    const session = newSession(code, map.id, st.selfId, st.options.name);
-    openRoom(code, true, { session, map });
-    sfx.start();
-    toast(`Комната ${code} открыта`, 'ok');
+    const selMap = ready.find((m) => m.id === sel);
+    if (!selMap) return;
+    void (async () => {
+      const map = (await freshMapWithTokens(selMap.id)) ?? selMap; // карта + свежие снимки фишек
+      const code = genRoomCode();
+      const session = newSession(code, map.id, st.selfId, st.options.name);
+      openRoom(code, true, { session, map });
+      sfx.start();
+      toast(st.options.hideRoomCode ? 'Комната открыта — код скрыт (глазик рядом с КОМНАТОЙ его покажет)' : `Комната ${code} открыта`, 'ok');
+    })();
   };
 
   return (
@@ -266,25 +287,28 @@ export function LoadScreen() {
   }, []);
 
   const resume = (s: SessionSnapshot) => {
-    const map = maps.find((m) => m.id === s.state.mapId);
-    if (!map) { toast('Карта этой партии не найдена в библиотеке', 'err'); return; }
     const st = useApp.getState();
     /* Сначала собираем команду: открываем новую комнату-лобби, игроки подключаются
        по коду и заявляют, кем они играли. Только потом хост восстанавливает партию. */
     const savedHost = s.state.players.find((p) => p.isHost) ?? s.state.players[0];
-    const code = genRoomCode();
-    const session = newSession(code, map.id, st.selfId, st.options.name);
-    /* ВАЖНО: openRoom внутри вызывает leaveRoom(), который очищает resumeSnap и
-       resumeClaims. Поэтому устанавливаем их ПОСЛЕ открытия комнаты, иначе снапшот
-       сотрётся и партия запустится заново. */
-    openRoom(code, true, { session, map });
-    const st2 = useApp.getState();
-    st2.setResumeSnap(s);
-    /* автоматически призываем хоста к его сохранённой роли, чтобы кнопка
-       «Восстановить партию» была активна сразу и партия не запустилась заново */
-    if (savedHost) st2.setResumeClaim(st2.selfId, savedHost.id);
-    sfx.start();
-    toast(`Комната ${code} открыта — передайте код команде, затем восстановите партию`, 'ok');
+    void (async () => {
+      const selMap = maps.find((m) => m.id === s.state.mapId);
+      if (!selMap) { toast('Карта этой партии не найдена в библиотеке', 'err'); return; }
+      const map = (await freshMapWithTokens(selMap.id)) ?? selMap; // карта + свежие снимки фишек
+      const code = genRoomCode();
+      const session = newSession(code, map.id, st.selfId, st.options.name);
+      /* ВАЖНО: openRoom внутри вызывает leaveRoom(), который очищает resumeSnap и
+         resumeClaims. Поэтому устанавливаем их ПОСЛЕ открытия комнаты, иначе снапшот
+         сотрётся и партия запустится заново. */
+      openRoom(code, true, { session, map });
+      const st2 = useApp.getState();
+      st2.setResumeSnap(s);
+      /* автоматически призываем хоста к его сохранённой роли, чтобы кнопка
+         «Восстановить партию» была активна сразу и партия не запустилась заново */
+      if (savedHost) st2.setResumeClaim(st2.selfId, savedHost.id);
+      sfx.start();
+      toast(st2.options.hideRoomCode ? 'Комната открыта, код скрыт — передайте его команде, затем восстановите партию' : `Комната ${code} открыта — передайте код команде, затем восстановите партию`, 'ok');
+    })();
   };
 
   const del = async (id: string) => {
@@ -500,7 +524,7 @@ function HostFallbackPanel({ onRestart }: { onRestart: (url: string) => void }) 
 /* ---------- лобби комнаты ---------- */
 
 export function LobbyScreen() {
-  const { session, sessionMap, roms, room, netInfo, setScreen, leaveRoom, selfId, options, tokens, sync, resumeSnap, resumeClaims, setResumeClaim } = useApp();
+  const { session, sessionMap, roms, room, netInfo, setScreen, leaveRoom, selfId, options, setOptions, tokens, sync, resumeSnap, resumeClaims, setResumeClaim } = useApp();
   const [waited, setWaited] = useState(0);
   const [lobbySeconds, setLobbySeconds] = useState(0);
   const [hubPanelOpen, setHubPanelOpen] = useState(false);
@@ -674,11 +698,23 @@ export function LobbyScreen() {
           )}
           {showFallback && <HostFallbackPanel onRestart={restartViaHub} />}
           <div className="font-pixel text-gold title-glow text-lg">КОМНАТА</div>
-          <button onClick={copyCode} className="mt-3 inline-flex items-center gap-4 hud-chip pixel-corners px-8 py-4 cursor-pointer hover:border-gold transition-colors group">
-            <span className="font-pixel text-4xl tracking-[0.3em] text-paper group-hover:text-gold transition-colors">{session.code}</span>
-            <span className="tick-label text-faint group-hover:text-gold">копировать</span>
-          </button>
-          <p className="text-[12px] text-dim mt-3">Передайте код соперникам — раздел «Подключиться». Ресурсы у всех: 60 минут + 60 попыток.</p>
+          {/* код комнаты: с включённым «скрывать код» — точки; глазик показывает/прячет,
+              выбор запоминается между сессиями (общая опция с шапкой во время игры) */}
+          <div className="mt-3 inline-flex items-center gap-2">
+            <button onClick={copyCode} title="Скопировать код" className="inline-flex items-center gap-4 hud-chip pixel-corners px-8 py-4 cursor-pointer hover:border-gold transition-colors group">
+              <span className="font-pixel text-4xl tracking-[0.3em] text-paper group-hover:text-gold transition-colors">{options.hideRoomCode ? '••••' : session.code}</span>
+              <span className="tick-label text-faint group-hover:text-gold">копировать</span>
+            </button>
+            <button
+              onClick={() => { setOptions({ hideRoomCode: !options.hideRoomCode }); sfx.hover(); }}
+              title={options.hideRoomCode ? 'Показать код комнаты' : 'Скрыть код комнаты (выбор запомнится)'}
+              aria-label={options.hideRoomCode ? 'Показать код комнаты' : 'Скрыть код комнаты'}
+              className="text-faint hover:text-gold cursor-pointer transition-colors"
+            >
+              {options.hideRoomCode ? Ic.eye(16) : Ic.eyeOff(16)}
+            </button>
+          </div>
+          <p className="text-[12px] text-dim mt-3">{options.hideRoomCode ? 'Код скрыт — когда понадобится передать его соперникам, нажмите глазик рядом.' : 'Передайте код соперникам — раздел «Подключиться». Ресурсы у всех: 60 минут + 60 попыток.'}</p>
         </div>
 
         {/* карта партии: данные видят все игроки и подтверждают, нажав «Готов» */}

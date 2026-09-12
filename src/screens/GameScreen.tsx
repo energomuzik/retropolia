@@ -21,6 +21,9 @@ import { idbGet } from '../db';
 import { sfx } from '../sound';
 import { startLoop, stopLoop, syncLoops, stopGroup, killGroup, stopOneShot, playOneShot } from '../loopsnd';
 
+/* единичные векторы направлений фишки — для расчёта хода чужой фишки со СКОРОСТЬЮ КАРТЫ */
+const DIRV: Record<TokenDir, [number, number]> = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+
 export default function GameScreen() {
   const st = useApp();
   const { session: s, sessionMap: map, selfId: me, options, room } = st;
@@ -138,9 +141,9 @@ export default function GameScreen() {
   /* ---------- JOURNEY: стрелки ДЖОЙСТИКА (геймпад) + авто-передача хода ---------- */
   const journeyPadRef = useRef<Set<TokenDir>>(new Set());
   const journeyLastMoveRef = useRef(Date.now());
-  /* чужие фишки JOURNEY (трансляция): состояние dead reckoning — последние две
-     авторитетные точки и расчётная скорость между апдейтами (~6/с) */
-  const journeyRemote = useRef<Record<string, { x: number; y: number; vx: number; vy: number; t: number }>>({});
+  /* чужие фишки JOURNEY (трансляция): якорь (последняя авторитетная точка), направление,
+     флаг «идёт» и точная скорость карты (px/с). Апдейты (~6/с) лишь ПОДТВЕРЖДАЮТ движение */
+  const journeyRemote = useRef<Record<string, { ax: number; ay: number; vx: number; vy: number; t: number; dir?: TokenDir; mv: boolean }>>({});
   const [autoPassLeft, setAutoPassLeft] = useState(JOURNEY_AUTO_PASS);
 
   const mePlayer = s?.players.find((p) => p.id === me);
@@ -558,37 +561,36 @@ export default function GameScreen() {
               if (self.dirty && ((self.moving && nowMs - self.lastSent > 160) || !self.moving)) {
                 self.dirty = false;
                 self.lastSent = nowMs;
-                dispatch({ t: 'journeyMove', id: me, x: Math.round(self.x), y: Math.round(self.y), dir: self.dir });
+                dispatch({ t: 'journeyMove', id: me, x: Math.round(self.x), y: Math.round(self.y), dir: self.dir, mv: self.moving });
               }
             } else {
-              // ЧУЖАЯ ФИШКА (трансляция): DEAD RECKONING — экстраполяция по двум последним
-              // авторитетным точкам. Апдейты приходят ~6 раз/с, и прежняя «догонялка»
-              // (лизр к свежей точке) двигала фишку стоп-старт — в трансляции ход выглядел
-              // рывками, хотя игрок шёл плавно. Теперь между апдейтами фишка движется
-              // с расчётной скоростью (кап — 1.6× скорости карты), лизр глушит лишь остаточную погрешность.
+              // ЧУЖАЯ ФИШКА (трансляция): ходит СО СКОРОСТЬЮ КАРТЫ — той же, с какой ходит
+              // сам игрок. Апдейты (~6/с) лишь ПОДТВЕРЖДАЮТ движение: якорь + направление +
+              // флаг «идёт/стоит» (mv). Между апдейтами фишка идёт от якоря по направлению
+              // ровно со скоростью карты — БЕЗ оценки скорости по дельтам (округление до
+              // целого пикселя + джиттер телефона делали её «плавающей» — отсюда
+              // подтормаживание у зрителей) и БЕЗ «тающего» окна экстраполяции (пауза в
+              // апдейтах тормозила фишку). Лизр глушит остаточную погрешность округления.
               const nowMs = Date.now();
               let rj = journeyRemote.current[p.id];
               const tgt0 = jp ?? center;
-              if (!rj) rj = journeyRemote.current[p.id] = { x: tgt0.x, y: tgt0.y, vx: 0, vy: 0, t: nowMs };
-              if (jp && (jp.x !== rj.x || jp.y !== rj.y)) {
-                const dtU = Math.max(0.016, Math.min(0.4, (nowMs - rj.t) / 1000));
-                let nvx = (jp.x - rj.x) / dtU, nvy = (jp.y - rj.y) / dtU;
-                const sp = Math.hypot(nvx, nvy);
-                const maxSp = Math.max(40, cps * CELL * 1.6); // чуть выше скорости карты — догнать при лаге
-                if (sp > maxSp) { nvx = (nvx / sp) * maxSp; nvy = (nvy / sp) * maxSp; }
-                rj.vx = nvx; rj.vy = nvy; rj.x = jp.x; rj.y = jp.y; rj.t = nowMs;
+              if (!rj) rj = journeyRemote.current[p.id] = { ax: tgt0.x, ay: tgt0.y, vx: 0, vy: 0, t: nowMs, dir: jp?.dir, mv: !!jp?.mv };
+              if (jp && (jp.x !== rj.ax || jp.y !== rj.ay || jp.dir !== rj.dir || !!jp.mv !== rj.mv)) {
+                rj.ax = jp.x; rj.ay = jp.y; rj.dir = jp.dir; rj.mv = !!jp.mv; rj.t = nowMs;
+                const spd = cps * CELL; // px/с — РОВНО скорость карты, как у самого игрока
+                const dv = rj.dir ? DIRV[rj.dir] : null;
+                rj.vx = rj.mv && dv ? dv[0] * spd : 0;
+                rj.vy = rj.mv && dv ? dv[1] * spd : 0;
               }
-              const fresh = !!jp && nowMs - (jp.ts ?? 0) < 450;
+              // апдейтов нет ~полсекунды (стоп-обновление потерялось) — гасим скорость
+              const fresh = nowMs - rj.t < 500;
+              if (!fresh) { rj.vx = 0; rj.vy = 0; }
               const age = Math.max(0, (nowMs - rj.t) / 1000);
-              // окно экстраполяции ≤ один интервал апдейта; если апдейты встали — плавно «тает», чтобы не убежать вперёд
-              const melt = age > 0.18 ? Math.max(0, 1 - (age - 0.18) / 0.25) : 1;
-              const ahead = Math.min(age, 0.18) * melt;
-              if (!fresh) { rj.vx = 0; rj.vy = 0; } // фишка встала — гасим расчётную скорость
-              const exX = rj.x + rj.vx * ahead, exY = rj.y + rj.vy * ahead;
+              const exX = rj.ax + rj.vx * age, exY = rj.ay + rj.vy * age;
               d.x += (exX - d.x) * Math.min(1, 0.16 * dt);
               d.y += (exY - d.y) * Math.min(1, 0.16 * dt);
-              jdir = fresh ? jp!.dir : undefined; // идёт — походка по направлению; стоял — idle
-              if (p.id === act?.id && fresh) anyoneMoving = true;
+              jdir = fresh && rj.mv ? rj.dir : undefined; // идёт — походка по направлению; стоит — idle
+              if (p.id === act?.id && fresh && rj.mv) anyoneMoving = true;
             }
             const tokDefJ = p.tokenKey ? mapToks.find((x) => x.id === p.tokenKey) : null;
             const tokSizeJ = tokDefJ ? (tokDefJ.size ?? (tokDefJ.anim ? 64 : 34)) : (p.tokenSize ?? 34);
@@ -1062,7 +1064,17 @@ export default function GameScreen() {
       {/* ---------- HUD ---------- */}
       <div className="shrink-0 border-b-[3px] border-edge bg-[rgba(7,9,18,0.82)] px-3 py-2 flex items-center gap-2 flex-wrap z-20">
         <span className="font-pixel text-[9px] text-gold hidden sm:block">RETROPOLIA</span>
-        <span className="hud-chip pixel-corners px-2.5 py-1 font-pixel text-[9px] text-sky">{s.code}</span>
+        {/* код комнаты: с включённым «скрывать код» — точки вместо кода; глазик рядом
+            показывает/прячет код, выбор запоминается (общая опция с экраном лобби) */}
+        <span className="hud-chip pixel-corners px-2.5 py-1 font-pixel text-[9px] text-sky" title={options.hideRoomCode ? 'Код скрыт' : 'Код комнаты'}>{options.hideRoomCode ? '••••' : s.code}</span>
+        <button
+          onClick={() => { st.setOptions({ hideRoomCode: !options.hideRoomCode }); sfx.hover(); }}
+          title={options.hideRoomCode ? 'Показать код комнаты' : 'Скрыть код комнаты'}
+          aria-label={options.hideRoomCode ? 'Показать код комнаты' : 'Скрыть код комнаты'}
+          className="text-faint hover:text-gold cursor-pointer transition-colors"
+        >
+          {options.hideRoomCode ? Ic.eye(12) : Ic.eyeOff(12)}
+        </button>
         {isSkill && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-magma">SKILL CHALLENGE</span>}
         {isJourney && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal">JOURNEY</span>}
         {isSkill && s.phase === 'playing' && (
