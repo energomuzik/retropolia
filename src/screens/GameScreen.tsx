@@ -125,10 +125,16 @@ export default function GameScreen() {
   const journeySelf = useRef<{ x: number; y: number; dir?: TokenDir; moving: boolean; dirty: boolean; lastSent: number } | null>(null);
   const journeyPress = (d: TokenDir, on: boolean) => { if (on) journeyKeys.current.add(d); else journeyKeys.current.delete(d); };
   /* ---------- FX: разовые анимации-спектакль (5-я/6-я фишки, реакции боссов) ----------
-     fxStart — локальный старт клипа (rAF-мс) по id fx; звук и fxDone — по ОДНОМУ разу */
+     fxStart — локальный старт клипа (rAF-мс) по id fx С УЧЁТОМ паузы delay;
+     звук и fxDone — по ОДНОМУ разу; fxBreak — разбитие ячейки в момент старта клипов */
   const fxStartRef = useRef<Map<string, number>>(new Map());
   const fxDoneSentRef = useRef<Set<string>>(new Set());
+  const fxBreakSentRef = useRef<Set<string>>(new Set());
   const fxSndRef = useRef<Set<string>>(new Set());
+  const fxSndTimersRef = useRef<number[]>([]); // отложенные звуки fx (старт после паузы)
+  /* ЛОКАЛЬНЫЙ момент появления разбитых ячеек — для короткой анимации осколков
+     (считаем от своего clock: рассинхрон часов хоста не ломает анимацию) */
+  const brokenAtRef = useRef<Record<number, number>>({});
   /* ---------- JOURNEY: стрелки ДЖОЙСТИКА (геймпад) + авто-передача хода ---------- */
   const journeyPadRef = useRef<Set<TokenDir>>(new Set());
   const journeyLastMoveRef = useRef(Date.now());
@@ -365,7 +371,8 @@ export default function GameScreen() {
 
   /* ---------- FX: разовые ЗВУКИ победы/поражения ----------
      5-я/6-я анимации фишки — её winSnd/loseSnd; реакции боссов — winSnd/loseSnd босса.
-     Каждый fx озвучивается ОДИН раз по факту появления в сессии. */
+     Каждый fx озвучивается ОДИН раз по факту появления в сессии, но С УЧЁТОМ паузы
+     delay: сначала секунда тишины после задания, звук — в момент старта клипов. */
   useEffect(() => {
     const fxList = s?.fxs ?? [];
     if (!fxList.length) return;
@@ -384,13 +391,27 @@ export default function GameScreen() {
         const def = b ? (m.bossLib ?? []).find((x) => x.id === b.bid) : null;
         snd = fx.kind === 'bossWin' ? def?.winSnd : def?.loseSnd;
       }
-      if (snd) playOneShot(snd);
+      if (snd) {
+        const delay = Math.max(0, fx.delay ?? 0);
+        if (delay > 0) {
+          const to = window.setTimeout(() => playOneShot(snd!), delay);
+          fxSndTimersRef.current.push(to);
+        } else {
+          playOneShot(snd);
+        }
+      }
     }
     if (fxSndRef.current.size > fxList.length) {
       const ids = new Set(fxList.map((f) => f.id));
       for (const k of [...fxSndRef.current]) if (!ids.has(k)) fxSndRef.current.delete(k);
     }
   }, [s?.fxs]);
+
+  /* отложенные звуки fx: гасим при размонтировании, чтобы не «догоняли» после выхода */
+  useEffect(() => () => {
+    for (const to of fxSndTimersRef.current) clearTimeout(to);
+    fxSndTimersRef.current = [];
+  }, []);
 
   /* ---------- осмотр карты своим ходом сбрасывается при броске/челлендже ---------- */
   useEffect(() => {
@@ -403,15 +424,29 @@ export default function GameScreen() {
   /* ---------- авто-доезд (страховка хоста) ----------
      Бюджет движения зависит от длины пути и скорости карты: на медленных скоростях
      (например 0.5 кл/с) путь идёт дольше фиксированных 8 секунд — раньше страховка
-     обрывала ход на полпути, камера прыгала на следующего игрока, а фишка телепортировалась. */
+     обрывала ход на полпути, камера прыгала на следующего игрока, а фишка телепортировалась.
+     Запас щедрый (полтора времени пути + 10 с): подлагивания/просадки FPS не должны
+     приводить к «ход обрывается — фишка мгновенно встаёт на нужную ячейку».
+     Там же страховка спектакля fx: если у виновника зависло/потерялось — хост доводит сам. */
   useEffect(() => {
     if (!room?.isHost) return;
     const t = setInterval(() => {
       const cur = useApp.getState();
-      const mv = cur.session?.moving;
+      const sess = cur.session;
+      if (!sess) return;
+      /* зависший fx-спектакль: пауза+клипы+запас — и хост сам разбивает/завершает */
+      const gfx = (sess.fxs ?? []).find((f) => f.gate);
+      if (gfx) {
+        if (Date.now() - gfx.ts > (gfx.delay ?? 0) + gfx.ms + 4000) {
+          if (gfx.after === 'post' && !sess.broken?.[gfx.cellIdx]) dispatch({ t: 'fxBreak', id: gfx.player });
+          dispatch({ t: 'fxDone', id: gfx.player });
+        }
+        return;
+      }
+      const mv = sess.moving;
       if (!mv) return;
       const cps = clampMoveSpeed(cur.sessionMap?.moveSpeed ?? DEF_MOVE_SPEED); // кл/с из карты
-      const budget = Math.max(8000, (mv.path.length / cps) * 1000 + 6000); // время пути + запас 6 с
+      const budget = Math.max(8000, (mv.path.length / cps) * 1500 + 10000); // время пути ×1.5 + запас 10 с
       if (Date.now() - mv.ts > budget) {
         dispatch({ t: 'arrived', id: mv.player });
       }
@@ -424,8 +459,10 @@ export default function GameScreen() {
     let raf = 0;
     let lastT = 0;
     const loop = (t: number) => {
-      // dt в «кадрах по 60fps» — анимация не зависит от производительности ПК
-      const dt = lastT ? Math.min(3, (t - lastT) / 16.7) : 1;
+      // dt в «кадрах по 60fps» — анимация не зависит от производительности ПК.
+      // Кап 6 кадров (~100 мс): даже при просадке до 10 FPS скорость фишки по таймеру
+      // остаётся верной — раньше кап 3 «тормозил» ход и страховка хоста обрывала его.
+      const dt = lastT ? Math.min(6, (t - lastT) / 16.7) : 1;
       lastT = t;
       const cv = canvasRef.current;
       const cur = useApp.getState();
@@ -443,16 +480,19 @@ export default function GameScreen() {
         // токены — медленное, «рукотворное» перемещение по ячейкам
         const act = sess.players[sess.turn % sess.players.length];
         const smooth = !!m.smoothMove; // плавный ход (без прыжков) задан картой
-        const cps = clampMoveSpeed(m.moveSpeed ?? DEF_MOVE_SPEED); // клеток в секунду — подобрал автор карты
+        // скорость фишек: живая (хост меняет прямо в партии — JOURNEY) или из карты
+        const cps = clampMoveSpeed(sess.moveSpeed ?? m.moveSpeed ?? DEF_MOVE_SPEED);
         const journeyMode = m.mode === 'journey';
         const mszJ = journeyMode ? mapSize(m) : null;
         let anyoneMoving = false;
         const mapToks = m.mapTokens ?? [];
         /* ---------- FX: локальный старт разовых анимаций (по id) ----------
-           Клипы играются от ЛОКАЛЬНОГО кадра появления fx; протухшие id чистим.
-           Блокирующая (gate) анимация у ИГРОКА-виновника доиграла — шлём fxDone. */
+           Клипы играются от ЛОКАЛЬНОГО кадра появления fx + пауза delay (секунда
+           тишины после задания); протухшие id чистим.
+           В МОМЕНТ старта клипов у ИГРОКА-виновника шлётся fxBreak (ячейка разлетается
+           осколками); когда клип доиграл (с учётом «послевкусия») — шлём fxDone. */
         const fxList = sess.fxs ?? [];
-        for (const fx of fxList) if (!fxStartRef.current.has(fx.id)) fxStartRef.current.set(fx.id, t);
+        for (const fx of fxList) if (!fxStartRef.current.has(fx.id)) fxStartRef.current.set(fx.id, t + (fx.delay ?? 0));
         if (fxStartRef.current.size > fxList.length) {
           const ids = new Set(fxList.map((f) => f.id));
           for (const k of [...fxStartRef.current.keys()]) if (!ids.has(k)) fxStartRef.current.delete(k);
@@ -460,6 +500,11 @@ export default function GameScreen() {
         for (const fx of fxList) {
           if (!fx.gate || fx.player !== me || fxDoneSentRef.current.has(fx.id)) continue;
           const st0 = fxStartRef.current.get(fx.id) ?? t;
+          if (fx.after === 'post' && !fxBreakSentRef.current.has(fx.id) && t >= st0) {
+            // пауза прошла — клипы начались: разбиваем ячейку (осколки) синхронно с анимацией
+            fxBreakSentRef.current.add(fx.id);
+            dispatch({ t: 'fxBreak', id: me });
+          }
           if (t - st0 >= fx.ms) {
             fxDoneSentRef.current.add(fx.id);
             dispatch({ t: 'fxDone', id: me });
@@ -512,19 +557,24 @@ export default function GameScreen() {
                 dispatch({ t: 'journeyMove', id: me, x: Math.round(self.x), y: Math.round(self.y), dir: self.dir });
               }
             } else {
+              // чужая фишка плавно догоняет авторитетную позицию; коэффициент мягче —
+              // без «рывками»: апдейты идут 6 раз/с, и при агрессивной догонялке фишка
+              // двигалась стоп-старт (разная скорость периодически)
               const tgt = jp ?? center;
-              d.x += (tgt.x - d.x) * Math.min(1, 0.22 * dt);
-              d.y += (tgt.y - d.y) * Math.min(1, 0.22 * dt);
+              d.x += (tgt.x - d.x) * Math.min(1, 0.14 * dt);
+              d.y += (tgt.y - d.y) * Math.min(1, 0.14 * dt);
               const fresh = !!jp && Date.now() - (jp.ts ?? 0) < 450;
               jdir = fresh ? jp!.dir : undefined; // идёт — походка по направлению; стоял — idle
               if (p.id === act?.id && fresh) anyoneMoving = true;
             }
             const tokDefJ = p.tokenKey ? mapToks.find((x) => x.id === p.tokenKey) : null;
             const tokSizeJ = tokDefJ ? (tokDefJ.size ?? (tokDefJ.anim ? 64 : 34)) : (p.tokenSize ?? 34);
-            // FX: пока играет 5-я/6-я анимация этого игрока — клип идёт ОДИН раз вместо обычной анимации
+            // FX: пока играет 5-я/6-я анимация этого игрока — клип идёт ОДИН раз вместо обычной анимации.
+            // Пока длится пауза delay (секунда тишины) — фишка живёт обычной анимацией, клип ещё НЕ начался.
             const fxA = fxList.find((f) => f.player === p.id && (f.kind === 'tokenWin' || f.kind === 'tokenLose'));
             const fxASt = fxA ? fxStartRef.current.get(fxA.id) : undefined;
-            const fxAClip: AnimClip | undefined = fxA && fxASt !== undefined
+            const fxAOn = !!fxA && fxASt !== undefined && t >= fxASt; // пауза прошла?
+            const fxAClip: AnimClip | undefined = fxA && fxAOn
               ? (fxA.kind === 'tokenWin' ? tokDefJ?.anim?.win : tokDefJ?.anim?.lose)
               : undefined;
             return {
@@ -632,10 +682,12 @@ export default function GameScreen() {
           prevDispRef.current[p.id] = { x: d.x, y: d.y };
           const tokDef = p.tokenKey ? mapToks.find((x) => x.id === p.tokenKey) : null;
           const tokSize = tokDef ? (tokDef.size ?? (tokDef.anim ? 64 : 34)) : (p.tokenSize ?? 34);
-          // FX: 5-я/6-я анимация этого игрока — разовый клип вместо обычной анимации
+          // FX: 5-я/6-я анимация этого игрока — разовый клип вместо обычной анимации.
+          // Пока длится пауза delay (секунда тишины) — фишка живёт обычной анимацией.
           const fxB = fxList.find((f) => f.player === p.id && (f.kind === 'tokenWin' || f.kind === 'tokenLose'));
           const fxBSt = fxB ? fxStartRef.current.get(fxB.id) : undefined;
-          const fxBClip: AnimClip | undefined = fxB && fxBSt !== undefined
+          const fxBOn = !!fxB && fxBSt !== undefined && t >= fxBSt; // пауза прошла?
+          const fxBClip: AnimClip | undefined = fxB && fxBOn
             ? (fxB.kind === 'tokenWin' ? tokDef?.anim?.win : tokDef?.anim?.lose)
             : undefined;
           return {
@@ -679,7 +731,9 @@ export default function GameScreen() {
         const colorById: Record<string, string> = {};
         sess.players.forEach((p) => { colorById[p.id] = PLAYER_COLORS[p.color]; });
 
-        // FX: разовые реакции боссов — клип играется ОДИН раз от локального старта
+        // FX: разовые реакции боссов — клип играется ОДИН раз от локального старта.
+        // Пока длится пауза delay — босс продолжает IDLE (клип ещё не начался);
+        // клип доиграл — босс ВОЗВРАЩАЕТСЯ к idle (замирает навсегда только побеждённый).
         const bossFx: Record<string, { frames: string[]; fps: number; start: number }> = {};
         for (const fx of fxList) {
           if (fx.kind !== 'bossWin' && fx.kind !== 'bossLose') continue;
@@ -690,7 +744,21 @@ export default function GameScreen() {
           const clip = fx.kind === 'bossWin' ? def.win : def.lose;
           const st = fxStartRef.current.get(fx.id);
           if (!clip.frames.length || st === undefined) continue;
+          if (t < st) continue; // пауза не прошла — босс ещё играет idle
+          const durMs = (clip.frames.length / Math.max(1, Math.min(24, clip.fps || 6))) * 1000;
+          if (t - st >= durMs) continue; // реакция доиграла — обратно к idle
           bossFx[b.id] = { frames: clip.frames, fps: clip.fps, start: st };
+        }
+
+        // ЛОКАЛЬНЫЕ моменты разбития ячеек — для короткой анимации осколков.
+        // Запоминаем первый кадр, когда ячейка увидена разбитой; убрали — чистим.
+        const brkNow = sess.broken ?? {};
+        for (const k of Object.keys(brkNow)) {
+          const idx = Number(k);
+          if (!brokenAtRef.current[idx]) brokenAtRef.current[idx] = Date.now();
+        }
+        for (const k of Object.keys(brokenAtRef.current)) {
+          if (!brkNow[Number(k)]) delete brokenAtRef.current[Number(k)];
         }
 
         drawBoard(ctx, m, {
@@ -702,6 +770,7 @@ export default function GameScreen() {
           tokens, time: t, hoverCell: null,
           mystery: mysteryRef.current,
           broken: sess.broken,
+          brokenAt: brokenAtRef.current,
           bossDown: sess.bossDown,
           bossFx,
         });
@@ -1246,6 +1315,21 @@ export default function GameScreen() {
         {/* ---------- JOURNEY: прямое управление фишкой ---------- */}
         {s.phase === 'playing' && isJourney && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 z-10">
+            {/* СКОРОСТЬ ФИШЕК (хост): живая настройка прямо во время партии —
+               действует на всех сразу, без перезапуска и правки карты */}
+            {room?.isHost && (
+              <div className="hud-chip pixel-corners px-3 py-1.5 flex items-center gap-2">
+                <span className="font-pixel text-[8px] text-dim uppercase">Скорость фишек</span>
+                <Stepper
+                  value={Number((s.moveSpeed ?? map.moveSpeed ?? DEF_MOVE_SPEED).toFixed(1))}
+                  onChange={(v) => dispatch({ t: 'setSpeed', id: me, v: Math.round(v * 10) / 10 })}
+                  min={0.5}
+                  max={6}
+                  step={0.1}
+                  suffix=" кл/с"
+                />
+              </div>
+            )}
             {myTurn ? (
               <div className="flex items-center gap-4">
                 <div className="grid grid-cols-3 gap-1 select-none touch-none">

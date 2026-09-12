@@ -286,6 +286,7 @@ export interface BoardDrawOpts {
   mystery?: Set<number>; // ячейки, которые ещё не «открыты» — рисуем как «?»
   sndRadii?: boolean; // пунктирные круги радиуса звука у анимаций со звуком (только редактор карт; в игре не рисуем)
   broken?: Record<number, { left: number }>; // разбитые ячейки: трещины + счётчик ходов до восстановления
+  brokenAt?: Record<number, number>; // ЛОКАЛЬНЫЙ момент появления разбития (Date.now() клиента) — короткая анимация разлёта осколков после разбития
   bossDown?: Record<string, boolean>; // повержённые боссы: статичный кадр побеждённого
   /* разовые реакции боссов (fx): клип играется ОДИН раз от start (rAF-мс), дойдя до последнего кадра — замирает */
   bossFx?: Record<string, { frames: string[]; fps: number; start: number }>;
@@ -736,14 +737,24 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.lineWidth = 3;
       ctx.strokeRect(-W / 2 - 3, -H / 2 - 3, W + 6, H + 6);
     }
-    /* РАЗБИТАЯ ЯЧЕЙКА: трещины, затемнение и счётчик ходов до восстановления */
+    /* РАЗБИТАЯ ЯЧЕЙКА: трещины, затемнение и счётчик ходов до восстановления.
+       Только что разбитая (brokenAt < 700 мс назад) — короткий спектакль: вспышка,
+       разлёт осколков и проявляющиеся трещины. */
     const brk = o.broken?.[i];
     if (brk) {
+      const bAt = o.brokenAt?.[i];
+      const shatterP = bAt ? Math.min(1, (Date.now() - bAt) / 700) : 1; // 0 — только разбили, 1 — спектакль закончен
       ctx.save();
-      ctx.globalAlpha = 0.55;
+      ctx.globalAlpha = 0.55 * shatterP;
       ctx.fillStyle = '#070912';
       ctx.fillRect(-W / 2, -H / 2, W, H);
-      ctx.globalAlpha = 1;
+      if (shatterP < 1) {
+        // вспышка в момент разбития
+        ctx.globalAlpha = 0.5 * (1 - shatterP);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(-W / 2, -H / 2, W, H);
+      }
+      ctx.globalAlpha = Math.max(0.15, shatterP);
       ctx.strokeStyle = 'rgba(214,222,255,0.75)';
       ctx.lineWidth = 2;
       ctx.lineJoin = 'round';
@@ -758,14 +769,31 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       crack(-W / 2 + W * 0.2, -H / 2, W * 0.05, H / 2, -1); // поперечная
       crack(W * 0.15, -H / 2, W / 2 - 2, H / 3, 0.6);
       crack(-W * 0.3, H / 2, -W / 2 + 2, 0, -0.6);
+      if (shatterP < 1) {
+        // осколки: 8 квадратиков разлетаются от центра с лёгкой дугой и гаснут
+        const e = 1 - Math.pow(1 - shatterP, 3); // easeOutCubic
+        const cols = ['#ffcf3f', '#e6ecff', '#ff6b5e', '#e6ecff', '#ffcf3f', '#9fb3ff', '#e6ecff', '#ffcf3f'];
+        for (let si = 0; si < 8; si++) {
+          const ang = (si / 8) * Math.PI * 2 + (i % 7) * 0.35;
+          const dist = e * W * (0.42 + (si % 3) * 0.11);
+          const sx = Math.cos(ang) * dist;
+          const sy = Math.sin(ang) * dist * 0.85 + e * e * W * 0.16; // лёгкая «гравитация»
+          const ssz = Math.max(2, 6 * (1 - shatterP * 0.7));
+          ctx.globalAlpha = 1 - shatterP;
+          ctx.fillStyle = cols[si % cols.length];
+          ctx.fillRect(sx - ssz / 2, sy - ssz / 2, ssz, ssz);
+        }
+      }
       ctx.restore();
-      // бейдж «сколько ходов до восстановления» (жёлтый, в правом нижнем углу)
-      ctx.fillStyle = '#ffcf3f';
-      ctx.fillRect(W / 2 - 22, H / 2 - 20, 18, 15);
-      ctx.fillStyle = '#0a0c18';
-      ctx.font = '10px "Press Start 2P", monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(String(Math.max(0, brk.left ?? 0)), W / 2 - 13, H / 2 - 8);
+      // бейдж «сколько ходов до восстановления» (жёлтый, в правом нижнем углу) — после вспышки
+      if (shatterP >= 0.5) {
+        ctx.fillStyle = '#ffcf3f';
+        ctx.fillRect(W / 2 - 22, H / 2 - 20, 18, 15);
+        ctx.fillStyle = '#0a0c18';
+        ctx.font = '10px "Press Start 2P", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(String(Math.max(0, brk.left ?? 0)), W / 2 - 13, H / 2 - 8);
+      }
     }
     if (o.hoverCell === i) {
       ctx.strokeStyle = '#ffcf3f';

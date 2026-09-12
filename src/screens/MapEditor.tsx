@@ -146,6 +146,7 @@ export default function MapEditor() {
   const [tokOpen, setTokOpen] = useState(true); // спойлер «Фишки партии» в левой панели
   const [animOpen, setAnimOpen] = useState(false); // спойлер «Анимации» в левой панели
   const [bossOpen, setBossOpen] = useState(false); // спойлер «Боссы» в левой панели
+  const [modeDescOpen, setModeDescOpen] = useState(false); // спойлер «Описания режимов» в панели «Режим игры»
   const [layersOpen, setLayersOpen] = useState(true); // спойлер «Слои» в левой панели
   const [activeLayer, setActiveLayer] = useState(0); // слой, на который ставятся НОВЫЕ тайлы (0 — нижний)
   const [placeAnimId, setPlaceAnimId] = useState(''); // вшитая анимация, выбранная для размещения
@@ -1633,10 +1634,19 @@ export default function MapEditor() {
 
               <div>
                 <div className="tick-label mb-2">Ресурсы игроков</div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Минут у каждого</span><Stepper value={map.startMin ?? 60} onChange={(v) => updMap({ startMin: v })} min={5} max={180} step={5} /></div>
-                  <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><Stepper value={map.startTries ?? 60} onChange={(v) => updMap({ startTries: v })} min={5} max={180} step={5} /></div>
-                </div>
+                {(map.mode ?? 'classic') === 'skill' ? (
+                  /* SKILL CHALLENGE: ресурсы фиксированы условием челленджа — менять нельзя */
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Минут у каждого</span><span className="font-display text-sm text-gold">60</span></div>
+                    <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><span className="font-display text-sm text-gold">60</span></div>
+                    <p className="text-[10px] text-magma leading-tight border-2 border-magma/40 px-2 py-1.5">Условие челленджа: у каждого ровно 60 минут и 60 попыток — менять нельзя.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Минут у каждого</span><Stepper value={map.startMin ?? 60} onChange={(v) => updMap({ startMin: v })} min={5} max={180} step={5} /></div>
+                    <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><Stepper value={map.startTries ?? 60} onChange={(v) => updMap({ startTries: v })} min={5} max={180} step={5} /></div>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -1652,14 +1662,29 @@ export default function MapEditor() {
                         className={`w-full text-left border-2 px-2.5 py-2 cursor-pointer transition-colors ${on ? 'border-gold bg-gold/10' : 'border-edge bg-panel hover:border-edge2'}`}
                       >
                         <div className={`font-display text-[11px] uppercase ${on ? 'text-gold' : 'text-paper'}`}>{on ? '✓ ' : ''}{md.name}</div>
-                        <div className="tick-label text-faint mt-0.5 leading-tight">{md.hint}</div>
                       </button>
                     );
                   })}
                 </div>
-                <p className="text-[10px] text-faint mt-1.5 leading-tight">
-                  Отметка действует на ВСЮ карту и видна игрокам при выборе карты. CLASSIC — обычная игра с кубиками (по умолчанию).
-                </p>
+                {/* описания челленджей — под спойлером, чтобы не занимали панель всегда */}
+                <button
+                  onClick={() => setModeDescOpen((v) => !v)}
+                  className="flex items-center gap-1 w-full text-left mt-2 px-1 py-0.5 cursor-pointer hover:bg-[rgba(90,169,255,0.08)]"
+                  title={modeDescOpen ? 'Свернуть' : 'Развернуть'}
+                >
+                  <span className={`text-[10px] shrink-0 ${modeDescOpen ? 'text-gold' : 'text-faint'}`}>{modeDescOpen ? '▾' : '▸'}</span>
+                  <span className="tick-label text-faint">Описания режимов</span>
+                </button>
+                {modeDescOpen && (
+                  <div className="space-y-1.5 mt-1.5 border-2 border-edge px-2 py-2">
+                    {MAP_MODES.map((md) => (
+                      <p key={md.id} className="text-[10px] text-faint leading-tight"><span className="text-dim font-display uppercase">{md.name}</span> — {md.hint}</p>
+                    ))}
+                    <p className="text-[10px] text-faint leading-tight">
+                      Отметка действует на ВСЮ карту и видна игрокам при выборе карты. CLASSIC — обычная игра с кубиками (по умолчанию).
+                    </p>
+                  </div>
+                )}
               </div>
 
               <div>
