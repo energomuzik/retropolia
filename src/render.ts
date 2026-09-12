@@ -46,9 +46,10 @@ export function cellAtPoint(map: GameMap, wx: number, wy: number): number {
 export const DEF_MOVE_SPEED = 1.2;
 export const clampMoveSpeed = (v: number) => Math.min(6, Math.max(0.5, v));
 
-/* ПЛАВНЫЙ режим: постоянная скорость по всему пути → px за кадр 60fps.
-   seg0 — длина первого отрезка пути (пиксели поля): скорость одинаково ощущается
-   на картах с любым размером клетки. */
+/* ПЛАВНЫЙ режим: ПОСТОЯННАЯ скорость по всему пути → px за кадр 60fps.
+   Скорость считается от РАЗМЕРА КЛЕТКИ (CELL), а не от расстояния до первой клетки:
+   раньше она мерилась по seg0 (текущая позиция → первая клетка пути) и «плавала»
+   от хода к ходу — теперь ход длится ровно столько, сколько задал автор карты. */
 export const smoothPxPerFrame = (seg0: number, cps: number) => {
   const s = clampMoveSpeed(cps);
   return Math.min(60, Math.max(0.1, (seg0 * s) / 60));
@@ -903,7 +904,9 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.drawImage(img, -dw / 2, -dh / 2 - sz * 0.12, dw, dh);
     };
     const custom = t.img ? getImage(t.img) : null;
-    // FX (победа/поражение): разовый клип вместо обычной анимации — от локального старта, замереть на последнем кадре
+    // FX (победа/поражение): разовый клип вместо обычной анимации — от локального старта, замереть на последнем кадре.
+    // ВАЖНО: клип рисуется ПЕРВЫМ, а обычная анимация ниже — ТОЛЬКО если клип не отрисовался
+    // (раньше idle-кадр рисовался ПОВЕРХ клипа каждый кадр — анимация фишки была не видна).
     let drawn = false;
     if (t.override && t.override.frames.length && t.overrideStart !== undefined) {
       const fpsO = Math.max(1, Math.min(24, t.override.fps || 6));
@@ -915,9 +918,10 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         drawn = true;
       }
     }
-    // АНИМИРОВАННАЯ фишка: кадр клипа по направлению (нет — idle); не загрузился — статичное превью
+    // АНИМИРОВАННАЯ фишка: кадр клипа по направлению (нет — idle); не загрузился — статичное превью.
+    // Пока играет разовый fx-клип (override) — обычную анимацию НЕ рисуем.
     const clip = t.anim ? clipForToken(t.anim, t.dir) : null;
-    if (clip && clip.frames.length) {
+    if (!drawn && clip && clip.frames.length) {
       const fimg = getImage(clip.frames[clipFrameIdx(clip, o.time + (t.phase ?? 0) * 1000)]);
       if (fimg) {
         ctx.imageSmoothingEnabled = false;

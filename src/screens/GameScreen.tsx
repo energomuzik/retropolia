@@ -138,6 +138,9 @@ export default function GameScreen() {
   /* ---------- JOURNEY: стрелки ДЖОЙСТИКА (геймпад) + авто-передача хода ---------- */
   const journeyPadRef = useRef<Set<TokenDir>>(new Set());
   const journeyLastMoveRef = useRef(Date.now());
+  /* чужие фишки JOURNEY (трансляция): состояние dead reckoning — последние две
+     авторитетные точки и расчётная скорость между апдейтами (~6/с) */
+  const journeyRemote = useRef<Record<string, { x: number; y: number; vx: number; vy: number; t: number }>>({});
   const [autoPassLeft, setAutoPassLeft] = useState(JOURNEY_AUTO_PASS);
 
   const mePlayer = s?.players.find((p) => p.id === me);
@@ -480,8 +483,9 @@ export default function GameScreen() {
         // токены — медленное, «рукотворное» перемещение по ячейкам
         const act = sess.players[sess.turn % sess.players.length];
         const smooth = !!m.smoothMove; // плавный ход (без прыжков) задан картой
-        // скорость фишек: живая (хост меняет прямо в партии — JOURNEY) или из карты
-        const cps = clampMoveSpeed(sess.moveSpeed ?? m.moveSpeed ?? DEF_MOVE_SPEED);
+        // скорость фишек — ТОЛЬКО из карты (кл/с); менять её можно в редакторе карт,
+        // прямо во время партии скорость не меняется (не было такой функции и не нужно)
+        const cps = clampMoveSpeed(m.moveSpeed ?? DEF_MOVE_SPEED);
         const journeyMode = m.mode === 'journey';
         const mszJ = journeyMode ? mapSize(m) : null;
         let anyoneMoving = false;
@@ -557,13 +561,32 @@ export default function GameScreen() {
                 dispatch({ t: 'journeyMove', id: me, x: Math.round(self.x), y: Math.round(self.y), dir: self.dir });
               }
             } else {
-              // чужая фишка плавно догоняет авторитетную позицию; коэффициент мягче —
-              // без «рывками»: апдейты идут 6 раз/с, и при агрессивной догонялке фишка
-              // двигалась стоп-старт (разная скорость периодически)
-              const tgt = jp ?? center;
-              d.x += (tgt.x - d.x) * Math.min(1, 0.14 * dt);
-              d.y += (tgt.y - d.y) * Math.min(1, 0.14 * dt);
-              const fresh = !!jp && Date.now() - (jp.ts ?? 0) < 450;
+              // ЧУЖАЯ ФИШКА (трансляция): DEAD RECKONING — экстраполяция по двум последним
+              // авторитетным точкам. Апдейты приходят ~6 раз/с, и прежняя «догонялка»
+              // (лизр к свежей точке) двигала фишку стоп-старт — в трансляции ход выглядел
+              // рывками, хотя игрок шёл плавно. Теперь между апдейтами фишка движется
+              // с расчётной скоростью (кап — 1.6× скорости карты), лизр глушит лишь остаточную погрешность.
+              const nowMs = Date.now();
+              let rj = journeyRemote.current[p.id];
+              const tgt0 = jp ?? center;
+              if (!rj) rj = journeyRemote.current[p.id] = { x: tgt0.x, y: tgt0.y, vx: 0, vy: 0, t: nowMs };
+              if (jp && (jp.x !== rj.x || jp.y !== rj.y)) {
+                const dtU = Math.max(0.016, Math.min(0.4, (nowMs - rj.t) / 1000));
+                let nvx = (jp.x - rj.x) / dtU, nvy = (jp.y - rj.y) / dtU;
+                const sp = Math.hypot(nvx, nvy);
+                const maxSp = Math.max(40, cps * CELL * 1.6); // чуть выше скорости карты — догнать при лаге
+                if (sp > maxSp) { nvx = (nvx / sp) * maxSp; nvy = (nvy / sp) * maxSp; }
+                rj.vx = nvx; rj.vy = nvy; rj.x = jp.x; rj.y = jp.y; rj.t = nowMs;
+              }
+              const fresh = !!jp && nowMs - (jp.ts ?? 0) < 450;
+              const age = Math.max(0, (nowMs - rj.t) / 1000);
+              // окно экстраполяции ≤ один интервал апдейта; если апдейты встали — плавно «тает», чтобы не убежать вперёд
+              const melt = age > 0.18 ? Math.max(0, 1 - (age - 0.18) / 0.25) : 1;
+              const ahead = Math.min(age, 0.18) * melt;
+              if (!fresh) { rj.vx = 0; rj.vy = 0; } // фишка встала — гасим расчётную скорость
+              const exX = rj.x + rj.vx * ahead, exY = rj.y + rj.vy * ahead;
+              d.x += (exX - d.x) * Math.min(1, 0.16 * dt);
+              d.y += (exY - d.y) * Math.min(1, 0.16 * dt);
               jdir = fresh ? jp!.dir : undefined; // идёт — походка по направлению; стоял — idle
               if (p.id === act?.id && fresh) anyoneMoving = true;
             }
@@ -604,16 +627,11 @@ export default function GameScreen() {
               /* ПЛАВНЫЙ ХОД БЕЗ ОСТАНОВОК: фишка идёт с ПОСТОЯННОЙ скоростью по всему
                  пути сразу — не тормозит у каждой клетки и не «отсчитывает» их;
                  излишек шага переносится на следующий отрезок, повороты пути = смена направления.
-                 Скорость — в клетках в секунду, задаёт автор карты (moveSpeed) */
+                 Скорость — ровно та, что задал автор карты (moveSpeed): считаем её от размера
+                 клетки, а НЕ от расстояния до первой клетки пути — раньше seg0 «плавал»
+                 от хода к ходу (фишка не по центру, лаг, доводка) и ход шёл то быстро, то медленно. */
               if (hop.speed === undefined) {
-                const t0 = cellCenter(m, hop.queue[0]);
-                let seg0 = Math.hypot(t0.x - d.x, t0.y - d.y);
-                if (seg0 < 0.5 && hop.queue.length > 1) {
-                  // путь начинается с текущей клетки — скорость меряем по следующему отрезку
-                  const t1 = cellCenter(m, hop.queue[1]);
-                  seg0 = Math.hypot(t1.x - d.x, t1.y - d.y);
-                }
-                hop.speed = smoothPxPerFrame(Math.max(seg0, 1), cps); // px за кадр 60fps
+                hop.speed = smoothPxPerFrame(CELL, cps); // px за кадр 60fps — одинаковый на каждом ходу
               }
               let remain = hop.speed * dt;
               while (remain > 0 && hop.queue.length) {
@@ -859,8 +877,10 @@ export default function GameScreen() {
   /* holdingRef — надёжный флаг «кнопка нажата» (state мог запаздывать в замыканиях,
      из-за чего повторное нажатие плодило интервалы и кубики тряслись вечно). */
   const holdingRef = useRef(false);
+  const fxGateUi = !!(s.fxs ?? []).some((f) => f.gate); // идёт спектакль (анимации победы/поражения)
   const startHold = () => {
     if (!myTurn || s.moving || ch || s.pendingCard || s.awaitPost || s.quiz) return;
+    if (fxGateUi) return; // во время анимаций бросать кубики НЕЛЬЗЯ (раньше можно было сорвать спектакль)
     if (rolling || holdingRef.current) return; // защита от повторного нажатия/залипания
     clearInterval(shakeIntRef.current); // глушим возможный «осиротевший» интервал
     holdingRef.current = true;
@@ -1260,6 +1280,9 @@ export default function GameScreen() {
               !s.moving ? (
                 rolling ? (
                   <div className="hud-chip pixel-corners px-4 py-2 font-pixel text-[8px] text-gold blink-hard">КУБИКИ КАТЯТСЯ…</div>
+                ) : fxGateUi ? (
+                  /* спектакль идёт: бросок НЕДОСТУПЕН (раньше можно было нажать и сорвать тайминги) */
+                  <div className="hud-chip pixel-corners px-4 py-2 font-pixel text-[8px] text-dim">🎬 АНИМАЦИЯ ИДЁТ…</div>
                 ) : (
                   <button
                     onPointerDown={startHold}
@@ -1315,21 +1338,6 @@ export default function GameScreen() {
         {/* ---------- JOURNEY: прямое управление фишкой ---------- */}
         {s.phase === 'playing' && isJourney && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 z-10">
-            {/* СКОРОСТЬ ФИШЕК (хост): живая настройка прямо во время партии —
-               действует на всех сразу, без перезапуска и правки карты */}
-            {room?.isHost && (
-              <div className="hud-chip pixel-corners px-3 py-1.5 flex items-center gap-2">
-                <span className="font-pixel text-[8px] text-dim uppercase">Скорость фишек</span>
-                <Stepper
-                  value={Number((s.moveSpeed ?? map.moveSpeed ?? DEF_MOVE_SPEED).toFixed(1))}
-                  onChange={(v) => dispatch({ t: 'setSpeed', id: me, v: Math.round(v * 10) / 10 })}
-                  min={0.5}
-                  max={6}
-                  step={0.1}
-                  suffix=" кл/с"
-                />
-              </div>
-            )}
             {myTurn ? (
               <div className="flex items-center gap-4">
                 <div className="grid grid-cols-3 gap-1 select-none touch-none">

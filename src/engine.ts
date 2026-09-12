@@ -38,7 +38,6 @@ export type Action =
   | { t: 'journeyEnd'; id: string } // JOURNEY: ход уходит дальше (кнопка убрана — шлёт авто-передача после 30 с без движения)
   | { t: 'fxDone'; id: string } // анимация fx (победа/поражение) у игрока закончилась — можно продолжать ход
   | { t: 'fxBreak'; id: string } // спектакль победы дошёл до разбития ячейки (пауза 1 с прошла — анимации начались)
-  | { t: 'setSpeed'; id: string; v: number }; // JOURNEY: хост меняет скорость фишек прямо во время партии
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const rnd6 = () => 1 + Math.floor(Math.random() * 6);
@@ -992,17 +991,6 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       s.broken[fx.cellIdx] = { by: fx.player, left: 2, at: Date.now() };
       const wn = s.players.find((x) => x.id === fx.player)?.name ?? '';
       log(`💥 ${wn} побеждает и РАЗБИВАЕТ ячейку №${fx.cellIdx + 1}!`);
-      break;
-    }
-    case 'setSpeed': {
-      // JOURNEY: хост меняет скорость фишек прямо во время партии — все видят эффект сразу
-      if (s.phase !== 'playing' || map.mode !== 'journey') break;
-      const p = actor();
-      if (!p || !p.isHost) break;
-      const v = Math.round(Math.max(0.5, Math.min(6, Number(a.v) || 1.2)) * 10) / 10;
-      if (Math.abs((s.moveSpeed ?? 0) - v) < 0.001) break;
-      s.moveSpeed = v;
-      log(`🚶 ${p.name} меняет скорость фишек: ${v.toFixed(1)} кл/с`);
       break;
     }
     case 'chooseMode': {

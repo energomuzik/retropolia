@@ -335,3 +335,52 @@ export async function extractTilesFromImage(file: File, p: ExtractParams, infoRe
     URL.revokeObjectURL(url0);
   }
 }
+
+/* ---------- БЫСТРЫЕ ПРАВКИ ТАЙЛА ПРЯМО В ПАЛИТРЕ (без диалогов) ----------
+   Вырезатель иногда даёт тайлу не тот размер — позы одного персонажа не совпадают.
+   +/− под тайлом меняют размер на 1 px по большей стороне (пропорционально),
+   стрелки в ленте кадров сдвигают картинку тайла внутри кадра (шаг ~1/32 стороны).
+   Обе операции целочисленные и без сглаживания — пиксель-арт не замыливается. */
+
+const loadImg = (dataUrl: string): Promise<HTMLImageElement | null> =>
+  new Promise((res) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = () => res(null);
+    img.src = dataUrl;
+  });
+
+/* Размер: dir=+1 больше, dir=-1 меньше. Шаг — 1 px по большей стороне, вторая
+   сторона масштабируется пропорционально. Границы 4..512 px. */
+export async function scaleTileImg(dataUrl: string, dir: 1 | -1): Promise<string> {
+  const img = await loadImg(dataUrl);
+  if (!img) return dataUrl;
+  const w0 = img.width || 1, h0 = img.height || 1;
+  const mx0 = Math.max(w0, h0);
+  const mx1 = Math.max(4, Math.min(512, mx0 + dir));
+  if (mx1 === mx0) return dataUrl;
+  const k = mx1 / mx0;
+  const cv = document.createElement('canvas');
+  cv.width = Math.max(1, Math.round(w0 * k));
+  cv.height = Math.max(1, Math.round(h0 * k));
+  const cx = cv.getContext('2d')!;
+  cx.imageSmoothingEnabled = false;
+  cx.drawImage(img, 0, 0, cv.width, cv.height);
+  return cv.toDataURL('image/png');
+}
+
+/* Положение (для кадров анимаций): сдвиг картинки внутри кадра БЕЗ смены самого
+   тайла. sx/sy — направление (-1/0/1), шаг — ~1/32 большей стороны (мин. 1 px).
+   Холст кадра не меняется: что вышло за край — срезается. */
+export async function shiftTileImg(dataUrl: string, sx: -1 | 0 | 1, sy: -1 | 0 | 1): Promise<string> {
+  const img = await loadImg(dataUrl);
+  if (!img || (!sx && !sy)) return dataUrl;
+  const w = img.width || 1, h = img.height || 1;
+  const step = Math.max(1, Math.round(Math.max(w, h) / 32));
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const cx = cv.getContext('2d')!;
+  cx.imageSmoothingEnabled = false;
+  cx.drawImage(img, sx * step, sy * step);
+  return cv.toDataURL('image/png');
+}

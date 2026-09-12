@@ -614,7 +614,6 @@ export interface GameSession {
      так же разбита и пуста). Работает во всех режимах. at — момент разбития (Date.now()
      хоста; клиенты считают «осколки» от локального момента появления — рассинхрон часов не страшен). */
   broken?: Record<number, { by: string; left: number; task?: TaskDef; at?: number }>;
-  moveSpeed?: number; // ЖИВАЯ скорость фишек, заданная хостом прямо во время партии (JOURNEY); нет — скорость карты
   bossDown?: Record<string, boolean>; // повержённые боссы (key — PlacedBoss.id): статичный кадр побеждённого
   winner: string | null;
   log: string[];
