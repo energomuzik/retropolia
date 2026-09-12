@@ -7,18 +7,18 @@ import { newSession, fmtClock } from '../engine';
 import { idbAll, idbDel, idbGet, idbPut, uid } from '../db';
 import { downloadHostBat } from '../host/hostPackage';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
-import type { GameMap, MapMode, SessionSnapshot, TokenDef } from '../types';
-import { PLAYER_COLORS, PLAYER_NAMES } from '../types';
+import type { BossAnimDef, GameMap, MapMode, SessionSnapshot, TokenDef } from '../types';
+import { bossLibEntryOf, PLAYER_COLORS, PLAYER_NAMES } from '../types';
 import { sfx } from '../sound';
 
 /* ---------- создание игры ---------- */
 
 /* КАРТА ПЕРЕД ПАРТИЕЙ: перечитываем её из базы и подтягиваем СВЕЖИЕ снимки фишек
-   из библиотеки. Фишка при вшивании в карту копируется СНИМКОМ — если фишку потом
-   редактировали (например, добавили 5-ю/6-ю анимации победы/поражения), партия жила
-   со старым снимком, и спектакль не находил клип фишки. Теперь при создании/восстановлении
-   комнаты версия из библиотеки подставляется автоматически; фишек, которых в библиотеке
-   уже нет, не трогаем (играет то, что вшито в карту). */
+   и БОССОВ из библиотеки. Фишка/босс при вшивании в карту копируются СНИМКОМ — если
+   их потом редактировали (например, добавили 5-ю/6-ю анимации или клип гибели босса
+   со звуком), партия жила со старым снимком, и спектакль не находил клип/звук.
+   Теперь при создании/восстановлении комнаты версия из библиотеки подставляется
+   автоматически; тех, кого в библиотеке уже нет, не трогаем (играет то, что вшито). */
 const freshMapWithTokens = async (mapId: string): Promise<GameMap | null> => {
   try {
     const fresh = await idbGet<GameMap>('maps', mapId);
@@ -26,8 +26,17 @@ const freshMapWithTokens = async (mapId: string): Promise<GameMap | null> => {
     const lib = (await idbAll<TokenDef>('tokens')).map((e) => e.value);
     const libById = new Map(lib.map((t) => [t.id, t]));
     const toks = fresh.mapTokens ?? [];
-    if (!toks.some((t) => libById.has(t.id))) return fresh;
-    return { ...fresh, mapTokens: toks.map((t) => (libById.has(t.id) ? (JSON.parse(JSON.stringify(libById.get(t.id))) as TokenDef) : t)) };
+    const bossLib = (await idbAll<BossAnimDef>('bossAnims')).map((e) => e.value);
+    const bossById = new Map(bossLib.map((b) => [b.id, b]));
+    const blib = fresh.bossLib ?? [];
+    const toksChanged = toks.some((t) => libById.has(t.id));
+    const bossChanged = blib.some((b) => bossById.has(b.id));
+    if (!toksChanged && !bossChanged) return fresh;
+    return {
+      ...fresh,
+      mapTokens: toksChanged ? toks.map((t) => (libById.has(t.id) ? (JSON.parse(JSON.stringify(libById.get(t.id))) as TokenDef) : t)) : toks,
+      bossLib: bossChanged ? blib.map((b) => (bossById.has(b.id) ? bossLibEntryOf(bossById.get(b.id)!) : b)) : blib,
+    };
   } catch { return null; }
 };
 

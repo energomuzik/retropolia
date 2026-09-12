@@ -1230,8 +1230,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
          остаётся разбитой и пустой (хозяин — победитель). */
       s.broken = s.broken ?? {};
       s.broken[a.cellIdx] = { by: p.id, left: 3, task };
-      /* Боссы, стоящие на этой ячейке, ПОВЕРЖЕНЫ: их анимация остановится
-         на статичном кадре побеждённого босса. */
+      /* Боссы, стоящие на этой ячейке, ПОВЕРЖЕНЫ: ОДИН раз играется клип гибели
+         (defeated, со своим звуком), потом босс навсегда замирает на его последнем кадре.
+         У старых боссов без клипа гибели — как раньше: замирает на последнем кадре win. */
       for (const b of map.bosses ?? []) {
         if (s.bossDown?.[b.id]) continue;
         const bi = cellAtPoint(map, b.x, b.y);
@@ -1239,11 +1240,17 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         s.bossDown = s.bossDown ?? {};
         s.bossDown[b.id] = true;
         const bdef = (map.bossLib ?? []).find((x) => x.id === b.bid);
-        if (bdef) log(`👹 Босс «${bdef.name}» ПОВЕРЖЕН — замер побеждённым`);
+        const dms = bdef ? clipMs(bdef.defeated) : 0;
+        if (bdef && dms) {
+          /* гибель босса — тоже спектакль: клип со звуком, ход уходит следующему
+             игроку только после него (fxDone/страховка) */
+          pushFx({ kind: 'bossDef', player: p.id, cellIdx: a.cellIdx, bossId: b.id, ms: dms, gate: true, after: 'endTurn' });
+        }
+        if (bdef) log(`👹 Босс «${bdef.name}» ПОВЕРЖЕН${dms ? ' — гибнет' : ' — замер побеждённым'}`);
       }
       s.awaitPost = false;
       log(`🛠 ${p.name} создаёт задание на ячейке №${a.cellIdx + 1} — вступит в силу через 3 хода (доп. ход сгорает)`);
-      endTurnNow();
+      if (!gatingFx()) endTurnNow(); // есть клип гибели босса — ход уйдёт после него (fxDone)
       break;
     }
     case 'useCard': {

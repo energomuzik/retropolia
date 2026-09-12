@@ -378,7 +378,9 @@ export default function GameScreen() {
   /* ---------- FX: разовые ЗВУКИ победы/поражения ----------
      5-я/6-я анимации фишки — её winSnd/loseSnd; реакции боссов — winSnd/loseSnd босса.
      Каждый fx озвучивается ОДИН раз по факту появления в сессии, но С УЧЁТОМ паузы
-     delay: сначала секунда тишины после задания, звук — в момент старта клипов. */
+     delay: сначала секунда тишины после задания, звук — в момент старта клипов.
+     ОДНОВРЕМЕННОСТЬ: реакции боссов и фишка стартуют в один момент — звуки играют
+     ПАРАЛЛЕЛЬНО (overlap), иначе фишкин звук глушал босский и у босса слышали только idle. */
   useEffect(() => {
     const fxList = s?.fxs ?? [];
     if (!fxList.length) return;
@@ -395,15 +397,15 @@ export default function GameScreen() {
       } else {
         const b = (m.bosses ?? []).find((x) => x.id === fx.bossId);
         const def = b ? (m.bossLib ?? []).find((x) => x.id === b.bid) : null;
-        snd = fx.kind === 'bossWin' ? def?.winSnd : def?.loseSnd;
+        snd = fx.kind === 'bossWin' ? def?.winSnd : fx.kind === 'bossDef' ? def?.defSnd : def?.loseSnd;
       }
       if (snd) {
         const delay = Math.max(0, fx.delay ?? 0);
         if (delay > 0) {
-          const to = window.setTimeout(() => playOneShot(snd!), delay);
+          const to = window.setTimeout(() => playOneShot(snd!, { overlap: true }), delay);
           fxSndTimersRef.current.push(to);
         } else {
-          playOneShot(snd);
+          playOneShot(snd, { overlap: true });
         }
       }
     }
@@ -428,11 +430,13 @@ export default function GameScreen() {
   }, [s?.moving?.ts, s?.challenge, s?.pendingCard, s?.quiz, s?.awaitPost]);
 
   /* ---------- авто-доезд (страховка хоста) ----------
-     Бюджет движения зависит от длины пути и скорости карты: на медленных скоростях
-     (например 0.5 кл/с) путь идёт дольше фиксированных 8 секунд — раньше страховка
-     обрывала ход на полпути, камера прыгала на следующего игрока, а фишка телепортировалась.
-     Запас щедрый (полтора времени пути + 10 с): подлагивания/просадки FPS не должны
-     приводить к «ход обрывается — фишка мгновенно встаёт на нужную ячейку».
+     Бюджет движения — по РЕАЛЬНОЙ длине пути: ячейки на карте стоят где угодно в пикселях
+     (свободное размещение), стрелки-переходы и карточки дают перегоны любой длины, а не 64px.
+     Раньше бюджет считался «по одной клетке на запись пути» — на скорости 0.5 кл/с и на любых
+     длинных перегонах он был КОРЧЕ реального хода: страховка обрывала ход на полпути, камера
+     прыгала на следующего игрока, а фишка телепортировалась. Теперь: сумма длин отрезков
+     (подход + перегоны между ячейками) / скорость карты × запас ×2 + 10 с. Каким бы долгим
+     ни был ход — фишка обязана дойти до конца, и это все должны увидеть.
      Там же страховка спектакля fx: если у виновника зависло/потерялось — хост доводит сам. */
   useEffect(() => {
     if (!room?.isHost) return;
@@ -451,8 +455,30 @@ export default function GameScreen() {
       }
       const mv = sess.moving;
       if (!mv) return;
-      const cps = clampMoveSpeed(cur.sessionMap?.moveSpeed ?? DEF_MOVE_SPEED); // кл/с из карты
-      const budget = Math.max(8000, (mv.path.length / cps) * 1500 + 10000); // время пути ×1.5 + запас 10 с
+      const mp = cur.sessionMap;
+      const cps = clampMoveSpeed(mp?.moveSpeed ?? DEF_MOVE_SPEED); // кл/с из карты
+      let dist = 0;
+      const firstC = mp && mp.cells[mv.path[0]] ? cellCenter(mp, mv.path[0]) : null;
+      if (firstC && mp) {
+        /* подход: обычно ровно клетка (фишка стоит в центре своей ячейки), но берем МАКСИМУМ
+           с фактическим отрисованным положением и стартовой ячейкой — карточки/телепорты
+           дают первый перегон любой длины; завышение безопасно (ход просто не оборвётся) */
+        const moverP = sess.players.find((x) => x.id === mv.player);
+        const dispSt = dispRef.current[mv.player];
+        let approach = CELL;
+        if (dispSt) approach = Math.max(approach, Math.hypot(firstC.x - dispSt.x, firstC.y - dispSt.y));
+        if (moverP) { const c0 = cellCenter(mp, moverP.pos); approach = Math.max(approach, Math.hypot(firstC.x - c0.x, firstC.y - c0.y)); }
+        dist += approach;
+        let prev = firstC;
+        for (let i = 1; i < mv.path.length; i++) {
+          const c = mp.cells[mv.path[i]] ? cellCenter(mp, mv.path[i]) : null;
+          if (c) { dist += Math.hypot(c.x - prev.x, c.y - prev.y); prev = c; }
+        }
+      } else {
+        dist = mv.path.length * CELL;
+      }
+      const walkMs = (dist / (cps * CELL)) * 1000; // время пути при скорости карты, мс
+      const budget = Math.max(8000, walkMs * 2 + 10000); // двойной запас + 10 с
       if (Date.now() - mv.ts > budget) {
         dispatch({ t: 'arrived', id: mv.player });
       }
@@ -466,9 +492,9 @@ export default function GameScreen() {
     let lastT = 0;
     const loop = (t: number) => {
       // dt в «кадрах по 60fps» — анимация не зависит от производительности ПК.
-      // Кап 6 кадров (~100 мс): даже при просадке до 10 FPS скорость фишки по таймеру
-      // остаётся верной — раньше кап 3 «тормозил» ход и страховка хоста обрывала его.
-      const dt = lastT ? Math.min(6, (t - lastT) / 16.7) : 1;
+      // Кап 30 кадров (~0.5 с): скорость фишки верна реальному времени даже при просадке
+      // до 2 FPS — ход не «растягивается», страховка хоста не обрывает его, фишка доходит.
+      const dt = lastT ? Math.min(30, (t - lastT) / 16.7) : 1;
       lastT = t;
       const cv = canvasRef.current;
       const cur = useApp.getState();
@@ -618,10 +644,12 @@ export default function GameScreen() {
           const hop = hopRef.current[p.id];
           let lift = 0; // вертикальный «подскок» фишки при движении (в плавном режиме — нет)
           let movingNow = false;
-          // хост уже завершил это движение (moving null или принадлежит другому ходу) —
-          // сбрасываем устаревшую очередь, чтобы фишка сошлась с авторитетной позицией
           const mvActive = !!sess.moving && sess.moving.player === p.id;
-          if (hop && hop.queue.length && !mvActive) hop.queue.length = 0;
+          // Хост уже завершил движение (moving null или принадлежит другому ходу)? Очередь
+          // НЕ сбрасываем: фишка САМА доигрывает путь до последней ячейки — все видят,
+          // как она доходит до места назначения, и лишь потом сходится с авторитетной
+          // позицией (она = последняя ячейка пути). Раньше очередь обнулялась мгновенно,
+          // и фишка «прыгала» к концу, не дойдя.
           if (hop && hop.queue.length) {
             anyoneMoving = true;
             movingNow = true;
@@ -753,15 +781,16 @@ export default function GameScreen() {
 
         // FX: разовые реакции боссов — клип играется ОДИН раз от локального старта.
         // Пока длится пауза delay — босс продолжает IDLE (клип ещё не начался);
-        // клип доиграл — босс ВОЗВРАЩАЕТСЯ к idle (замирает навсегда только побеждённый).
+        // клип доиграл — босс ВОЗВРАЩАЕТСЯ к idle (замирает навсегда только побеждённый,
+        // его клип гибели bossDef доигрывает и продолжает статичным последним кадром).
         const bossFx: Record<string, { frames: string[]; fps: number; start: number }> = {};
         for (const fx of fxList) {
-          if (fx.kind !== 'bossWin' && fx.kind !== 'bossLose') continue;
+          if (fx.kind !== 'bossWin' && fx.kind !== 'bossLose' && fx.kind !== 'bossDef') continue;
           const b = (m.bosses ?? []).find((x) => x.id === fx.bossId);
           if (!b) continue;
           const def = (m.bossLib ?? []).find((x) => x.id === b.bid);
           if (!def) continue;
-          const clip = fx.kind === 'bossWin' ? def.win : def.lose;
+          const clip = fx.kind === 'bossWin' ? def.win : fx.kind === 'bossDef' ? (def.defeated && def.defeated.frames.length ? def.defeated : def.win) : def.lose;
           const st = fxStartRef.current.get(fx.id);
           if (!clip.frames.length || st === undefined) continue;
           if (t < st) continue; // пауза не прошла — босс ещё играет idle
@@ -1388,12 +1417,15 @@ export default function GameScreen() {
                   <span />
                 </div>
                 <div className="flex flex-col items-center gap-1.5">
-                  {autoPassLeft <= 5 ? (
-                    <div className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[8px] text-magma blink-hard">ХОД УЙДЁТ САМ: {autoPassLeft} С</div>
-                  ) : (
+                  {/* ТАЙМЕР скрыт: без движения ход уйдёт сам через 2 минуты (JOURNEY_AUTO_PASS),
+                      плашка появляется только на последних 15 секундах; последние 5 — мигают */}
+                  {autoPassLeft <= 15 && autoPassLeft > 5 && (
                     <div className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[8px] text-dim">ХОД УЙДЁТ САМ: {autoPassLeft} С</div>
                   )}
-                  <div className="tick-label text-faint text-center max-w-72">Стрелки/WASD, ДЖОЙСТИК (крестовина или стик) или кнопки — фишка идёт сама. Наступите на ячейку задания — оно откроется сразу. Стоите 30 с — ход уйдёт следующему сам.</div>
+                  {autoPassLeft <= 5 && (
+                    <div className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[8px] text-magma blink-hard">ХОД УЙДЁТ САМ: {autoPassLeft} С</div>
+                  )}
+                  <div className="tick-label text-faint text-center max-w-72">Стрелки/WASD, ДЖОЙСТИК (крестовина или стик) или кнопки — фишка идёт сама. Наступите на ячейку задания — оно откроется сразу. Стоите 2 минуты без движения — ход уйдёт следующему сам (предупреждение — за 15 с).</div>
                 </div>
               </div>
             ) : (

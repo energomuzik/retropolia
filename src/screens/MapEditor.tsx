@@ -9,7 +9,7 @@ import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimDef, BossAnimDef, CellDef, CellType, GameMap, PlacedAnim, PlacedBoss, Stamp, TokenDef, TileGroup, TileImg } from '../types';
-import { MAP_MODES } from '../types';
+import { bossLibEntryOf, MAP_MODES } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
 
@@ -283,7 +283,9 @@ export default function MapEditor() {
       if (placeBossId === b.id) setPlaceBossId('');
       sfx.click();
     } else {
-      updMap({ bossLib: [...lib, { id: b.id, name: b.name, idle: JSON.parse(JSON.stringify(b.idle)), ...(b.idleSnd ? { idleSnd: b.idleSnd } : {}), win: JSON.parse(JSON.stringify(b.win)), ...(b.winSnd ? { winSnd: b.winSnd } : {}), lose: JSON.parse(JSON.stringify(b.lose)), ...(b.loseSnd ? { loseSnd: b.loseSnd } : {}) }] });
+      /* вшиваем СНИМОК босса (все клипы + звуки, включая клип гибели) — уедет всем игрокам;
+         при правке босса позже TokenEditor обновит вшитые копии (syncBossToMaps) */
+      updMap({ bossLib: [...lib, bossLibEntryOf(b)] });
       setPlaceBossId(b.id);
       setTool('boss');
       sfx.coin();

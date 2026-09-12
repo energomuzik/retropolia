@@ -5,7 +5,8 @@ import PixelPaint, { emptyGrid, gridToDataUrl, imageToGrid } from '../PixelPaint
 import { extractTilesFromImage, scaleTileImg, shiftTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbAll, idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimClip, AnimDef, BossAnimDef, GameMap, SoundDef, TokenAnim, TokenDef, TileGroup, TileImg } from '../types';
+import type { AnimClip, AnimDef, BossAnimDef, BossLibEntry, GameMap, SoundDef, TokenAnim, TokenDef, TileGroup, TileImg } from '../types';
+import { bossLibEntryOf } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns } from '../delGuard';
 import { sfx } from '../sound';
 import { playOneShot, stopOneShot } from '../loopsnd';
@@ -70,12 +71,13 @@ const CLIP_META: { key: ClipKey; label: string; hint: string }[] = [
 interface ClipDraft { fps: number; frames: string[] }
 interface AnimDraft { id?: string; name: string; fps: number; frames: string[]; createdAt?: number; sndId?: string }
 interface TokDraft { id?: string; name: string; size: number; clips: Record<ClipKey, ClipDraft>; createdAt?: number; sndId?: string; winSndId?: string; loseSndId?: string }
-interface BossDraft { id?: string; name: string; clips: Record<BossClipKey, ClipDraft>; createdAt?: number; sndIds?: { idle?: string; win?: string; lose?: string } }
-type BossClipKey = 'idle' | 'win' | 'lose';
+interface BossDraft { id?: string; name: string; clips: Record<BossClipKey, ClipDraft>; createdAt?: number; sndIds?: { idle?: string; win?: string; lose?: string; defeated?: string } }
+type BossClipKey = 'idle' | 'win' | 'lose' | 'defeated';
 const BOSS_CLIPS: { key: BossClipKey; label: string; hint: string }[] = [
   { key: 'idle', label: 'IDLE · ЖДЁТ', hint: 'обязательный клип — босс жив, ждёт на ячейке' },
   { key: 'win', label: '🏆 ИГРОК ПОБЕДИЛ', hint: 'босс получает удар игрока — один раз, когда игрок в радиусе победил задание' },
   { key: 'lose', label: '💀 ИГРОК ПАЛ', hint: 'босс бьёт игрока — один раз, когда игрок в радиусе проиграл задание' },
+  { key: 'defeated', label: '☠ БОСС ПОВЕРЖЕН', hint: 'гибель босса — один раз, когда игрок победил его ячейку и поставил своё; потом босс навсегда замирает на последнем кадре (необязательный)' },
 ];
 
 const emptyClips = (): Record<ClipKey, ClipDraft> => ({
@@ -91,6 +93,7 @@ const emptyBossClips = (): Record<BossClipKey, ClipDraft> => ({
   idle: { fps: 6, frames: [] },
   win: { fps: 6, frames: [] },
   lose: { fps: 6, frames: [] },
+  defeated: { fps: 6, frames: [] },
 });
 
 const DEF_TOKEN_SIZE = 64; // размер фишки на карте по умолчанию = оригинальный размер тайла (клетка)
@@ -202,13 +205,13 @@ export default function TokenEditor() {
   /* ---------- черновики создателей ---------- */
   const [animDraft, setAnimDraft] = useState<AnimDraft | null>(null); // свободная анимация для карт
   const [tokDraft, setTokDraft] = useState<TokDraft | null>(null); // анимированная фишка
-  const [bossDraft, setBossDraft] = useState<BossDraft | null>(null); // босс (idle + победа + поражение)
+  const [bossDraft, setBossDraft] = useState<BossDraft | null>(null); // босс (idle + победа + поражение + гибель)
   const [activeClip, setActiveClip] = useState<ClipKey>('idle'); // клип фишки, куда падают кадры
   const [activeBossClip, setActiveBossClip] = useState<BossClipKey>('idle'); // клип босса, куда падают кадры
   /* куда прилипает ЗВУК по клику в левой панели: у фишки три слота (ход/победа/поражение),
-     у босса — тоже три (ждёт/победа/поражение), у свободной анимации — один */
+     у босса — четыре (ждёт/победа/поражение/гибель), у свободной анимации — один */
   const [sndTarget, setSndTarget] = useState<'snd' | 'win' | 'lose'>('snd');
-  const [bossSndTarget, setBossSndTarget] = useState<'idle' | 'win' | 'lose'>('idle');
+  const [bossSndTarget, setBossSndTarget] = useState<BossClipKey>('idle');
   const [mirrorMode, setMirrorMode] = useState(false); // ЗЕРКАЛО: следующий клик по тайлу добавит отражённый кадр
 
   /* ---------- нарезка тайлов (общий экстрактор из tilecut.ts) ---------- */
@@ -792,6 +795,22 @@ export default function TokenEditor() {
     return snapshots;
   };
 
+  /* Свежая версия босса — сразу во все карты, где он вшит (bossLib — снимок, как у фишек).
+     Без этого новые клипы/звуки (например клип гибели) не доезжали до карт,
+     и босс в партии продолжал играть по старому снимку. */
+  const syncBossToMaps = async (b: BossAnimDef): Promise<Array<{ key: string; bossLib: BossLibEntry[] }>> => {
+    const all = await idbAll<GameMap>('maps');
+    const snapshots: Array<{ key: string; bossLib: BossLibEntry[] }> = [];
+    for (const { key, value: mp } of all) {
+      const cur = mp.bossLib ?? [];
+      if (!cur.some((x) => x.id === b.id)) continue;
+      const next = cur.map((x) => (x.id === b.id ? bossLibEntryOf(b) : x));
+      snapshots.push({ key, bossLib: JSON.parse(JSON.stringify(cur)) });
+      await idbPut('maps', key, { ...mp, bossLib: next, updatedAt: Date.now() });
+    }
+    return snapshots;
+  };
+
   const saveBoss = async () => {
     if (!bossDraft) return;
     if (!bossDraft.clips.idle.frames.length) { toast('Клип IDLE обязателен — добавьте кадры (живой босс на ячейке)', 'err'); sfx.fail(); return; }
@@ -807,13 +826,16 @@ export default function TokenEditor() {
       ...(sndUrl(bossDraft.sndIds?.idle) ? { idleSnd: sndUrl(bossDraft.sndIds?.idle) } : {}),
       ...(sndUrl(bossDraft.sndIds?.win) ? { winSnd: sndUrl(bossDraft.sndIds?.win) } : {}),
       ...(sndUrl(bossDraft.sndIds?.lose) ? { loseSnd: sndUrl(bossDraft.sndIds?.lose) } : {}),
+      ...(bossDraft.clips.defeated.frames.length ? { defeated: clipOf('defeated') } : {}), // клип гибели — необязательный
+      ...(bossDraft.clips.defeated.frames.length && sndUrl(bossDraft.sndIds?.defeated) ? { defSnd: sndUrl(bossDraft.sndIds?.defeated) } : {}),
       createdAt: bossDraft.createdAt ?? Date.now(),
     };
     await idbPut('bossAnims', b.id, b);
+    const touchedMaps = (await syncBossToMaps(b)).length; // свежая версия босса — сразу во все карты, где он вшит
     await refresh();
     setBossDraft(null);
     sfx.success();
-    toast(`Босс «${b.name}» сохранён — вшивайте его в карты в редакторе карт`, 'ok');
+    toast(`Босс «${b.name}» сохранён${b.defeated ? ' · с клипом ГИБЕЛИ' : ''}${touchedMaps ? ` · обновлён в ${touchedMaps} ${touchedMaps === 1 ? 'карте' : 'картах'}` : ' — вшивайте его в карты в редакторе карт'}`, 'ok');
   };
 
   const removeBoss = async (b: BossAnimDef) => {
@@ -1188,7 +1210,7 @@ export default function TokenEditor() {
                     </div>
                   </div>
                 </div>
-                <p className="text-[11px] text-gold leading-tight">Босс ставится на любую ячейку в редакторе карт и ЖДЁТ (idle). Когда игрок В РАДИУСЕ его звука побеждает или проигрывает задание — босс ОДИН раз проигрывает реакцию со своим звуком: «🏆 победа» — босс получает удар игрока, «💀 поражение» — босс бьёт игрока. Если игрок победил задание НА ЯЧЕЙКЕ БОССА и поставил СВОЁ — босс повержен: замер на статичном кадре победы.</p>
+                <p className="text-[11px] text-gold leading-tight">Босс ставится на любую ячейку в редакторе карт и ЖДЁТ (idle). Когда игрок В РАДИУСЕ его звука побеждает или проигрывает задание — босс ОДИН раз проигрывает реакцию со своим звуком: «🏆 победа» — босс получает удар игрока, «💀 поражение» — босс бьёт игрока. Если игрок победил задание НА ЯЧЕЙКЕ БОССА и поставил СВОЁ — босс повержен: ОДИН раз играется клип гибели «☠» (если собран) со своим звуком, потом босс навсегда замирает на его последнем кадре.</p>
                 {BOSS_CLIPS.map((cm) => {
                   const c = bossDraft.clips[cm.key];
                   const on = activeBossClip === cm.key;
@@ -1222,6 +1244,7 @@ export default function TokenEditor() {
                       { k: 'idle', label: 'ЖДЁТ' },
                       { k: 'win', label: '🏆 ПОБЕДУ' },
                       { k: 'lose', label: '💀 ПОРАЖЕНИЕ' },
+                      { k: 'defeated', label: '☠ ГИБЕЛЬ БОССА' },
                     ] as const).map((o) => (
                       <button
                         key={o.k}
@@ -1233,7 +1256,8 @@ export default function TokenEditor() {
                   <SoundAttach sounds={sounds} value={bossDraft.sndIds?.idle} onDetach={() => setBossDraft((d) => (d ? { ...d, sndIds: { ...d.sndIds, idle: undefined } } : d))} />
                   <SoundAttach sounds={sounds} value={bossDraft.sndIds?.win} onDetach={() => setBossDraft((d) => (d ? { ...d, sndIds: { ...d.sndIds, win: undefined } } : d))} />
                   <SoundAttach sounds={sounds} value={bossDraft.sndIds?.lose} onDetach={() => setBossDraft((d) => (d ? { ...d, sndIds: { ...d.sndIds, lose: undefined } } : d))} />
-                  <p className="text-[10px] text-faint leading-tight">ЖДЁТ — фоновый звук живого босса (у экземпляра на карте задаётся радиус). 🏆 и 💀 — звучат ОДИН раз вместе с реакцией, если игрок в радиусе. Все звуки вшиваются КОПИЕЙ.</p>
+                  <SoundAttach sounds={sounds} value={bossDraft.sndIds?.defeated} onDetach={() => setBossDraft((d) => (d ? { ...d, sndIds: { ...d.sndIds, defeated: undefined } } : d))} />
+                  <p className="text-[10px] text-faint leading-tight">ЖДЁТ — фоновый звук живого босса (у экземпляра на карте задаётся радиус). 🏆 и 💀 — звучат ОДИН раз вместе с реакцией, если игрок в радиусе. ☠ — звук гибели босса (играется с клипом «БОСС ПОВЕРЖЕН», слышат все). Все звуки вшиваются КОПИЕЙ.</p>
                 </div>
                 <div className="flex justify-end gap-2">
                   <GhostBtn onClick={() => { stopOneShot(); setBossDraft(null); }}>Отмена</GhostBtn>
@@ -1319,7 +1343,7 @@ export default function TokenEditor() {
               {tab === 'bosses' && (
                 <div>
                   <p className="text-[12px] text-dim mb-3 max-w-2xl">
-                    Босс — анимация-персонаж для ячейки карты: живой босс играет IDLE, а когда игрок в радиусе его звука побеждает или проигрывает задание, босс ОДИН раз реагирует клипом победы/поражения со своим звуком. Победил задание на ячейке босса и поставил своё — босс повержен и замер на статичном кадре.
+                    Босс — анимация-персонаж для ячейки карты: живой босс играет IDLE, а когда игрок в радиусе его звука побеждает или проигрывает задание, босс ОДИН раз реагирует клипом победы/поражения со своим звуком. Победил задание на ячейке босса и поставил своё — босс повержен: один раз играется клип гибели «☠» (если собран), потом босс навсегда замирает на его последнем кадре.
                   </p>
                   <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
                     {bossAnims.map((b) => (
@@ -1328,11 +1352,11 @@ export default function TokenEditor() {
                           <AnimPreview frames={b.idle.frames} fps={b.idle.fps} size={72} />
                         </div>
                         <div className="font-display text-[11px] uppercase text-paper truncate mt-2">{b.idleSnd ? '🔊 ' : ''}{b.name}</div>
-                        <div className="tick-label text-faint">🏆 {b.win.frames.length} к. · 💀 {b.lose.frames.length} к.</div>
+                        <div className="tick-label text-faint">🏆 {b.win.frames.length} к. · 💀 {b.lose.frames.length} к.{b.defeated ? ` · ☠ ${b.defeated.frames.length} к.` : ''}</div>
                         <div className="flex justify-center gap-2 mt-2">
                           <GhostBtn small onClick={() => {
                             const findSnd = (url?: string) => sounds.find((x) => x.dataUrl === url)?.id;
-                            setBossDraft({ id: b.id, name: b.name, createdAt: b.createdAt, clips: { idle: JSON.parse(JSON.stringify(b.idle)), win: JSON.parse(JSON.stringify(b.win)), lose: JSON.parse(JSON.stringify(b.lose)) }, sndIds: { idle: findSnd(b.idleSnd), win: findSnd(b.winSnd), lose: findSnd(b.loseSnd) } });
+                            setBossDraft({ id: b.id, name: b.name, createdAt: b.createdAt, clips: { idle: JSON.parse(JSON.stringify(b.idle)), win: JSON.parse(JSON.stringify(b.win)), lose: JSON.parse(JSON.stringify(b.lose)), defeated: JSON.parse(JSON.stringify(b.defeated ?? { fps: 6, frames: [] })) }, sndIds: { idle: findSnd(b.idleSnd), win: findSnd(b.winSnd), lose: findSnd(b.loseSnd), defeated: findSnd(b.defSnd) } });
                             setActiveBossClip('idle');
                             setBossSndTarget('idle');
                             sfx.hover();

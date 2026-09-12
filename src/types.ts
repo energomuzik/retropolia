@@ -318,7 +318,7 @@ export const MAP_MODES: { id: MapMode; name: string; hint: string }[] = [
   { id: 'journey', name: 'JOURNEY', hint: 'Приключение: игроки ходят фишкой напрямую в любые стороны, пересёк ячейку — сразу задание. Кубики и их бонусы/штрафы не действуют, побеждает последний с ресурсами.' },
 ];
 export const SKILL_TURNS = 25; // лимит ходов хоста в SKILL CHALLENGE
-export const JOURNEY_AUTO_PASS = 30; // JOURNEY: ход уходит следующему сам после стольких секунд без движения
+export const JOURNEY_AUTO_PASS = 120; // JOURNEY: ход уходит следующему сам после стольких секунд без движения (2 минуты); плашка таймера видна только на последних 15 секундах
 
 export interface GameMap {
   id: string;
@@ -495,7 +495,8 @@ export interface AnimLibEntry {
    Босс проигрывает idle (ждёт). Когда игрок в радиусе звука (r) ПОБЕЖДАЕТ или
    ПРОИГРЫВАЕТ задание — один раз проигрывается клип win/lose со своим звуком.
    Если игрок победил задание НА ЯЧЕЙКЕ БОССА и поставил СВОЁ — босс повержен:
-   анимация останавливается на статичном кадре побеждённого босса (последний кадр win). */
+   ОДИН раз играется клип defeated (со своим звуком, если задан), потом босс
+   навсегда замирает на его последнем кадре. */
 export interface BossAnimDef {
   id: string;
   name: string;
@@ -505,6 +506,8 @@ export interface BossAnimDef {
   winSnd?: string;  // звук победы
   lose: AnimClip;   // босс бьёт игрока (поражение игрока)
   loseSnd?: string; // звук поражения
+  defeated?: AnimClip; // клип ПОРАЖЕНИЯ БОССА: играется один раз, когда игрок победил его ячейку и поставил своё; нет — босс замирает на последнем кадре win (как раньше)
+  defSnd?: string;     // звук гибели босса (к клипу defeated)
   createdAt: number;
 }
 
@@ -518,7 +521,25 @@ export interface BossLibEntry {
   winSnd?: string;
   lose: AnimClip;
   loseSnd?: string;
+  defeated?: AnimClip; // клип гибели босса (как у BossAnimDef)
+  defSnd?: string;     // звук гибели босса
 }
+
+/* Снимок босса для вшивания в карту: все клипы и звуки библиотечного босса,
+   включая необязательный клип гибели. Общий для MapEditor (вшивание),
+   TokenEditor (обновление вшитых копий) и Lobby (подтяжка снимков при старте). */
+export const bossLibEntryOf = (b: BossAnimDef): BossLibEntry => ({
+  id: b.id,
+  name: b.name,
+  idle: JSON.parse(JSON.stringify(b.idle)),
+  ...(b.idleSnd ? { idleSnd: b.idleSnd } : {}),
+  win: JSON.parse(JSON.stringify(b.win)),
+  ...(b.winSnd ? { winSnd: b.winSnd } : {}),
+  lose: JSON.parse(JSON.stringify(b.lose)),
+  ...(b.loseSnd ? { loseSnd: b.loseSnd } : {}),
+  ...(b.defeated ? { defeated: JSON.parse(JSON.stringify(b.defeated)) } : {}),
+  ...(b.defSnd ? { defSnd: b.defSnd } : {}),
+});
 
 /* Размещённый на карте босс — как анимация: центр/размер в px поля + радиус
    срабатывания реакций и звука ожидания. Ставится на любую ячейку. */
@@ -546,12 +567,13 @@ export interface PlacedAnim {
 
 /* ---------- Эффекты-спектакль (fx): разовые анимации на поле ----------
    tokenWin/tokenLose — 5-я/6-я анимация фишки (победа над заданием / поражение);
-   bossWin/bossLose — реакция босса. gate=true блокирует ход до fxDone/истечения:
+   bossWin/bossLose — реакция босса; bossDef — гибель босса (игрок победил его ячейку
+   и поставил своё). gate=true блокирует ход до fxDone/истечения:
    после победы окно выбора откроется ТОЛЬКО после анимации, после поражения ход
    уйдёт следующему игроку только после анимации. after — что сделать по завершении. */
 export interface GameFx {
   id: string;
-  kind: 'tokenWin' | 'tokenLose' | 'bossWin' | 'bossLose';
+  kind: 'tokenWin' | 'tokenLose' | 'bossWin' | 'bossLose' | 'bossDef';
   player: string; // чья фишка / кто спровоцировал
   cellIdx: number;
   bossId?: string; // для bossWin/bossLose
@@ -614,7 +636,7 @@ export interface GameSession {
      так же разбита и пуста). Работает во всех режимах. at — момент разбития (Date.now()
      хоста; клиенты считают «осколки» от локального момента появления — рассинхрон часов не страшен). */
   broken?: Record<number, { by: string; left: number; task?: TaskDef; at?: number }>;
-  bossDown?: Record<string, boolean>; // повержённые боссы (key — PlacedBoss.id): статичный кадр побеждённого
+  bossDown?: Record<string, boolean>; // повержённые боссы (key — PlacedBoss.id): замирают на последнем кадре клипа defeated (или win у старых)
   winner: string | null;
   log: string[];
   startedAt: number;

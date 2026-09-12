@@ -18,6 +18,11 @@ interface LoopEntry {
 const loops = new Map<string, LoopEntry>();
 let timer: number | null = null;
 let oneShot: HTMLAudioElement | null = null;
+/* ОДНОВРЕМЕННЫЕ разовые звуки (fx-спектакль): реакция босса и 5-я/6-я анимация фишки
+   стартуют В ОДИН момент (пауза delay у них одинаковая). Раньше playOneShot глушил
+   предыдущий разовый звук — фишкин звук заглушал босский (он в списке fx раньше),
+   и у босса слышали только idle. Набор overlap-звуков играет ПАРАЛЛЕЛЬНО. */
+const oneShots = new Set<HTMLAudioElement>();
 
 const baseVolume = () => Math.max(0, Math.min(1, useApp.getState().options.volume));
 
@@ -101,15 +106,24 @@ export function syncLoops(prefix: string, wanted: Map<string, string>, spd?: num
   ensureTimer();
 }
 
-/** Разовое проигрывание звука (превью в редакторе): новое запускается, старое глохнет. */
-export function playOneShot(src: string) {
-  stopOneShot();
+/** Разовое проигрывание звука. По умолчанию (превью в редакторе) новое глушит старое.
+    overlap: true — звук играет ПАРАЛЛЕЛЬНО другим (fx-спектакль: реакции боссов и
+    анимация фишки звучат одновременно, а не заглушают друг друга). */
+export function playOneShot(src: string, opts?: { overlap?: boolean }) {
+  if (!opts?.overlap) stopOneShot();
   const a = new Audio(src);
   a.volume = baseVolume();
-  oneShot = a;
+  if (opts?.overlap) {
+    oneShots.add(a);
+    a.onended = () => { oneShots.delete(a); };
+  } else {
+    oneShot = a;
+  }
   a.play().catch(() => { /* автоплей до жеста — молча */ });
 }
 
 export function stopOneShot() {
   if (oneShot) { oneShot.pause(); oneShot = null; }
+  for (const a of oneShots) a.pause();
+  oneShots.clear();
 }

@@ -827,8 +827,9 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     ctx.restore();
   }
 
-  // БОССЫ: анимации-персонажи на ячейках. Живой — играет idle (или реакцию fx ОДИН раз),
-  // повержённый — замер на статичном кадре побеждённого (последний кадр клипа win)
+  // БОССЫ: анимации-персонажи на ячейках. Живой — играет idle (или реакцию fx ОДИН раз,
+  // включая клип гибели bossDef); повержённый — замер на последнем кадре клипа defeated
+  // (у старых боссов без него — на последнем кадре win)
   const blibDraw = new Map((map.bossLib ?? []).map((b) => [b.id, b]));
   for (const pb of map.bosses ?? []) {
     const def = blibDraw.get(pb.bid);
@@ -854,8 +855,9 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     if (fxC && fxC.frames.length) {
       frames = fxC.frames; fps = fxC.fps; once = true; startMs = fxC.start;
     } else if (o.bossDown?.[pb.id]) {
-      frames = def.win.frames.length ? def.win.frames : def.idle.frames;
-      fps = def.win.frames.length ? def.win.fps : def.idle.fps;
+      const dclip = def.defeated && def.defeated.frames.length ? def.defeated : def.win;
+      frames = dclip.frames.length ? dclip.frames : def.idle.frames;
+      fps = dclip.frames.length ? dclip.fps : def.idle.fps;
       once = true; startMs = 0; // статичный кадр — берём последний
     } else {
       frames = def.idle.frames; fps = def.idle.fps;
