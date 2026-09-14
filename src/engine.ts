@@ -34,8 +34,7 @@ export type Action =
   | { t: 'quizTimeout' }
   | { t: 'quizDone'; id: string }
   | { t: 'cardAck'; id: string }
-  | { t: 'journeyMove'; id: string; x: number; y: number; dir?: TokenDir; mv?: boolean } // JOURNEY: позиция фишки активного игрока (авторитет — хост); mv=false — фишка встала
-  | { t: 'journeyEnd'; id: string } // JOURNEY: ход уходит дальше (кнопка убрана — шлёт авто-передача после 30 с без движения)
+  | { t: 'journeyMove'; id: string; x: number; y: number; dir?: TokenDir; mv?: boolean } // JOURNEY: позиция СВОЕЙ фишки — любой игрок ходит одновременно (авторитет — хост); mv=false — фишка встала
   | { t: 'fxDone'; id: string } // анимация fx (победа/поражение) у игрока закончилась — можно продолжать ход
   | { t: 'fxBreak'; id: string } // спектакль победы дошёл до разбития ячейки (пауза 1 с прошла — анимации начались)
 
@@ -71,6 +70,15 @@ function cellRectOf(map: GameMap, idx: number) {
     return { x: c.cx - w / 2, y: c.cy - h / 2, w, h };
   }
   return { x: c.x * CELL_PX, y: c.y * CELL_PX, w: (c.w || 1) * CELL_PX, h: (c.h || 1) * CELL_PX };
+}
+
+/* НЕВИДИМЫЕ СТЕНЫ (JOURNEY): точка (центр фишки) внутри стены?
+   Стены хранятся углом (x,y — левый верх) + размер; ходить можно везде, кроме них. */
+function pointInWall(map: GameMap, x: number, y: number): boolean {
+  for (const w of map.walls ?? []) {
+    if (x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h) return true;
+  }
+  return false;
 }
 
 export function newSession(code: string, mapId: string, hostId: string, hostName: string): GameSession {
@@ -154,6 +162,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     base.winner = base.winner ?? null;
     base.trades = Array.isArray(base.trades) ? base.trades : [];
     base.journeyPos = base.journeyPos ?? {};
+    if (base.skillDone !== undefined && !Array.isArray(base.skillDone)) base.skillDone = [];
     base.fxs = Array.isArray(base.fxs) ? base.fxs : [];
     base.broken = base.broken ?? {};
     base.bossDown = base.bossDown ?? {};
@@ -176,6 +185,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   if (s.rollOffWinner === undefined) s.rollOffWinner = null;
   if (!Array.isArray(s.log)) s.log = [];
   if (!Array.isArray(s.trades)) s.trades = [];
+  if (s.skillDone !== undefined && !Array.isArray(s.skillDone)) s.skillDone = [];
   if (s.journeyPos === undefined) s.journeyPos = {};
   if (!Array.isArray(s.fxs)) s.fxs = [];
   if (!s.broken) s.broken = {};
@@ -264,6 +274,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         delete s.broken![idx];
       }
     }
+    /* JOURNEY (новый): очередь ходов ОТСУТСТВУЕТ — после задания все фишки снова
+       ходят одновременно. turn остаётся на игроке только что сыгранного задания
+       (его камера, боссы, окно), передавать ход никому не нужно. */
+    if (map.mode === 'journey') return;
     nextTurn();
     /* SKILL CHALLENGE: хост выдержал лимит ходов с ресурсами — челлендж пройден */
     if (map.mode === 'skill' && s.phase === 'playing' && (s.turnNo ?? 1) > SKILL_TURNS) {
@@ -365,6 +379,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     if (!ch) return;
     const p = current();
     const cellNo = ch.cellIdx + 1;
+    /* SKILL CHALLENGE: ячейка «сыграна» (пройдена или пропущена) — задание на ней
+       больше не открывается: встав на неё, фишка сама поедет к следующей неигранной */
+    if (map.mode === 'skill' && !(s.skillDone ?? []).includes(ch.cellIdx)) {
+      s.skillDone = [...(s.skillDone ?? []), ch.cellIdx];
+    }
     p.secLeft = Math.max(0, p.secLeft - spentSec);
     p.triesLeft = Math.max(0, p.triesLeft - spentTries);
     const ownerId = s.captured[ch.cellIdx];
@@ -454,6 +473,47 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     const p = current();
     const cell = map.cells[p.pos];
     if (!cell) { endTurnNow(); return; }
+    /* SKILL CHALLENGE — каждый ход с заданием: встав на ячейку, которую уже
+       ПРОШЁЛ или ПРОПУСТИЛ (или на разбитую — она пуста), фишка АВТОМАТИЧЕСКИ
+       едет по дороге к следующей ячейке с неигранным заданием — и это видно
+       (ход анимируется, как обычное движение). Стрелка-прыжок на остановке
+       срабатывает как обычно. Если неигранных не осталось — передышка. */
+    const skillAutoNext = (): boolean => {
+      if (map.mode !== 'skill') return false;
+      const doneCells = s.skillDone ?? [];
+      if (!doneCells.includes(p.pos) && !s.broken?.[p.pos]) return false;
+      const fromName = posName(p.pos);
+      const isFree = (idx: number) => {
+        const cc = map.cells[idx];
+        return !!cc && cc.type === 'task' && !doneCells.includes(idx) && !s.broken?.[idx] && !!cellTaskOf(s, map, idx);
+      };
+      const path: number[] = [];
+      let c = p.pos;
+      const h0 = hopTargetOf(map, c); // прыжок-стрелка срабатывает на ОСТАНОВКЕ — мы остановились
+      if (h0 !== c) { path.push(h0); log(`↳ переход по стрелке → ${posName(h0)}`); c = h0; }
+      if (!isFree(c)) {
+        for (let g = 0; g < map.cells.length + 2; g++) {
+          c = stepNext(map, c);
+          if (c === p.pos || (path.length > 0 && path[path.length - 1] === c)) break; // обошли круг — неигранных нет
+          path.push(c);
+          if (isFree(c)) break;
+        }
+      }
+      if (isFree(c)) {
+        if (!path.length || path[path.length - 1] !== c) path.push(c);
+        const fh = hopTargetOf(map, c);
+        if (fh !== c && fh !== path[path.length - 1]) { path.push(fh); log(`↳ переход по стрелке → ${posName(fh)}`); }
+        s.moving = { player: p.id, path, ts: Date.now() };
+        p.pos = path[path.length - 1];
+        log(`⏭ ${p.name}: ${fromName} уже сыграна — фишка сама едет к следующему заданию (${posName(p.pos)})`);
+        return true;
+      }
+      log(`⏭ Все задания уже сыграны — ${fromName} просто передышка`);
+      s.notice = { text: 'Все задания карты уже пройдены или пропущены — передышка.', ts: Date.now() };
+      endTurnNow();
+      return true;
+    };
+    if (skillAutoNext()) return;
     /* РАЗБИТАЯ ЯЧЕЙКА считается ПУСТОЙ: задание не открывается, карточек и квиза нет —
        передышка, пока не восстановится (хозяин — победитель, он уже назначен). */
     if (s.broken?.[p.pos]) {
@@ -777,7 +837,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         if (soloSkill) p.spect = !p.isHost; // играет только хост — остальные смотрят
       }
       if (map.mode === 'journey') {
-        // фишки стартуют от стартовой ячейки; дальше ходят напрямую
+        // фишки ВСЕХ игроков стартуют ОДНОВРЕМЕННО от стартовой ячейки;
+        // жеребьёвки нет — панель «все стартуют одновременно» (готовность + выбор фишки)
         const sc = map.cells[startPos];
         const scx = sc ? (sc.cx ?? (sc.x + (sc.w || 1) / 2) * CELL_PX) : 0;
         const scy = sc ? (sc.cy ?? (sc.y + (sc.h || 1) / 2) * CELL_PX) : 0;
@@ -788,9 +849,13 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       s.rollOffIdx = 0;
       s.rollOffValues = {};
       s.rollOffReady = [];
+      s.skillDone = [];
+      if (map.mode === 'journey') s.rollOffWinner = s.players[0]?.id ?? null; // без бросков: сразу панель готовности
       log(soloSkill
         ? `🧨 SKILL CHALLENGE! Играет только хост — лимит ${SKILL_TURNS} ходов. Остальные — зрители.`
-        : `Игра начинается! У каждого: ${sm} мин и ${st} поп. Бросок за первый ход…`);
+        : map.mode === 'journey'
+          ? `🧭 JOURNEY! У каждого: ${sm} мин и ${st} поп. Все фишки стартуют ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, тот и играет.`
+          : `Игра начинается! У каждого: ${sm} мин и ${st} поп. Бросок за первый ход…`);
       break;
     }
     case 'roll': {
@@ -887,9 +952,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       break;
     }
     case 'rollOffReady': {
-      // игрок подтвердил, что готов начать игру после жеребьёвки;
-      // старт происходит, когда готовы ВСЕ игроки
-      if (s.phase !== 'rollOff' || !s.rollOffWinner) break;
+      // игрок подтвердил, что готов начать игру; старт происходит, когда готовы ВСЕ.
+      // В JOURNEY жеребьёвки нет — панель готовности открывается сразу после старта
+      if (s.phase !== 'rollOff') break;
+      if (!s.rollOffWinner && map.mode !== 'journey') break;
       const p = actor();
       if (!p) break;
       /* фишки партии: пока игрок не взял свою фишку из набора карты — готовым не считается */
@@ -901,8 +967,12 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       }
       if (s.players.filter((pl) => !pl.spect).every((pl) => (s.rollOffReady ?? []).includes(pl.id))) {
         s.phase = 'playing';
-        const w = s.players.find((pl) => pl.id === s.rollOffWinner);
-        log(`🚀 Все готовы! Игра началась — ход ${w?.name ?? '—'}`);
+        if (map.mode === 'journey') {
+          log('🚀 Все готовы! Фишки пошли ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, у того и откроется задание');
+        } else {
+          const w = s.players.find((pl) => pl.id === s.rollOffWinner);
+          log(`🚀 Все готовы! Игра началась — ход ${w?.name ?? '—'}`);
+        }
       }
       break;
     }
@@ -916,16 +986,21 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       resolveLanding();
       break;
     }
-    /* ---------- JOURNEY: прямое управление фишкой ---------- */
+    /* ---------- JOURNEY: прямое управление фишкой — ВСЕ ИГРОКИ ОДНОВРЕМЕННО ---------- */
     case 'journeyMove': {
       if (s.phase !== 'playing' || map.mode !== 'journey') break;
-      const p = current();
-      if (!p || p.id !== a.id || p.spect) break;
+      /* НОВЫЙ JOURNEY: очередь ходов отсутствует — каждый игрок ведёт СВОЮ фишку
+         (авторитет проверок — хост). Зритель и выбывший не ходят. */
+      const p = s.players.find((x) => x.id === a.id);
+      if (!p || p.spect || !p.alive) break;
       if (s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost || gatingFx()) break;
       const mszW = map.mw ?? map.cols * CELL_PX;
       const mszH = map.mh ?? map.rows * CELL_PX;
       const x = Math.max(0, Math.min(mszW, Number(a.x) || 0));
       const y = Math.max(0, Math.min(mszH, Number(a.y) || 0));
+      /* НЕВИДИМЫЕ СТЕНЫ: фишка не может зайти в стену (клиент скользит по стене сам —
+         сюда точка внутри стены попадает только при рассинхроне) */
+      if (pointInWall(map, x, y)) break;
       const prev = s.journeyPos?.[p.id] ?? null;
       /* защита от телепортаций: одно обновление не дальше 2.5 клеток от прошлой позиции.
          СТОП-обновление (mv=false) принимаем всегда — игрок реально стоит в этой точке,
@@ -934,8 +1009,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (prev && !stopped && Math.hypot(x - prev.x, y - prev.y) > CELL_PX * 2.5) break;
       s.journeyPos = s.journeyPos ?? {};
       s.journeyPos[p.id] = { x, y, dir: a.dir, ts: Date.now(), mv: a.mv !== false };
-      /* пересёк ячейку? вход = прошлый центр был ВНЕ прямоугольника, новый — ВНУТРИ.
-        Задание открывается сразу — «всё как раньше», выбор попытки/времени */
+      /* пересёк ячейку задания? вход = прошлый центр был ВНЕ прямоугольника, новый — ВНУТРИ.
+        КТО ПЕРВЫЙ пересёк — у того и задание: turn = этот игрок (все фишки замирают,
+        остальные смотрят трансляцию — «всё как всегда»); после задания все снова ходят. */
       if (!s.challenge) {
         for (let i = 0; i < map.cells.length; i++) {
           const c = map.cells[i];
@@ -951,24 +1027,16 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           if (!cellTaskOf(s, map, i)) continue; // задания нет — обычная ячейка
           p.pos = i;
           if (!s.revealed.includes(i)) s.revealed.push(i);
+          s.turn = Math.max(0, s.players.indexOf(p)); // игрок задания — «текущий»: камера/боссы/окно на нём
           s.challenge = {
             cellIdx: i, mode: null, started: false, paused: false, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
             status: 'choose', approvals: [], violations: [], lowStart: false,
           };
           const owner = s.captured[i] ? s.players.find((pl) => pl.id === s.captured[i]) : null;
-          log(`🎯 ${p.name}: задание на ячейке ${posName(i)}${owner ? ` (хозяин ${owner.name})` : ''}`);
+          log(`🎯 ${p.name} ПЕРВЫМ пересёк ячейку ${posName(i)} — задание его!${owner ? ` (хозяин ${owner.name})` : ''}`);
           break;
         }
       }
-      break;
-    }
-    case 'journeyEnd': {
-      if (s.phase !== 'playing' || map.mode !== 'journey') break;
-      const p = current();
-      if (!p || p.id !== a.id || p.spect) break;
-      if (s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost || gatingFx()) break;
-      log(`➡ ${p.name} передаёт ход`);
-      endTurnNow();
       break;
     }
     case 'fxDone': {

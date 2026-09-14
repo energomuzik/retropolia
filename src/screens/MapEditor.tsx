@@ -8,7 +8,7 @@ import {
 import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimDef, BossAnimDef, CellDef, CellType, GameMap, PlacedAnim, PlacedBoss, Stamp, TokenDef, TileGroup, TileImg } from '../types';
+import type { AnimDef, BossAnimDef, CellDef, CellType, GameMap, PlacedAnim, PlacedBoss, Stamp, TokenDef, TileGroup, TileImg, WallRect } from '../types';
 import { bossLibEntryOf, MAP_MODES } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
@@ -96,7 +96,7 @@ function migrateMap(m: GameMap, libTiles: { id: string; dataUrl: string; gw: num
 
 /* ---------- инструменты ---------- */
 
-type Tool = 'select' | 'tile' | 'cell' | 'link' | 'hop' | 'anim' | 'boss' | 'erase' | 'pan';
+type Tool = 'select' | 'tile' | 'cell' | 'link' | 'hop' | 'anim' | 'boss' | 'wall' | 'erase' | 'pan';
 
 const TOOLS: { key: Tool; label: string; hint: string }[] = [
   { key: 'select', label: 'Выбор', hint: 'клик — выбрать тайл/ячейку/анимацию и тянуть мышью · пустое место — двигать камеру' },
@@ -106,7 +106,8 @@ const TOOLS: { key: Tool; label: string; hint: string }[] = [
   { key: 'hop', label: 'Переход', hint: 'ВТОРАЯ стрелка: клик по ячейке А, затем по Б — когда фишка ОСТАНОВИТСЯ на А, она прыгнет на Б (выход из круга, штраф-телепорт). Клик по той же ячейке — убрать' },
   { key: 'anim', label: 'Анимация', hint: 'выберите анимацию в левой панели, кликните по карте — поставится проигрыватель анимации. Клик по уже стоящей — выбрать и тянуть' },
   { key: 'boss', label: 'Босс', hint: 'вшейте босса в карту (спойлер «Боссы» слева), выберите его и кликните по карте — босс встанет на ячейку: живёт (idle), реагирует на победы/поражения игроков в радиусе' },
-  { key: 'erase', label: 'Ластик', hint: 'клик или протяни с зажатой кнопкой — убирает ТАЙЛЫ под курсором. Ячейки и анимации ластик не трогает: выдели и нажми Delete' },
+  { key: 'wall', label: 'Стена', hint: 'НЕВИДИМАЯ стена (только JOURNEY): протяните прямоугольник — фишка не сможет зайти внутрь. Клик по стене — выбрать и тянуть. В игре стены НЕ видны' },
+  { key: 'erase', label: 'Ластик', hint: 'клик или протяни с зажатой кнопкой — убирает ТАЙЛЫ под курсором. Ячейки, анимации и стены ластик не трогает: выдели и нажми Delete' },
   { key: 'pan', label: 'Рука', hint: 'двигать камеру (колесо — зум под курсором)' },
 ];
 
@@ -153,6 +154,8 @@ export default function MapEditor() {
   const [selAnim, setSelAnim] = useState<string | null>(null); // выбранная размещённая анимация
   const [placeBossId, setPlaceBossId] = useState(''); // вшитый босс, выбранный для размещения
   const [selBoss, setSelBoss] = useState<string | null>(null); // выбранный размещённый босс
+  const [selWall, setSelWall] = useState<number | null>(null); // выбранная стена (индекс)
+  const [wallsOpen, setWallsOpen] = useState(true); // спойлер «Стены» в левой панели
   const [extract, setExtract] = useState<{ file: File; src: string; name: string; busy: boolean; bgMode: 'auto' | 'custom'; bg: string; foundBg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; tiles: TileImg[] } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -166,7 +169,8 @@ export default function MapEditor() {
   const viewRef = useRef(view); viewRef.current = view;
   const mapRef = useRef(map); mapRef.current = map;
   const dragRef = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
-  const objDragRef = useRef<{ kind: 'cell' | 'stamp' | 'anim' | 'boss'; idx: number; dx: number; dy: number; moved: boolean } | null>(null);
+  const objDragRef = useRef<{ kind: 'cell' | 'stamp' | 'anim' | 'boss' | 'wall'; idx: number; dx: number; dy: number; moved: boolean } | null>(null);
+  const wallDragRef = useRef<{ sx: number; sy: number; ex: number; ey: number } | null>(null); // протягивание НОВОЙ стены
   const resizeRef = useRef<{ kind: 'stamp' | 'anim' | 'boss'; idx: number } | null>(null); // ресайз тайла/анимации/босса за уголок
   const downRef = useRef<{ x: number; y: number } | null>(null);
   const lastPlaceRef = useRef<{ x: number; y: number } | null>(null);
@@ -366,6 +370,75 @@ export default function MapEditor() {
       // номера — по порядку создания, стрелки/метки на них не влияют — перенумерация не нужна
       return { ...m, cells } as GameMap;
     });
+
+  /* ---------- НЕВИДИМЫЕ СТЕНЫ (только JOURNEY): зоны «куда фишке нельзя» ----------
+     Работают ТОЛЬКО в режиме journey — при создании карты редактор проверит режим.
+     Стена — прямоугольник в px поля (x,y — левый верх). В игре НЕ рисуется. */
+  const updWall = (idx: number, patch: Partial<WallRect>) =>
+    setMap((m) => {
+      if (!m || !m.walls || !m.walls[idx]) return m;
+      const arr = m.walls.slice();
+      arr[idx] = { ...arr[idx], ...patch };
+      return { ...m, walls: arr };
+    });
+  const wallAtPoint = (m: GameMap, wx: number, wy: number): number => {
+    const ws = m.walls ?? [];
+    for (let i = ws.length - 1; i >= 0; i--) {
+      const w = ws[i];
+      if (wx >= w.x && wx < w.x + w.w && wy >= w.y && wy < w.y + w.h) return i;
+    }
+    return -1;
+  };
+  const removeWall = (idx: number) => {
+    const m = mapRef.current;
+    if (m && m.walls?.[idx]) {
+      const snap = m.walls[idx];
+      rememberDeleted({
+        label: 'стену с карты',
+        restore: async () => {
+          setMap((mm) => {
+            if (!mm || mm.id !== m.id) return mm;
+            const arr = (mm.walls ?? []).slice();
+            arr.splice(Math.min(idx, arr.length), 0, snap);
+            return { ...mm, walls: arr };
+          });
+          const cur = await idbGet<GameMap>('maps', m.id);
+          if (cur) {
+            const arr = (cur.walls ?? []).slice();
+            arr.splice(Math.min(idx, arr.length), 0, snap);
+            await idbPut('maps', m.id, { ...cur, walls: arr, updatedAt: Date.now() });
+            await useApp.getState().refresh();
+          }
+        },
+      });
+    }
+    setMap((mm) => (mm ? { ...mm, walls: (mm.walls ?? []).filter((_, i) => i !== idx) } : mm));
+    setSelWall(null);
+    dirtyRef.current = true;
+    sfx.fail();
+  };
+  const removeAllWalls = () => {
+    const m = mapRef.current;
+    const cnt = m?.walls?.length ?? 0;
+    if (!cnt) return;
+    const snap = m!.walls!;
+    rememberDeleted({
+      label: `все стены (${cnt})`,
+      restore: async () => {
+        setMap((mm) => (mm && mm.id === m!.id ? { ...mm, walls: snap.slice() } : mm));
+        const cur = await idbGet<GameMap>('maps', m!.id);
+        if (cur) {
+          await idbPut('maps', m!.id, { ...cur, walls: snap.slice(), updatedAt: Date.now() });
+          await useApp.getState().refresh();
+        }
+      },
+    });
+    setMap((mm) => (mm ? { ...mm, walls: [] } : mm));
+    setSelWall(null);
+    dirtyRef.current = true;
+    sfx.fail();
+    toast(`Удалены все стены (${cnt}) — вернуть можно кнопкой «Вернуть»`, 'err');
+  };
   const updStamp = (idx: number, patch: Partial<Stamp>) =>
     setMap((m) => {
       if (!m || !m.stamps || !m.stamps[idx]) return m;
@@ -1057,6 +1130,24 @@ export default function MapEditor() {
       }
       return;
     }
+    if (tool === 'wall') {
+      // клик по существующей стене — выбрать и тянуть; иначе рисуем НОВУЮ протягиванием
+      const wi = wallAtPoint(m, w.x, w.y);
+      if (wi >= 0) {
+        const wl = (m.walls ?? [])[wi];
+        objDragRef.current = { kind: 'wall', idx: wi, dx: w.x - wl.x, dy: w.y - wl.y, moved: false };
+        setSelWall(wi);
+        setSelCell(null);
+        setSelStamp(null);
+        setSelAnim(null);
+        setSelBoss(null);
+        sfx.hover();
+        return;
+      }
+      setSelWall(null);
+      wallDragRef.current = { sx: w.x, sy: w.y, ex: w.x, ey: w.y };
+      return;
+    }
   };
 
   /* стереть верхний тайл под точкой (для ластика) */
@@ -1119,7 +1210,14 @@ export default function MapEditor() {
       if (od.kind === 'cell') updCell(od.idx, { cx: Math.round(p.x), cy: Math.round(p.y) });
       else if (od.kind === 'anim') updAnim(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
       else if (od.kind === 'boss') updBoss(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
+      else if (od.kind === 'wall') updWall(od.idx, { x: Math.round(w.x - od.dx), y: Math.round(w.y - od.dy) }); // стены — без привязки к сетке
       else updStamp(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
+      return;
+    }
+    if (wallDragRef.current) {
+      // протягиваем НОВУЮ стену — обновляем второй угол (рисуется в цикле отрисовки)
+      wallDragRef.current.ex = w.x;
+      wallDragRef.current.ey = w.y;
       return;
     }
     if (tool === 'erase' && e.buttons === 1) {
@@ -1145,6 +1243,25 @@ export default function MapEditor() {
     objDragRef.current = null;
     resizeRef.current = null;
     lastPlaceRef.current = null;
+    /* СТЕНА: фиксируем протянутый прямоугольник (минимум 12×12 px);
+       отрицательные размеры нормализуем (протягивание вверх/влево) */
+    const wd = wallDragRef.current;
+    wallDragRef.current = null;
+    if (wd) {
+      const wx = Math.round(Math.min(wd.sx, wd.ex));
+      const wy = Math.round(Math.min(wd.sy, wd.ey));
+      const ww = Math.round(Math.abs(wd.ex - wd.sx));
+      const wh = Math.round(Math.abs(wd.ey - wd.sy));
+      if (ww >= 12 && wh >= 12 && mapRef.current) {
+        const newIdx = (mapRef.current.walls ?? []).length;
+        const wl: WallRect = { x: wx, y: wy, w: ww, h: wh };
+        setMap((mm) => (mm ? { ...mm, walls: [...(mm.walls ?? []), wl] } : mm));
+        setSelWall(newIdx);
+        dirtyRef.current = true;
+        sfx.step();
+        toast('Стена готова: в игре она НЕВИДИМА — фишка не сможет зайти внутрь (действует в JOURNEY)', 'ok');
+      }
+    }
     void persistIfDirty();
   };
 
@@ -1163,7 +1280,7 @@ export default function MapEditor() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') return;
-      if (e.key === 'Escape') { setLinkFrom(null); setSelCell(null); setSelStamp(null); setSelAnim(null); setSelBoss(null); setPlaceAnimId(''); return; }
+      if (e.key === 'Escape') { setLinkFrom(null); setSelCell(null); setSelStamp(null); setSelAnim(null); setSelBoss(null); setSelWall(null); setPlaceAnimId(''); return; }
       if (!map) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (e.repeat) return; // удержание обрабатывает useKeyDelete (режим «долгое нажатие»)
@@ -1176,6 +1293,8 @@ export default function MapEditor() {
         } else if (selBoss) {
           const b = (map.bosses ?? []).find((x) => x.id === selBoss);
           keyDel.keyDeleteStart(`босса «${(map.bossLib ?? []).find((x) => x.id === b?.bid)?.name ?? 'с карты'}»`, () => removeBossAt(selBoss));
+        } else if (selWall !== null && (map.walls ?? [])[selWall]) {
+          keyDel.keyDeleteStart('стену с карты', () => removeWall(selWall));
         } else if (selCell !== null) {
           keyDel.keyDeleteStart('ячейку маршрута', () => deleteCell(selCell));
         }
@@ -1247,6 +1366,37 @@ export default function MapEditor() {
           for (let y = 0; y <= m.mh!; y += CELL) {
             ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(m.mw!, y); ctx.stroke();
           }
+        }
+
+        // НЕВИДИМЫЕ СТЕНЫ: коралловая штриховка — видна ТОЛЬКО в редакторе (в игре их нет)
+        const drawWallRect = (x: number, y: number, w: number, h: number, selected: boolean) => {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x, y, w, h);
+          ctx.clip();
+          ctx.fillStyle = 'rgba(255,93,115,0.13)';
+          ctx.fillRect(x, y, w, h);
+          ctx.strokeStyle = 'rgba(255,93,115,0.45)';
+          ctx.lineWidth = 1.5 / v.zoom;
+          const step = 14;
+          for (let d = -h; d < w; d += step) {
+            ctx.beginPath();
+            ctx.moveTo(x + d, y);
+            ctx.lineTo(x + d + h, y + h);
+            ctx.stroke();
+          }
+          ctx.restore();
+          ctx.strokeStyle = selected ? '#ffcf3f' : 'rgba(255,93,115,0.85)';
+          ctx.lineWidth = (selected ? 3 : 2) / v.zoom;
+          ctx.strokeRect(x, y, w, h);
+        };
+        for (let wi = 0; wi < (m.walls ?? []).length; wi++) {
+          const wl = m.walls![wi];
+          drawWallRect(wl.x, wl.y, wl.w, wl.h, selWall === wi);
+        }
+        if (wallDragRef.current) {
+          const wd = wallDragRef.current;
+          drawWallRect(Math.min(wd.sx, wd.ex), Math.min(wd.sy, wd.ey), Math.abs(wd.ex - wd.sx), Math.abs(wd.ey - wd.sy), true);
         }
 
         // выделенный штамп: рамка с учётом поворота + жёлтые угловые ручки (ресайз)
@@ -1348,7 +1498,7 @@ export default function MapEditor() {
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [legacyTileById, showGrid, selCell, selStamp, selStampIdx, selAnim, linkFrom, hoverW, tileId]);
+  }, [legacyTileById, showGrid, selCell, selStamp, selStampIdx, selAnim, linkFrom, hoverW, tileId, selWall]);
 
   /* ─── панели ─── */
   const saveMap = async () => {
@@ -1373,6 +1523,23 @@ export default function MapEditor() {
     if (starts > 1) {
       sfx.fail();
       toast('Стартовая ячейка должна быть ОДНА — лишние переключите в другой тип', 'err');
+      return;
+    }
+    /* SKILL CHALLENGE: каждый ход — задание. Ячейки квизов/бонусов/штрафов/отдыха запрещены */
+    if ((map.mode ?? 'classic') === 'skill') {
+      const bad = map.cells.filter((c) => c.type === 'quiz' || c.type === 'bonus' || c.type === 'trap' || c.type === 'rest').length;
+      if (bad > 0) {
+        sfx.fail();
+        toast(`SKILL CHALLENGE: каждый ход должен быть с заданием — на карте ${bad} яч. квизов/бонусов/штрафов/отдыха. Измените режим карты или уберите эти ячейки`, 'err');
+        return;
+      }
+    }
+    /* НЕВИДИМЫЕ СТЕНЫ работают только в JOURNEY: карта со стенами в другом режиме не завершается.
+     Удалить все стены разом — кнопка в левой панели «Невидимые стены» */
+    const wallCnt = (map.walls ?? []).length;
+    if (wallCnt > 0 && (map.mode ?? 'classic') !== 'journey') {
+      sfx.fail();
+      toast(`На карте ${wallCnt} невидимых стен, но они работают только в JOURNEY. Измените режим игры на JOURNEY или удалите все стены (кнопка «Удалить все стены разом» в панели слева)`, 'err');
       return;
     }
     await persist(map);
@@ -1705,6 +1872,33 @@ export default function MapEditor() {
 
               <div>
                 <button
+                  onClick={() => setWallsOpen((v) => !v)}
+                  className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
+                  title={wallsOpen ? 'Свернуть' : 'Развернуть'}
+                >
+                  <span className={`text-[10px] shrink-0 ${wallsOpen ? 'text-gold' : 'text-faint'}`}>{wallsOpen ? '▾' : '▸'}</span>
+                  <span className="tick-label">Невидимые стены · {(map.walls ?? []).length}</span>
+                </button>
+                {wallsOpen && (
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] text-faint leading-tight">Зоны, куда фишка НЕ может зайти («невидимые стены» в играх). Ходить изначально можно ВЕЗДЕ — стены только исключения. Инструмент «Стена»: протяните прямоугольник по полю. В игре стены не рисуются.</p>
+                    <p className={`text-[10px] leading-tight border-2 px-2 py-1.5 ${(map.mode ?? 'classic') === 'journey' ? 'text-teal border-teal/40' : 'text-magma border-magma/40'}`}>
+                      {(map.mode ?? 'classic') === 'journey'
+                        ? 'Режим JOURNEY — стены активны: фишки не смогут их пересечь.'
+                        : 'Стены работают ТОЛЬКО в JOURNEY: с любым другим режимом карту не завершить — смените режим или удалите все стены.'}
+                    </p>
+                    {(map.walls ?? []).length > 0 && (
+                      <>
+                        <p className="text-[10px] text-dim leading-tight">Клик по стене — выбрать и тянуть, Delete — удалить выбранную. Можно убрать все стены одной кнопкой:</p>
+                        <PxBtn color="coral" small className="w-full" onClick={removeAllWalls}>{Ic.trash(12)} Удалить все стены разом</PxBtn>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <button
                   onClick={() => setTokOpen((v) => !v)}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
                   title={tokOpen ? 'Свернуть' : 'Развернуть'}
@@ -1935,6 +2129,7 @@ export default function MapEditor() {
                 {tool === 'link' && <div className="text-gold font-pixel text-[8px]">СТРЕЛКА: клик по ячейке А, затем по Б · Esc — отмена{linkFrom !== null ? ' · выбрана А, жмите Б' : ''}</div>}
                 {tool === 'hop' && <div className="text-coral font-pixel text-[8px]">ПЕРЕХОД: клик по ячейке А, затем по Б — при остановке на А фишка прыгнет на Б · Esc — отмена{linkFrom !== null ? ' · выбрана А, жмите Б' : ''}</div>}
                 {tool === 'erase' && <div className="text-coral font-pixel text-[8px]">ЛАСТИК: клик или тяните с кнопкой — стирает ТАЙЛЫ под курсором · ячейки не трогает</div>}
+                {tool === 'wall' && <div className="text-coral font-pixel text-[8px]">СТЕНА: протяните прямоугольник — фишка не зайдёт внутрь (работает ТОЛЬКО в JOURNEY, в игре невидима) · клик по стене — выбрать и тянуть · Delete — удалить</div>}
               </div>
               <div className="absolute bottom-3 right-3 tick-label text-faint text-right pointer-events-none">
                 колесо — зум · ПКМ — камера · Delete — удалить (по режиму из Опций) · R — поворот · жёлтый угол тайла — размер

@@ -15,14 +15,19 @@ import {
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
-import { PLAYER_COLORS, SKIP_COST, SKILL_TURNS, JOURNEY_AUTO_PASS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf } from '../types';
-import type { AnimClip, CardDef, ChaosKind, TaskDef, TokenDir } from '../types';
+import { PLAYER_COLORS, SKIP_COST, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf } from '../types';
+import type { AnimClip, CardDef, ChaosKind, GameMap, TaskDef, TokenDir } from '../types';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
 import { startLoop, stopLoop, syncLoops, stopGroup, killGroup, stopOneShot, playOneShot } from '../loopsnd';
 
 /* единичные векторы направлений фишки — для расчёта хода чужой фишки со СКОРОСТЬЮ КАРТЫ */
 const DIRV: Record<TokenDir, [number, number]> = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+
+/* НЕВИДИМЫЕ СТЕНЫ (JOURNEY): точка (центр фишки) внутри прямоугольника стены?
+   Стены в игре НЕ рисуются — фишка просто не проходит сквозь них, скользя по краю. */
+const inWall = (m: GameMap, x: number, y: number): boolean =>
+  (m.walls ?? []).some((w) => x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h);
 
 export default function GameScreen() {
   const st = useApp();
@@ -138,13 +143,11 @@ export default function GameScreen() {
   /* ЛОКАЛЬНЫЙ момент появления разбитых ячеек — для короткой анимации осколков
      (считаем от своего clock: рассинхрон часов хоста не ломает анимацию) */
   const brokenAtRef = useRef<Record<number, number>>({});
-  /* ---------- JOURNEY: стрелки ДЖОЙСТИКА (геймпад) + авто-передача хода ---------- */
+  /* ---------- JOURNEY: стрелки ДЖОЙСТИКА (геймпад) ---------- */
   const journeyPadRef = useRef<Set<TokenDir>>(new Set());
-  const journeyLastMoveRef = useRef(Date.now());
   /* чужие фишки JOURNEY (трансляция): якорь (последняя авторитетная точка), направление,
      флаг «идёт» и точная скорость карты (px/с). Апдейты (~6/с) лишь ПОДТВЕРЖДАЮТ движение */
   const journeyRemote = useRef<Record<string, { ax: number; ay: number; vx: number; vy: number; t: number; dir?: TokenDir; mv: boolean }>>({});
-  const [autoPassLeft, setAutoPassLeft] = useState(JOURNEY_AUTO_PASS);
 
   const mePlayer = s?.players.find((p) => p.id === me);
   const active = s ? s.players[s.turn % s.players.length] : null;
@@ -525,6 +528,10 @@ export default function GameScreen() {
            В МОМЕНТ старта клипов у ИГРОКА-виновника шлётся fxBreak (ячейка разлетается
            осколками); когда клип доиграл (с учётом «послевкусия») — шлём fxDone. */
         const fxList = sess.fxs ?? [];
+        /* JOURNEY: «свободный режим» — очереди ходов нет, все фишки ходят одновременно.
+           Пока идёт задание/окно карточки/квиз/анимация победы — фишки ВСЕХ стоят:
+           задание в прямом эфире смотрят все (после него снова свободный ход). */
+        const journeyFree = journeyMode && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate);
         for (const fx of fxList) if (!fxStartRef.current.has(fx.id)) fxStartRef.current.set(fx.id, t + (fx.delay ?? 0));
         if (fxStartRef.current.size > fxList.length) {
           const ids = new Set(fxList.map((f) => f.id));
@@ -548,18 +555,19 @@ export default function GameScreen() {
           let d = dispRef.current[p.id];
           if (!d) { d = { ...center }; dispRef.current[p.id] = d; }
 
-          /* ---------- JOURNEY: фишки ходят НАПРЯМУЮ, без кубиков ----------
-             Своя фишка в свой ход — локальная симуляция (мгновенный отклик,
-             апдейты хосту ~6 раз/с). Остальные фишки плавно догоняют авторитетную
-             позицию из сети и играют походку по последнему направлению. */
+          /* ---------- JOURNEY: фишки ходят НАПРЯМУЮ, БЕЗ ОЧЕРЕДИ ХОДОВ ----------
+             НОВЫЙ JOURNEY: ВСЕ игроки двигают свои фишки ОДНОВРЕМЕННО — своя фишка
+             всегда локальная симуляция (мгновенный отклик, апдейты хосту ~6 раз/с).
+             Чужие фишки плавно идут от авторитетной позиции из сети. Пока идёт
+             задание одного из игроков — все фишки стоят, ходит только задание. */
           if (journeyMode) {
             const jp = sess.journeyPos?.[p.id];
             let jdir: TokenDir | undefined;
-            if (p.id === me && act?.id === me && p.alive && !p.spect) {
+            if (p.id === me && p.alive && !p.spect) {
               let self = journeySelf.current;
               if (!self) self = journeySelf.current = { x: jp?.x ?? center.x, y: jp?.y ?? center.y, dir: undefined, moving: false, dirty: false, lastSent: 0 };
               let vx = 0, vy = 0;
-              const canWalk = !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate);
+              const canWalk = sess.phase === 'playing' && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate);
               if (canWalk) {
                 for (const kd of [...journeyKeys.current, ...journeyPadRef.current]) {
                   if (kd === 'up') vy -= 1; else if (kd === 'down') vy += 1;
@@ -570,13 +578,16 @@ export default function GameScreen() {
               if (walking) {
                 const len = Math.hypot(vx, vy);
                 const spd = cps * CELL * (dt / 60); // px за кадр — скорость из карты
-                self.x = Math.max(8, Math.min((mszJ?.w ?? 2048) - 8, self.x + (vx / len) * spd));
-                self.y = Math.max(8, Math.min((mszJ?.h ?? 2048) - 8, self.y + (vy / len) * spd));
+                // НЕВИДИМЫЕ СТЕНЫ: пробуем ось X и ось Y отдельно — фишка СКОЛЬЗИТ по стене,
+                // а не залипает в ней; центр фишки не заходит внутрь прямоугольника стены
+                const nx = Math.max(8, Math.min((mszJ?.w ?? 2048) - 8, self.x + (vx / len) * spd));
+                const ny = Math.max(8, Math.min((mszJ?.h ?? 2048) - 8, self.y + (vy / len) * spd));
+                if (!inWall(m, nx, self.y)) self.x = nx;
+                if (!inWall(m, self.x, ny)) self.y = ny;
                 self.dir = Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? 'right' : 'left') : (vy > 0 ? 'down' : 'up');
                 self.moving = true;
                 self.dirty = true;
                 jdir = self.dir;
-                journeyLastMoveRef.current = Date.now(); // авто-передача хода отсчитывается ОТ последнего движения
               } else {
                 self.moving = false;
               }
@@ -616,7 +627,7 @@ export default function GameScreen() {
               d.x += (exX - d.x) * Math.min(1, 0.16 * dt);
               d.y += (exY - d.y) * Math.min(1, 0.16 * dt);
               jdir = fresh && rj.mv ? rj.dir : undefined; // идёт — походка по направлению; стоит — idle
-              if (p.id === act?.id && fresh && rj.mv) anyoneMoving = true;
+              if (journeyFree && p.id === act?.id && fresh && rj.mv) anyoneMoving = true;
             }
             const tokDefJ = p.tokenKey ? mapToks.find((x) => x.id === p.tokenKey) : null;
             const tokSizeJ = tokDefJ ? (tokDefJ.size ?? (tokDefJ.anim ? 64 : 34)) : (p.tokenSize ?? 34);
@@ -634,6 +645,7 @@ export default function GameScreen() {
               img: p.tokenImg ?? null,
               anim: tokDefJ?.anim,
               dir: jdir,
+              mv: jdir !== undefined, // идёт СЕЙЧАС — только у идущей фишки покачивание (на месте фишка стоит ровно)
               phase: pi * 0.53,
               size: tokSizeJ,
               override: fxAClip?.frames.length ? fxAClip : undefined,
@@ -744,6 +756,7 @@ export default function GameScreen() {
             img: p.tokenImg ?? null,
             anim: tokDef?.anim,
             dir,
+            mv: movingNow, // покачивание в пути; стоя на ячейке, фишка НЕ «плавает»
             phase: pi * 0.53,
             size: tokSize,
             override: fxBClip?.frames.length ? fxBClip : undefined,
@@ -757,7 +770,10 @@ export default function GameScreen() {
           const fv = fitView(m, w, h);
           goal = { x: fv.x + worldPanRef.current.x, y: fv.y + worldPanRef.current.y, zoom: fv.zoom * worldZoom };
         } else {
-          const followP = act ? dispRef.current[act.id] : undefined;
+          /* JOURNEY: в свободном режиме каждый следит за СВОЕЙ фишкой (ходят одновременно);
+             пока идёт задание — камера у всех на игроке задания (трансляция, как всегда) */
+          const followId = journeyMode && journeyFree ? me : act?.id;
+          const followP = followId ? dispRef.current[followId] : undefined;
           const baseZx = Math.min(2.1, Math.max(0.7, Math.min(w, h) / (CELL * 7.2)));
           const focus = anyoneMoving ? 1.5 : 1.0; // приближаемся, пока фишку передвигают
           const zx = Math.min(2.6, baseZx * focus);
@@ -814,7 +830,7 @@ export default function GameScreen() {
           view: v, width: w, height: h,
           tileById: tileMapRef.current,
           captured: sess.captured, colorById,
-          currentCell: sess.phase === 'playing' && act ? act.pos : null,
+          currentCell: sess.phase === 'playing' && act && !(journeyMode && journeyFree) ? act.pos : null,
           showNumbers: options.showCellNumbers,
           tokens, time: t, hoverCell: null,
           mystery: mysteryRef.current,
@@ -1035,31 +1051,10 @@ export default function GameScreen() {
     return () => { clearInterval(iv); journeyPadRef.current.clear(); };
   }, [isJourney]);
 
-  /* ---------- JOURNEY: авто-передача хода (отдельной кнопки передачи больше нет) ----------
-     Стоите на месте 30 секунд (JOURNEY_AUTO_PASS) — ход уходит следующему игроку сам.
-     Отсчёт сбрасывается движением фишки, сменой хода и любым событием партии. */
-  useEffect(() => {
-    if (!isJourney) return;
-    journeyLastMoveRef.current = Date.now();
-    setAutoPassLeft(JOURNEY_AUTO_PASS);
-    const iv = window.setInterval(() => {
-      const cur = useApp.getState();
-      const sess = cur.session;
-      const actP = sess && sess.phase === 'playing' ? sess.players[sess.turn % sess.players.length] : null;
-      if (!actP || actP.id !== cur.selfId) { setAutoPassLeft(JOURNEY_AUTO_PASS); return; }
-      const blocked = !!sess && !!(sess.moving || sess.challenge || sess.pendingCard || sess.quiz || sess.awaitPost || (sess.fxs ?? []).some((f) => f.gate));
-      if (blocked) { journeyLastMoveRef.current = Date.now(); setAutoPassLeft(JOURNEY_AUTO_PASS); return; }
-      const left = Math.max(0, JOURNEY_AUTO_PASS - Math.floor((Date.now() - journeyLastMoveRef.current) / 1000));
-      setAutoPassLeft(left);
-      if (left <= 0) {
-        journeyLastMoveRef.current = Date.now(); // следующая попытка — снова через полный интервал
-        journeyKeys.current.clear();
-        journeyPadRef.current.clear();
-        dispatch({ t: 'journeyEnd', id: cur.selfId });
-      }
-    }, 1000);
-    return () => clearInterval(iv);
-  }, [isJourney, s?.turn, s?.moving?.ts, s?.challenge, s?.pendingCard, s?.quiz, s?.awaitPost]);
+  /* ---------- JOURNEY: авто-передача хода УДАЛЕНА ----------
+     В новом JOURNEY очередь ходов отсутствует: все фишки ходят одновременно,
+     передавать ход никому не нужно. Кто первый пересечёт ячейку задания —
+     у того оно откроется, остальные фишки встанут и будут смотреть. */
 
   const winner = s.winner ? s.players.find((p) => p.id === s.winner) : null;
   /* трансляция: показываем последний кадр до 4 секунд, а пока идёт задание —
@@ -1116,7 +1111,9 @@ export default function GameScreen() {
           {s.players.map((p, i) => (
             <div
               key={p.id}
-              className={`hud-chip pixel-corners px-2.5 py-1.5 flex items-center gap-2 transition-all ${active?.id === p.id && s.phase === 'playing' ? 'border-gold shadow-[0_0_14px_rgba(255,207,63,0.35)]' : ''} ${!p.alive ? 'opacity-40 grayscale' : ''} ${p.spect ? 'opacity-70' : ''}`}
+              /* в JOURNEY «золотой» подсветки стоящего игрока нет в свободном режиме —
+                 все ходят одновременно; подсветка появляется только у игрока задания */
+              className={`hud-chip pixel-corners px-2.5 py-1.5 flex items-center gap-2 transition-all ${active?.id === p.id && s.phase === 'playing' && !(isJourney && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && !(s.fxs ?? []).some((f) => f.gate)) ? 'border-gold shadow-[0_0_14px_rgba(255,207,63,0.35)]' : ''} ${!p.alive ? 'opacity-40 grayscale' : ''} ${p.spect ? 'opacity-70' : ''}`}
             >
               <span className="w-3.5 h-3.5 border border-abyss" style={{ background: PLAYER_COLORS[p.color] }} />
               <div className="leading-none">
@@ -1376,10 +1373,10 @@ export default function GameScreen() {
           </div>
         )}
 
-        {/* ---------- JOURNEY: прямое управление фишкой ---------- */}
+        {/* ---------- JOURNEY: прямое управление фишкой — У КАЖДОГО СВОЯ, ОДНОВРЕМЕННО ---------- */}
         {s.phase === 'playing' && isJourney && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 z-10">
-            {myTurn ? (
+            {mePlayer && !mePlayer.spect && mePlayer.alive ? (
               <div className="flex items-center gap-4">
                 <div className="grid grid-cols-3 gap-1 select-none touch-none">
                   <span />
@@ -1417,20 +1414,12 @@ export default function GameScreen() {
                   <span />
                 </div>
                 <div className="flex flex-col items-center gap-1.5">
-                  {/* ТАЙМЕР скрыт: без движения ход уйдёт сам через 2 минуты (JOURNEY_AUTO_PASS),
-                      плашка появляется только на последних 15 секундах; последние 5 — мигают */}
-                  {autoPassLeft <= 15 && autoPassLeft > 5 && (
-                    <div className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[8px] text-dim">ХОД УЙДЁТ САМ: {autoPassLeft} С</div>
-                  )}
-                  {autoPassLeft <= 5 && (
-                    <div className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[8px] text-magma blink-hard">ХОД УЙДЁТ САМ: {autoPassLeft} С</div>
-                  )}
-                  <div className="tick-label text-faint text-center max-w-72">Стрелки/WASD, ДЖОЙСТИК (крестовина или стик) или кнопки — фишка идёт сама. Наступите на ячейку задания — оно откроется сразу. Стоите 2 минуты без движения — ход уйдёт следующему сам (предупреждение — за 15 с).</div>
+                  <div className="tick-label text-faint text-center max-w-72">Все фишки ходят ОДНОВРЕМЕННО: стрелки/WASD, ДЖОЙСТИК или кнопки — веди свою. Кто ПЕРВЫМ пересечёт ячейку задания — у того оно откроется, остальные фишки встанут и будут смотреть. Передавать ход не нужно.</div>
                 </div>
               </div>
             ) : (
               <div className="hud-chip pixel-corners px-4 py-2 text-[11px] text-dim">
-                {active?.name ?? '—'} идёт по карте…
+                Все фишки идут по карте — кто первый пересечёт ячейку задания, тот и играет
               </div>
             )}
           </div>
@@ -1508,23 +1497,29 @@ export default function GameScreen() {
           return (
             <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.6)] z-10">
               <div className="pixel-panel pixel-corners pop-in p-7 max-w-lg w-full mx-4 text-center">
-                <span className="text-gold inline-block floaty">{Ic.dice(40)}</span>
-                <div className="font-pixel text-gold text-[11px] mt-3">ПЕРВЫМ ХОДИТ</div>
-                <div
-                  className="font-display uppercase text-3xl mt-2"
-                  style={{ color: winnerP ? PLAYER_COLORS[winnerP.color] : undefined }}
-                >
-                  {winnerP?.name ?? '—'}
-                </div>
+                <span className="text-gold inline-block floaty">{isJourney ? Ic.pawn(40) : Ic.dice(40)}</span>
+                <div className="font-pixel text-gold text-[11px] mt-3">{isJourney ? 'ВСЕ СТАРТУЮТ ОДНОВРЕМЕННО' : 'ПЕРВЫМ ХОДИТ'}</div>
+                {isJourney ? (
+                  <p className="text-[11px] text-dim mt-2">Жеребьёвки нет — каждый ведёт СВОЮ фишку со старта. Кто ПЕРВЫМ пересечёт ячейку задания — у того оно и откроется, остальные будут смотреть.</p>
+                ) : (
+                  <div
+                    className="font-display uppercase text-3xl mt-2"
+                    style={{ color: winnerP ? PLAYER_COLORS[winnerP.color] : undefined }}
+                  >
+                    {winnerP?.name ?? '—'}
+                  </div>
+                )}
                 {isSkill && <p className="text-[11px] text-magma mt-2">SKILL CHALLENGE: играть будет только хост — вы зритель{mePlayer?.spect ? ' (и вы тоже)' : ''}.</p>}
-                <div className="flex justify-center gap-4 mt-5 flex-wrap">
-                  {roster.map((p) => (
-                    <div key={p.id} className="flex flex-col items-center gap-1">
-                      <DieFace v={s.rollOffValues[p.id] ?? 1} frame={PLAYER_COLORS[p.color]} dropping={p.id === s.rollOffWinner} />
-                      <span className="font-display text-[9px] uppercase" style={{ color: PLAYER_COLORS[p.color] }}>{p.name}</span>
-                    </div>
-                  ))}
-                </div>
+                {!isJourney && (
+                  <div className="flex justify-center gap-4 mt-5 flex-wrap">
+                    {roster.map((p) => (
+                      <div key={p.id} className="flex flex-col items-center gap-1">
+                        <DieFace v={s.rollOffValues[p.id] ?? 1} frame={PLAYER_COLORS[p.color]} dropping={p.id === s.rollOffWinner} />
+                        <span className="font-display text-[9px] uppercase" style={{ color: PLAYER_COLORS[p.color] }}>{p.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="mt-5 space-y-2 text-left">
                   {roster.map((p) => {
                     const isReady = readyList.includes(p.id);

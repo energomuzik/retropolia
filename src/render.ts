@@ -267,6 +267,7 @@ export interface TokenDraw {
   img?: string | null; // dataUrl кастомной фишки (PNG с прозрачностью); у анимированной — превью-кадр idle
   anim?: TokenAnim;    // анимированная фишка: играет кадры клипа по направлению/idle
   dir?: TokenDir;      // текущее направление движения (нет — стоит на месте → idle)
+  mv?: boolean;        // фишка ИДЁТ сейчас: покачивание в пути; на месте фишка стоит РОВНО (без «плавания»)
   phase?: number;      // сдвиг фазы проигрывания (чтобы фишки не мигали синхронно)
   size?: number;       // размер на поле в px по большей стороне (нет: анимированная 64, обычная 34)
   override?: AnimClip;  // разовый клип fx (победа/поражение) — играется ОДИН раз вместо обычного
@@ -885,7 +886,9 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const t = o.tokens[i];
     ctx.save();
     ctx.translate(t.x, t.y);
-    const bob = t.active ? Math.sin(o.time / 140 + i) * 2.5 : 0;
+    /* «плавание» фишки — ТОЛЬКО пока она идёт; стоя на ячейке, фишка неподвижна
+       (пользователь: убрать покачивание при бездействии) */
+    const bob = t.mv ? Math.sin(o.time / 140 + i) * 2.5 : 0;
     ctx.translate(0, bob - 6);
     const s = t.active ? 1.12 : 1;
     ctx.scale(s, s);
