@@ -34,7 +34,7 @@ export type Action =
   | { t: 'quizTimeout' }
   | { t: 'quizDone'; id: string }
   | { t: 'cardAck'; id: string }
-  | { t: 'journeyMove'; id: string; x: number; y: number; dir?: TokenDir; mv?: boolean } // JOURNEY: позиция СВОЕЙ фишки — любой игрок ходит одновременно (авторитет — хост); mv=false — фишка встала
+  | { t: 'journeyMove'; id: string; x: number; y: number; dir?: TokenDir; mv?: boolean; tp?: boolean } // JOURNEY: позиция СВОЕЙ фишки — любой игрок ходит одновременно (авторитет — хост); mv=false — фишка встала; tp — обновление несёт ПРЫЖОК ЧЕРЕЗ ПОРТАЛ (анти-телепорт не применять)
   | { t: 'fxDone'; id: string } // анимация fx (победа/поражение) у игрока закончилась — можно продолжать ход
   | { t: 'fxBreak'; id: string } // спектакль победы дошёл до разбития ячейки (пауза 1 с прошла — анимации начались)
 
@@ -1006,9 +1006,14 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
          СТОП-обновление (mv=false) принимаем всегда — игрок реально стоит в этой точке,
          иначе при сетевом заторе цепочка отклонённых апдейтов «застревала» надолго. */
       const stopped = a.mv === false;
-      if (prev && !stopped && Math.hypot(x - prev.x, y - prev.y) > CELL_PX * 2.5) break;
+      /* ПОРТАЛ: обновление с tp — фишка вошла в зону портала и МГНОВЕННО перенеслась
+        в точку перехода (обычно на другой плитке) — прыжок на любое расстояние легален.
+        Без tp — прежняя защита от телепортаций: не дальше 2.5 клеток за одно обновление.
+        СТОП-обновление (mv=false) принимаем всегда — игрок реально стоит в этой точке,
+        иначе при сетевом заторе цепочка отклонённых апдейтов «застревала» надолго. */
+      if (prev && !stopped && !a.tp && Math.hypot(x - prev.x, y - prev.y) > CELL_PX * 2.5) break;
       s.journeyPos = s.journeyPos ?? {};
-      s.journeyPos[p.id] = { x, y, dir: a.dir, ts: Date.now(), mv: a.mv !== false };
+      s.journeyPos[p.id] = { x, y, dir: a.dir, ts: Date.now(), mv: a.mv !== false, tp: a.tp || undefined };
       /* пересёк ячейку задания? вход = прошлый центр был ВНЕ прямоугольника, новый — ВНУТРИ.
         КТО ПЕРВЫЙ пересёк — у того и задание: turn = этот игрок (все фишки замирают,
         остальные смотрят трансляцию — «всё как всегда»); после задания все снова ходят. */

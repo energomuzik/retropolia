@@ -255,7 +255,7 @@ export function fixLinksAfterDelete(map: GameMap, deletedIdx: number): void {
 export function fitView(map: GameMap, w: number, h: number) {
   const b = mapSize(map);
   const zoom = Math.min(w / (b.w + 120), h / (b.h + 120));
-  return { x: b.w / 2, y: b.h / 2, zoom: Math.max(0.2, zoom) };
+  return { x: b.w / 2, y: b.h / 2, zoom: Math.max(0.08, zoom) }; // 0.08 — большие карты (до 16384px) влезают целиком
 }
 
 export interface TokenDraw {
@@ -267,7 +267,7 @@ export interface TokenDraw {
   img?: string | null; // dataUrl кастомной фишки (PNG с прозрачностью); у анимированной — превью-кадр idle
   anim?: TokenAnim;    // анимированная фишка: играет кадры клипа по направлению/idle
   dir?: TokenDir;      // текущее направление движения (нет — стоит на месте → idle)
-  mv?: boolean;        // фишка ИДЁТ сейчас: покачивание в пути; на месте фишка стоит РОВНО (без «плавания»)
+  mv?: boolean;        // фишка ИДЁТ сейчас (влияет на выбор клипа анимации; покачивания у фишки больше нет — убрано по просьбе пользователя)
   phase?: number;      // сдвиг фазы проигрывания (чтобы фишки не мигали синхронно)
   size?: number;       // размер на поле в px по большей стороне (нет: анимированная 64, обычная 34)
   override?: AnimClip;  // разовый клип fx (победа/поражение) — играется ОДИН раз вместо обычного
@@ -427,6 +427,44 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(img, -pa.w / 2, -pa.h / 2, pa.w, pa.h);
     ctx.restore();
+  }
+
+  // ПОРТАЛЫ: зоны-телепорты между плитками. Видны и в игре — мягкое пульсирующее
+  // сиреневое свечение с воронкой в центре (игроки должны видеть, куда заходят);
+  // в редакторе карт поверх рисуются свои, более яркие, с подписями и точками перехода
+  for (const pz of map.portals ?? []) {
+    if (!pz.w || !pz.h) continue;
+    const pulse = 0.5 + 0.5 * Math.sin(o.time / 380 + pz.x * 0.01);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(pz.x, pz.y, pz.w, pz.h);
+    ctx.fillStyle = `rgba(192,122,255,${(0.07 + 0.07 * pulse).toFixed(3)})`;
+    ctx.fill();
+    ctx.setLineDash([9, 6]);
+    ctx.strokeStyle = `rgba(192,122,255,${(0.45 + 0.35 * pulse).toFixed(3)})`;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.restore();
+    // воронка-вихрь в центре зоны (только если зона не крошечная)
+    if (pz.w > 30 && pz.h > 30) {
+      const cx = pz.x + pz.w / 2, cy = pz.y + pz.h / 2;
+      const R = Math.min(pz.w, pz.h) * 0.3;
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(o.time / 900);
+      ctx.strokeStyle = `rgba(216,180,255,${(0.5 + 0.3 * pulse).toFixed(3)})`;
+      ctx.lineWidth = 2;
+      for (const rr of [R, R * 0.55]) {
+        ctx.beginPath();
+        ctx.arc(0, 0, rr, 0.35, Math.PI * 1.45);
+        ctx.stroke();
+      }
+      ctx.fillStyle = `rgba(233,220,255,${(0.6 + 0.3 * pulse).toFixed(3)})`;
+      ctx.beginPath();
+      ctx.arc(0, 0, Math.max(2, R * 0.14), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
   }
 
   // сетка — только на картах без фона (поверх картинки она мешает)
@@ -886,10 +924,10 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const t = o.tokens[i];
     ctx.save();
     ctx.translate(t.x, t.y);
-    /* «плавание» фишки — ТОЛЬКО пока она идёт; стоя на ячейке, фишка неподвижна
-       (пользователь: убрать покачивание при бездействии) */
-    const bob = t.mv ? Math.sin(o.time / 140 + i) * 2.5 : 0;
-    ctx.translate(0, bob - 6);
+    /* ПОКАЧИВАНИЕ УБРАНО ПОЛНОСТЬЮ (пользователь: «убрать покачивание и при движении —
+       в обоих режимах, плавном и прыжками»): фишка идёт ровно, без синусоиды.
+       Постоянный сдвиг -6 — приподнятость над тенью, это не покачивание. */
+    ctx.translate(0, -6);
     const s = t.active ? 1.12 : 1;
     ctx.scale(s, s);
     ctx.globalAlpha = t.alive ? 1 : 0.35;
@@ -898,7 +936,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const sz = Math.max(10, Math.min(320, t.size ?? (t.anim ? 64 : 34)));
     ctx.fillStyle = 'rgba(0,0,0,0.45)';
     ctx.beginPath();
-    ctx.ellipse(0, sz * 0.47 - bob / s, sz * 0.32, sz * 0.13, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, sz * 0.47, sz * 0.32, sz * 0.13, 0, 0, Math.PI * 2);
     ctx.fill();
 
     /* картинка фишки: большая сторона = sz, пропорции сохранены, чуть приподнята над тенью */

@@ -16,7 +16,7 @@ import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
 import { PLAYER_COLORS, SKIP_COST, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf } from '../types';
-import type { AnimClip, CardDef, ChaosKind, GameMap, TaskDef, TokenDir } from '../types';
+import type { AnimClip, CardDef, ChaosKind, GameMap, PortalZone, TaskDef, TokenDir } from '../types';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
 import { startLoop, stopLoop, syncLoops, stopGroup, killGroup, stopOneShot, playOneShot } from '../loopsnd';
@@ -130,7 +130,11 @@ export default function GameScreen() {
     journeyKeys — зажатые направления (клавиши и D-pad), journeySelf —
     локальная позиция СВОЕЙ фишки (мгновенный отклик; хосту — апдейты ~6 раз/с) */
   const journeyKeys = useRef<Set<TokenDir>>(new Set());
-  const journeySelf = useRef<{ x: number; y: number; dir?: TokenDir; moving: boolean; dirty: boolean; lastSent: number } | null>(null);
+  /* tp — обновление несёт прыжок через портал; pinside — зоны порталов, внутри которых
+     фишка СЕЙЧАС стоит (вход срабатывает только при переходе снаружи внутрь — без
+     повторного срабатывания, пока не выйдешь); snapCam — камера мгновенно за фишкой */
+  const journeySelf = useRef<{ x: number; y: number; dir?: TokenDir; moving: boolean; dirty: boolean; lastSent: number; tp?: boolean; pinside: Set<string> } | null>(null);
+  const snapCamRef = useRef(false);
   const journeyPress = (d: TokenDir, on: boolean) => { if (on) journeyKeys.current.add(d); else journeyKeys.current.delete(d); };
   /* ---------- FX: разовые анимации-спектакль (5-я/6-я фишки, реакции боссов) ----------
      fxStart — локальный старт клипа (rAF-мс) по id fx С УЧЁТОМ паузы delay;
@@ -565,7 +569,14 @@ export default function GameScreen() {
             let jdir: TokenDir | undefined;
             if (p.id === me && p.alive && !p.spect) {
               let self = journeySelf.current;
-              if (!self) self = journeySelf.current = { x: jp?.x ?? center.x, y: jp?.y ?? center.y, dir: undefined, moving: false, dirty: false, lastSent: 0 };
+              if (!self) {
+                // при появлении считаем фишку УЖЕ СТОЯЩЕЙ во всех зонах порталов, содержащих точку старта,
+                // чтобы портал под стартом не сработал сразу
+                const sx0 = jp?.x ?? center.x, sy0 = jp?.y ?? center.y;
+                const pin0 = new Set<string>();
+                for (const q of m.portals ?? []) if (sx0 >= q.x && sx0 < q.x + q.w && sy0 >= q.y && sy0 < q.y + q.h) pin0.add(q.id);
+                self = journeySelf.current = { x: sx0, y: sy0, dir: undefined, moving: false, dirty: false, lastSent: 0, pinside: pin0 };
+              }
               let vx = 0, vy = 0;
               const canWalk = sess.phase === 'playing' && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate);
               if (canWalk) {
@@ -591,6 +602,31 @@ export default function GameScreen() {
               } else {
                 self.moving = false;
               }
+              /* ПОРТАЛЫ: фишка ВОШЛА в зону (снаружи внутрь) — мгновенный перенос в точку
+                 перехода (обычно на другой плитке). Повторное срабатывание — только после
+                 выхода из зоны; после переноса зоны, содержащие точку выхода, считаются
+                 «уже внутри» — не телепортируем обратно сразу. */
+              const pzs = m.portals ?? [];
+              if (pzs.length && canWalk) {
+                const inPz = (q: PortalZone) => self.x >= q.x && self.x < q.x + q.w && self.y >= q.y && self.y < q.y + q.h;
+                for (const pz of pzs) {
+                  const inside = inPz(pz);
+                  const was = self.pinside.has(pz.id);
+                  if (inside && !was && pz.tx !== undefined && pz.ty !== undefined) {
+                    self.x = Math.max(8, Math.min((mszJ?.w ?? 2048) - 8, pz.tx));
+                    self.y = Math.max(8, Math.min((mszJ?.h ?? 2048) - 8, pz.ty));
+                    self.tp = true; // хост примет прыжок без анти-телепорта, зрители — снапнутся
+                    self.dirty = true;
+                    snapCamRef.current = true; // камера мгновенно за фишкой
+                    self.pinside.clear();
+                    for (const q of pzs) if (inPz(q)) self.pinside.add(q.id);
+                    sfx.portal();
+                    break; // один портал за кадр
+                  }
+                  if (inside) self.pinside.add(pz.id);
+                  else self.pinside.delete(pz.id);
+                }
+              }
               d.x = self.x; d.y = self.y;
               if (self.moving) anyoneMoving = true;
               // сетевые апдейты: в движении ~6 раз/с, на остановке — финальная точка
@@ -598,7 +634,8 @@ export default function GameScreen() {
               if (self.dirty && ((self.moving && nowMs - self.lastSent > 160) || !self.moving)) {
                 self.dirty = false;
                 self.lastSent = nowMs;
-                dispatch({ t: 'journeyMove', id: me, x: Math.round(self.x), y: Math.round(self.y), dir: self.dir, mv: self.moving });
+                dispatch({ t: 'journeyMove', id: me, x: Math.round(self.x), y: Math.round(self.y), dir: self.dir, mv: self.moving, tp: self.tp || undefined });
+                self.tp = false;
               }
             } else {
               // ЧУЖАЯ ФИШКА (трансляция): ходит СО СКОРОСТЬЮ КАРТЫ — той же, с какой ходит
@@ -614,6 +651,7 @@ export default function GameScreen() {
               if (!rj) rj = journeyRemote.current[p.id] = { ax: tgt0.x, ay: tgt0.y, vx: 0, vy: 0, t: nowMs, dir: jp?.dir, mv: !!jp?.mv };
               if (jp && (jp.x !== rj.ax || jp.y !== rj.ay || jp.dir !== rj.dir || !!jp.mv !== rj.mv)) {
                 rj.ax = jp.x; rj.ay = jp.y; rj.dir = jp.dir; rj.mv = !!jp.mv; rj.t = nowMs;
+                if (jp.tp) { d.x = jp.x; d.y = jp.y; } // прыжок через портал — у зрителя мгновенный перенос
                 const spd = cps * CELL; // px/с — РОВНО скорость карты, как у самого игрока
                 const dv = rj.dir ? DIRV[rj.dir] : null;
                 rj.vx = rj.mv && dv ? dv[0] * spd : 0;
@@ -791,6 +829,12 @@ export default function GameScreen() {
         v.x += (goal.x - v.x) * camK;
         v.y += (goal.y - v.y) * camK;
         v.zoom += (goal.zoom - v.zoom) * camK;
+        /* ПОРТАЛ: прыжок своей фишки — камера переносится мгновенно (не «плывёт» через
+           все плитки); в режиме общего плана камеру не трогаем */
+        if (snapCamRef.current) {
+          if (!(viewMode === 'world' || peekMap)) { v.x = goal.x; v.y = goal.y; }
+          snapCamRef.current = false;
+        }
 
         const colorById: Record<string, string> = {};
         sess.players.forEach((p) => { colorById[p.id] = PLAYER_COLORS[p.color]; });

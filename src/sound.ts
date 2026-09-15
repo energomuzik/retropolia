@@ -46,5 +46,6 @@ export const sfx = {
   alarm() { [880, 622, 880, 622].forEach((f, i) => tone(f, 0.1, 'square', 0.1, i * 0.11)); },
   card() { tone(392, 0.1, 'triangle', 0.12); tone(587, 0.16, 'triangle', 0.12, 0.08); },
   whoosh() { tone(140, 0.25, 'sawtooth', 0.08, 0, 320); },
+  portal() { tone(220, 0.28, 'sine', 0.14, 0, 1200); tone(1200, 0.3, 'sine', 0.1, 0.12, -900); }, // взлёт и спад — «телепорт» через портал
   start() { [262, 330, 392, 523, 659, 784].forEach((f, i) => tone(f, 0.12, 'square', 0.1, i * 0.07)); },
 };

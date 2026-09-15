@@ -8,8 +8,8 @@ import {
 import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimDef, BossAnimDef, CellDef, CellType, GameMap, PlacedAnim, PlacedBoss, Stamp, TokenDef, TileGroup, TileImg, WallRect } from '../types';
-import { bossLibEntryOf, MAP_MODES } from '../types';
+import type { AnimDef, BossAnimDef, CellDef, CellType, GameMap, PlacedAnim, PlacedBoss, PortalZone, Stamp, TokenDef, TileGroup, TileImg, WallRect } from '../types';
+import { bossLibEntryOf, MAP_MODES, MAX_FIELD, PLATE_SIZES } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
 
@@ -96,7 +96,7 @@ function migrateMap(m: GameMap, libTiles: { id: string; dataUrl: string; gw: num
 
 /* ---------- инструменты ---------- */
 
-type Tool = 'select' | 'tile' | 'cell' | 'link' | 'hop' | 'anim' | 'boss' | 'wall' | 'erase' | 'pan';
+type Tool = 'select' | 'tile' | 'cell' | 'link' | 'hop' | 'anim' | 'boss' | 'wall' | 'portal' | 'erase' | 'pan';
 
 const TOOLS: { key: Tool; label: string; hint: string }[] = [
   { key: 'select', label: 'Выбор', hint: 'клик — выбрать тайл/ячейку/анимацию и тянуть мышью · пустое место — двигать камеру' },
@@ -107,6 +107,7 @@ const TOOLS: { key: Tool; label: string; hint: string }[] = [
   { key: 'anim', label: 'Анимация', hint: 'выберите анимацию в левой панели, кликните по карте — поставится проигрыватель анимации. Клик по уже стоящей — выбрать и тянуть' },
   { key: 'boss', label: 'Босс', hint: 'вшейте босса в карту (спойлер «Боссы» слева), выберите его и кликните по карте — босс встанет на ячейку: живёт (idle), реагирует на победы/поражения игроков в радиусе' },
   { key: 'wall', label: 'Стена', hint: 'НЕВИДИМАЯ стена (только JOURNEY): протяните прямоугольник — фишка не сможет зайти внутрь. Клик по стене — выбрать и тянуть. В игре стены НЕ видны' },
+  { key: 'portal', label: 'Портал', hint: 'ТЕЛЕПОРТ между плитками: протяните зону входа, затем кликните по карте (можно на другой плитке — переключите её в панели «Плитки и порталы») — куда переносить. В JOURNEY фишка, войдя в зону, мгновенно переносится. Клик по порталу — выбрать и тянуть' },
   { key: 'erase', label: 'Ластик', hint: 'клик или протяни с зажатой кнопкой — убирает ТАЙЛЫ под курсором. Ячейки, анимации и стены ластик не трогает: выдели и нажми Delete' },
   { key: 'pan', label: 'Рука', hint: 'двигать камеру (колесо — зум под курсором)' },
 ];
@@ -156,6 +157,9 @@ export default function MapEditor() {
   const [selBoss, setSelBoss] = useState<string | null>(null); // выбранный размещённый босс
   const [selWall, setSelWall] = useState<number | null>(null); // выбранная стена (индекс)
   const [wallsOpen, setWallsOpen] = useState(true); // спойлер «Стены» в левой панели
+  const [selPortal, setSelPortal] = useState<number | null>(null); // выбранный портал (индекс)
+  const [pickTargetFor, setPickTargetFor] = useState<number | null>(null); // портал, для которого указываем точку перехода (следующий клик по канве = точка)
+  const [platesOpen, setPlatesOpen] = useState(false); // спойлер «Плитки и порталы» в левой панели
   const [extract, setExtract] = useState<{ file: File; src: string; name: string; busy: boolean; bgMode: 'auto' | 'custom'; bg: string; foundBg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; tiles: TileImg[] } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -169,8 +173,9 @@ export default function MapEditor() {
   const viewRef = useRef(view); viewRef.current = view;
   const mapRef = useRef(map); mapRef.current = map;
   const dragRef = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
-  const objDragRef = useRef<{ kind: 'cell' | 'stamp' | 'anim' | 'boss' | 'wall'; idx: number; dx: number; dy: number; moved: boolean } | null>(null);
+  const objDragRef = useRef<{ kind: 'cell' | 'stamp' | 'anim' | 'boss' | 'wall' | 'portal'; idx: number; dx: number; dy: number; moved: boolean } | null>(null);
   const wallDragRef = useRef<{ sx: number; sy: number; ex: number; ey: number } | null>(null); // протягивание НОВОЙ стены
+  const portalDragRef = useRef<{ sx: number; sy: number; ex: number; ey: number } | null>(null); // протягивание НОВОГО портала
   const resizeRef = useRef<{ kind: 'stamp' | 'anim' | 'boss'; idx: number } | null>(null); // ресайз тайла/анимации/босса за уголок
   const downRef = useRef<{ x: number; y: number } | null>(null);
   const lastPlaceRef = useRef<{ x: number; y: number } | null>(null);
@@ -439,6 +444,128 @@ export default function MapEditor() {
     sfx.fail();
     toast(`Удалены все стены (${cnt}) — вернуть можно кнопкой «Вернуть»`, 'err');
   };
+
+  /* ---------- ПОРТАЛЫ: зоны-телепорты между плитками ----------
+     Зона входа + точка перехода (tx,ty) в px ВСЕГО поля. В JOURNEY фишка, войдя
+     в зону, мгновенно переносится в точку. Однонаправленные: обратный — второй портал. */
+  const updPortal = (idx: number, patch: Partial<PortalZone>) =>
+    setMap((m) => {
+      if (!m || !m.portals || !m.portals[idx]) return m;
+      const arr = m.portals.slice();
+      arr[idx] = { ...arr[idx], ...patch };
+      return { ...m, portals: arr };
+    });
+  const portalAtPoint = (m: GameMap, wx: number, wy: number): number => {
+    const ps = m.portals ?? [];
+    for (let i = ps.length - 1; i >= 0; i--) {
+      const p = ps[i];
+      if (wx >= p.x && wx < p.x + p.w && wy >= p.y && wy < p.y + p.h) return i;
+    }
+    return -1;
+  };
+  const removePortal = (idx: number) => {
+    const m = mapRef.current;
+    if (m && m.portals?.[idx]) {
+      const snap = m.portals[idx];
+      rememberDeleted({
+        label: 'портал с карты',
+        restore: async () => {
+          setMap((mm) => {
+            if (!mm || mm.id !== m.id) return mm;
+            const arr = (mm.portals ?? []).slice();
+            arr.splice(Math.min(idx, arr.length), 0, snap);
+            return { ...mm, portals: arr };
+          });
+          const cur = await idbGet<GameMap>('maps', m.id);
+          if (cur) {
+            const arr = (cur.portals ?? []).slice();
+            arr.splice(Math.min(idx, arr.length), 0, snap);
+            await idbPut('maps', m.id, { ...cur, portals: arr, updatedAt: Date.now() });
+            await useApp.getState().refresh();
+          }
+        },
+      });
+    }
+    setMap((mm) => (mm ? { ...mm, portals: (mm.portals ?? []).filter((_, i) => i !== idx) } : mm));
+    setSelPortal(null);
+    setPickTargetFor(null);
+    dirtyRef.current = true;
+    sfx.fail();
+  };
+  const removeAllPortals = () => {
+    const m = mapRef.current;
+    const cnt = m?.portals?.length ?? 0;
+    if (!cnt) return;
+    const snap = m!.portals!;
+    rememberDeleted({
+      label: `все порталы (${cnt})`,
+      restore: async () => {
+        setMap((mm) => (mm && mm.id === m!.id ? { ...mm, portals: snap.slice() } : mm));
+        const cur = await idbGet<GameMap>('maps', m!.id);
+        if (cur) {
+          await idbPut('maps', m!.id, { ...cur, portals: snap.slice(), updatedAt: Date.now() });
+          await useApp.getState().refresh();
+        }
+      },
+    });
+    setMap((mm) => (mm ? { ...mm, portals: [] } : mm));
+    setSelPortal(null);
+    setPickTargetFor(null);
+    dirtyRef.current = true;
+    sfx.fail();
+    toast(`Удалены все порталы (${cnt}) — вернуть можно кнопкой «Вернуть»`, 'err');
+  };
+
+  /* ---------- ПЛИТКИ: разбивка поля на страницы одинакового размера ----------
+     Поле единое (одно большое), разбивка — удобство редактора: навигатор плиток,
+     рамки на канве. Соседние плитки стыкуются краями (переход ходьбой), любые — порталами. */
+  const PS = map?.plateSize ?? 0;
+  const platesX = map && PS ? Math.max(1, Math.ceil(mapSize(map).w / PS)) : 1;
+  const platesY = map && PS ? Math.max(1, Math.ceil(mapSize(map).h / PS)) : 1;
+  const plateCountMax = PS ? Math.floor(MAX_FIELD / PS) : 8;
+  const applyPlates = (ps: number, nx: number, ny: number) => {
+    const m = mapRef.current;
+    if (!m) return;
+    const nw = Math.min(MAX_FIELD, nx * ps);
+    const nh = Math.min(MAX_FIELD, ny * ps);
+    updMap({ plateSize: ps, mw: nw, mh: nh } as Partial<GameMap>);
+    dirtyRef.current = true;
+    // объекты, выехавшие за край при уменьшении поля
+    const mm = { ...m, plateSize: ps, mw: nw, mh: nh } as GameMap;
+    const out = mm.cells.filter((c, ci) => { const cc = cellCenter(mm, ci); return cc.x > nw || cc.y > nh; }).length
+      + (mm.stamps ?? []).filter((s) => s.x > nw || s.y > nh).length
+      + (mm.portals ?? []).filter((p) => p.x > nw || p.y > nh).length;
+    if (out > 0) toast(`Внимание: ${out} объектов оказались за краем поля — приблизьте и передвиньте их`, 'info');
+  };
+  const enablePlates = () => {
+    const m = mapRef.current;
+    if (!m) return;
+    const sz = mapSize(m);
+    // сторона плитки — ближайшая из стандартных к нынешней большей стороне поля
+    const ps = PLATE_SIZES.reduce((a, b) => (Math.abs(b - Math.max(sz.w, sz.h)) < Math.abs(a - Math.max(sz.w, sz.h)) ? b : a), PLATE_SIZES[0]);
+    const nx = Math.max(1, Math.ceil(sz.w / ps));
+    const ny = Math.max(1, Math.ceil(sz.h / ps));
+    applyPlates(ps, nx, ny);
+    setPlatesOpen(true);
+    sfx.coin();
+    toast(`Поле разбито на плитки ${ps} px (${nx}×${ny}). Соседние плитки стыкуются краями, любые связывайте порталами`, 'ok');
+  };
+  const disablePlates = () => {
+    updMap({ plateSize: undefined } as Partial<GameMap>);
+    dirtyRef.current = true;
+    sfx.fail();
+    toast('Разбивка на плитки убрана — карта снова одно поле', 'info');
+  };
+  const jumpToPlate = (col: number, row: number) => {
+    const cv = canvasRef.current;
+    if (!cv || !PS) return;
+    const fit = Math.min(cv.clientWidth / (PS + 80), cv.clientHeight / (PS + 80)); // вся плитка в кадре
+    const z = Math.max(viewRef.current.zoom, Math.min(2, fit));
+    setView({ x: (col + 0.5) * PS, y: (row + 0.5) * PS, zoom: z });
+    sfx.hover();
+  };
+  const curPlateIdx = PS && map ? Math.min(platesX * platesY - 1, Math.max(0, Math.floor(view.x / PS) + Math.floor(view.y / PS) * platesX)) : -1;
+  const plateNumOf = (wx: number, wy: number) => (PS ? Math.floor(wx / PS) + Math.floor(wy / PS) * platesX + 1 : 1); // «Плитка N» по точке поля
   const updStamp = (idx: number, patch: Partial<Stamp>) =>
     setMap((m) => {
       if (!m || !m.stamps || !m.stamps[idx]) return m;
@@ -476,6 +603,9 @@ export default function MapEditor() {
     setSelAnim(null);
     setPlaceAnimId('');
     setLinkFrom(null);
+    setSelWall(null);
+    setSelPortal(null);
+    setPickTargetFor(null);
     setTool('select');
     setActiveLayer(Math.max(0, (copy.tileLayers ?? 2) - 1)); // новые тайлы — на верхний слой (чем моложе, тем выше)
     requestAnimationFrame(() => {
@@ -1148,6 +1278,39 @@ export default function MapEditor() {
       wallDragRef.current = { sx: w.x, sy: w.y, ex: w.x, ey: w.y };
       return;
     }
+    if (tool === 'portal') {
+      // режим «указать точку перехода»: ЛЮБОЙ клик по канве ставит точку (плитку можно
+      // переключить в панели «Плитки и порталы» — навигатор двигает камеру, не кликает по канве)
+      if (pickTargetFor !== null) {
+        const pi = pickTargetFor;
+        setPickTargetFor(null);
+        if ((m.portals ?? [])[pi]) {
+          updPortal(pi, { tx: Math.round(w.x), ty: Math.round(w.y) });
+          setSelPortal(pi);
+          dirtyRef.current = true;
+          sfx.step();
+          toast(`Точка портала ${pi + 1} указана (плитка ${plateNumOf(w.x, w.y)}): фишка войдёт в зону — и перенесётся сюда`, 'ok');
+        }
+        return;
+      }
+      // клик по существующему порталу — выбрать и тянуть
+      const pi = portalAtPoint(m, w.x, w.y);
+      if (pi >= 0) {
+        const pz = (m.portals ?? [])[pi];
+        objDragRef.current = { kind: 'portal', idx: pi, dx: w.x - pz.x, dy: w.y - pz.y, moved: false };
+        setSelPortal(pi);
+        setSelCell(null);
+        setSelStamp(null);
+        setSelAnim(null);
+        setSelBoss(null);
+        setSelWall(null);
+        sfx.hover();
+        return;
+      }
+      setSelPortal(null);
+      portalDragRef.current = { sx: w.x, sy: w.y, ex: w.x, ey: w.y };
+      return;
+    }
   };
 
   /* стереть верхний тайл под точкой (для ластика) */
@@ -1211,6 +1374,7 @@ export default function MapEditor() {
       else if (od.kind === 'anim') updAnim(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
       else if (od.kind === 'boss') updBoss(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
       else if (od.kind === 'wall') updWall(od.idx, { x: Math.round(w.x - od.dx), y: Math.round(w.y - od.dy) }); // стены — без привязки к сетке
+      else if (od.kind === 'portal') updPortal(od.idx, { x: Math.round(w.x - od.dx), y: Math.round(w.y - od.dy) }); // порталы — без привязки к сетке (точка перехода остаётся на месте)
       else updStamp(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
       return;
     }
@@ -1218,6 +1382,12 @@ export default function MapEditor() {
       // протягиваем НОВУЮ стену — обновляем второй угол (рисуется в цикле отрисовки)
       wallDragRef.current.ex = w.x;
       wallDragRef.current.ey = w.y;
+      return;
+    }
+    if (portalDragRef.current) {
+      // протягиваем НОВУЮ зону портала — обновляем второй угол (рисуется в цикле отрисовки)
+      portalDragRef.current.ex = w.x;
+      portalDragRef.current.ey = w.y;
       return;
     }
     if (tool === 'erase' && e.buttons === 1) {
@@ -1262,6 +1432,26 @@ export default function MapEditor() {
         toast('Стена готова: в игре она НЕВИДИМА — фишка не сможет зайти внутрь (действует в JOURNEY)', 'ok');
       }
     }
+    /* ПОРТАЛ: фиксируем протянутую зону входа (минимум 12×12 px) и сразу предлагаем
+       кликнуть по карте — куда переносить (точку можно ставить на любой плитке) */
+    const pd = portalDragRef.current;
+    portalDragRef.current = null;
+    if (pd) {
+      const px = Math.round(Math.min(pd.sx, pd.ex));
+      const py = Math.round(Math.min(pd.sy, pd.ey));
+      const pw = Math.round(Math.abs(pd.ex - pd.sx));
+      const ph = Math.round(Math.abs(pd.ey - pd.sy));
+      if (pw >= 12 && ph >= 12 && mapRef.current) {
+        const newIdx = (mapRef.current.portals ?? []).length;
+        const pz: PortalZone = { id: uid('pz'), x: px, y: py, w: pw, h: ph };
+        setMap((mm) => (mm ? { ...mm, portals: [...(mm.portals ?? []), pz] } : mm));
+        setSelPortal(newIdx);
+        setPickTargetFor(newIdx);
+        dirtyRef.current = true;
+        sfx.step();
+        toast(`Зона портала ${newIdx + 1} готова — теперь кликните по карте, КУДА переносить (плитку можно переключить в панели «Плитки и порталы»; Esc — отложить)`, 'info');
+      }
+    }
     void persistIfDirty();
   };
 
@@ -1280,7 +1470,7 @@ export default function MapEditor() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') return;
-      if (e.key === 'Escape') { setLinkFrom(null); setSelCell(null); setSelStamp(null); setSelAnim(null); setSelBoss(null); setSelWall(null); setPlaceAnimId(''); return; }
+      if (e.key === 'Escape') { setLinkFrom(null); setSelCell(null); setSelStamp(null); setSelAnim(null); setSelBoss(null); setSelWall(null); setSelPortal(null); setPickTargetFor(null); setPlaceAnimId(''); return; }
       if (!map) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (e.repeat) return; // удержание обрабатывает useKeyDelete (режим «долгое нажатие»)
@@ -1295,6 +1485,8 @@ export default function MapEditor() {
           keyDel.keyDeleteStart(`босса «${(map.bossLib ?? []).find((x) => x.id === b?.bid)?.name ?? 'с карты'}»`, () => removeBossAt(selBoss));
         } else if (selWall !== null && (map.walls ?? [])[selWall]) {
           keyDel.keyDeleteStart('стену с карты', () => removeWall(selWall));
+        } else if (selPortal !== null && (map.portals ?? [])[selPortal]) {
+          keyDel.keyDeleteStart(`портал ${selPortal + 1} с карты`, () => removePortal(selPortal));
         } else if (selCell !== null) {
           keyDel.keyDeleteStart('ячейку маршрута', () => deleteCell(selCell));
         }
@@ -1368,6 +1560,37 @@ export default function MapEditor() {
           }
         }
 
+        // ПЛИТКИ: пунктирные границы страниц + подписи «Плитка N» (только при разбивке)
+        const PSz = m.plateSize ?? 0;
+        if (PSz) {
+          ctx.save();
+          ctx.setLineDash([18 / v.zoom, 12 / v.zoom]);
+          ctx.strokeStyle = 'rgba(90,169,255,0.4)';
+          ctx.lineWidth = 2 / v.zoom;
+          for (let x = PSz; x < m.mw!; x += PSz) {
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, m.mh!); ctx.stroke();
+          }
+          for (let y = PSz; y < m.mh!; y += PSz) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(m.mw!, y); ctx.stroke();
+          }
+          ctx.restore();
+          const fs = 11 / v.zoom;
+          ctx.font = `${fs}px "Press Start 2P", monospace`;
+          ctx.textAlign = 'left';
+          const cols = Math.ceil(m.mw! / PSz), rows = Math.ceil(m.mh! / PSz);
+          const pad = 8 / v.zoom;
+          for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+              const label = `Плитка ${r * cols + c + 1}`;
+              const lx = c * PSz + pad + 2, ly = r * PSz + pad + fs;
+              ctx.fillStyle = 'rgba(7,9,18,0.75)';
+              ctx.fillRect(c * PSz + pad, r * PSz + pad, label.length * fs * 1.12 + pad * 2, fs + pad * 2);
+              ctx.fillStyle = 'rgba(122,183,255,0.9)';
+              ctx.fillText(label, lx, ly);
+            }
+          }
+        }
+
         // НЕВИДИМЫЕ СТЕНЫ: коралловая штриховка — видна ТОЛЬКО в редакторе (в игре их нет)
         const drawWallRect = (x: number, y: number, w: number, h: number, selected: boolean) => {
           ctx.save();
@@ -1397,6 +1620,87 @@ export default function MapEditor() {
         if (wallDragRef.current) {
           const wd = wallDragRef.current;
           drawWallRect(Math.min(wd.sx, wd.ex), Math.min(wd.sy, wd.ey), Math.abs(wd.ex - wd.sx), Math.abs(wd.ey - wd.sy), true);
+        }
+
+        // ПОРТАЛЫ: сиреневая зона входа + пунктир к точке перехода + маркер точки + подпись
+        const drawPortalZone = (pz: PortalZone, idx: number, selected: boolean) => {
+          const cx = pz.x + pz.w / 2, cy = pz.y + pz.h / 2;
+          const hasT = pz.tx !== undefined && pz.ty !== undefined;
+          if (hasT) {
+            // пунктир от центра зоны к точке перехода
+            ctx.save();
+            ctx.setLineDash([8 / v.zoom, 6 / v.zoom]);
+            ctx.strokeStyle = selected ? 'rgba(255,207,63,0.9)' : 'rgba(192,122,255,0.75)';
+            ctx.lineWidth = 2 / v.zoom;
+            ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(pz.tx!, pz.ty!); ctx.stroke();
+            ctx.restore();
+            // маркер точки перехода: окружность + крест
+            const R = Math.max(6, 9 / v.zoom);
+            ctx.save();
+            ctx.strokeStyle = selected ? '#ffcf3f' : '#c07aff';
+            ctx.lineWidth = (selected ? 3 : 2) / v.zoom;
+            ctx.beginPath(); ctx.arc(pz.tx!, pz.ty!, R, 0, Math.PI * 2); ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(pz.tx! - R * 1.8, pz.ty!); ctx.lineTo(pz.tx! + R * 1.8, pz.ty!);
+            ctx.moveTo(pz.tx!, pz.ty! - R * 1.8); ctx.lineTo(pz.tx!, pz.ty! + R * 1.8);
+            ctx.stroke();
+            ctx.restore();
+          }
+          // зона входа
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(pz.x, pz.y, pz.w, pz.h);
+          ctx.fillStyle = 'rgba(192,122,255,0.15)';
+          ctx.fill();
+          ctx.setLineDash([10 / v.zoom, 7 / v.zoom]);
+          ctx.strokeStyle = selected ? '#ffcf3f' : 'rgba(192,122,255,0.9)';
+          ctx.lineWidth = (selected ? 3 : 2) / v.zoom;
+          ctx.stroke();
+          ctx.restore();
+          // вихрь в центре зоны (не рисуем, если зона крошечная)
+          if (pz.w > 26 && pz.h > 26) {
+            const R = Math.min(pz.w, pz.h) * 0.28;
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(t / 900);
+            ctx.strokeStyle = 'rgba(216,180,255,0.85)';
+            ctx.lineWidth = 2 / v.zoom;
+            for (const rr of [R, R * 0.55]) {
+              ctx.beginPath();
+              ctx.arc(0, 0, rr, 0.35, Math.PI * 1.45);
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
+          // подпись
+          const fs = 8 / v.zoom;
+          const label = `ПОРТАЛ ${idx + 1}${hasT ? (PSz ? ` → ПЛИТКА ${plateNumOf(pz.tx!, pz.ty!)}` : ' → ТОЧКА') : ' — укажите ТОЧКУ!'}`;
+          ctx.save();
+          ctx.font = `${fs}px "Press Start 2P", monospace`;
+          ctx.textAlign = 'left';
+          const tw = label.length * fs * 1.12 + 6 / v.zoom;
+          ctx.fillStyle = 'rgba(7,9,18,0.8)';
+          ctx.fillRect(cx - tw / 2, pz.y + pz.h + 3 / v.zoom, tw, fs + 5 / v.zoom);
+          ctx.fillStyle = selected ? '#ffcf3f' : 'rgba(216,180,255,0.95)';
+          ctx.fillText(label, cx - tw / 2 + 3 / v.zoom, pz.y + pz.h + 3 / v.zoom + fs + 2 / v.zoom);
+          ctx.restore();
+        };
+        for (let pi = 0; pi < (m.portals ?? []).length; pi++) {
+          drawPortalZone(m.portals![pi], pi, selPortal === pi);
+        }
+        if (portalDragRef.current) {
+          const pd = portalDragRef.current;
+          const dx0 = Math.min(pd.sx, pd.ex), dy0 = Math.min(pd.sy, pd.ey);
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(dx0, dy0, Math.abs(pd.ex - pd.sx), Math.abs(pd.ey - pd.sy));
+          ctx.fillStyle = 'rgba(192,122,255,0.15)';
+          ctx.fill();
+          ctx.setLineDash([10 / v.zoom, 7 / v.zoom]);
+          ctx.strokeStyle = '#ffcf3f';
+          ctx.lineWidth = 2.5 / v.zoom;
+          ctx.stroke();
+          ctx.restore();
         }
 
         // выделенный штамп: рамка с учётом поворота + жёлтые угловые ручки (ресайз)
@@ -1540,6 +1844,13 @@ export default function MapEditor() {
     if (wallCnt > 0 && (map.mode ?? 'classic') !== 'journey') {
       sfx.fail();
       toast(`На карте ${wallCnt} невидимых стен, но они работают только в JOURNEY. Измените режим игры на JOURNEY или удалите все стены (кнопка «Удалить все стены разом» в панели слева)`, 'err');
+      return;
+    }
+    /* ПОРТАЛЫ: у каждого должна быть точка перехода — иначе фишка перенесётся «в никуда» */
+    const noTgt = (map.portals ?? []).filter((p) => p.tx === undefined || p.ty === undefined).length;
+    if (noTgt > 0) {
+      sfx.fail();
+      toast(`У ${noTgt} портала(ов) не указана точка перехода: инструмент «Портал» → клик по порталу → кнопка «Указать точку перехода заново» в панели «Плитки и порталы», затем кликните по карте`, 'err');
       return;
     }
     await persist(map);
@@ -1799,19 +2110,30 @@ export default function MapEditor() {
               </div>
 
               <div>
-                <div className="tick-label mb-2">Размер поля (px)</div>
-                <div className="flex flex-wrap gap-1 mb-2">
-                  {SIZE_PRESETS.map((p) => (
-                    <button
-                      key={p.label}
-                      onClick={() => { updMap({ mw: p.w, mh: p.h }); sfx.hover(); }}
-                      className={`px-2 py-1 text-[9px] font-pixel border-2 cursor-pointer ${msz.w === p.w && msz.h === p.h ? 'border-gold text-gold' : 'border-edge text-faint hover:text-dim'}`}
-                    >{p.label}</button>
-                  ))}
-                </div>
+                <div className="tick-label mb-2">{map.plateSize ? 'Поле = плитки' : 'Размер поля (px)'}</div>
+                {!map.plateSize && (
+                  <div className="flex flex-wrap gap-1 mb-2">
+                    {SIZE_PRESETS.map((p) => (
+                      <button
+                        key={p.label}
+                        onClick={() => { updMap({ mw: p.w, mh: p.h }); sfx.hover(); }}
+                        className={`px-2 py-1 text-[9px] font-pixel border-2 cursor-pointer ${msz.w === p.w && msz.h === p.h ? 'border-gold text-gold' : 'border-edge text-faint hover:text-dim'}`}
+                      >{p.label}</button>
+                    ))}
+                  </div>
+                )}
                 <div className="space-y-2">
-                  <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Ширина</span><Stepper value={msz.w} onChange={(v) => resizeField('mw', v)} min={640} max={4096} step={160} /></div>
-                  <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Высота</span><Stepper value={msz.h} onChange={(v) => resizeField('mh', v)} min={640} max={4096} step={160} /></div>
+                  {map.plateSize ? (
+                    <p className="text-[10px] text-dim leading-tight border-2 border-sky/40 px-2 py-1.5">
+                      Поле {msz.w}×{msz.h} px = {platesX}×{platesY} плиток по {map.plateSize} px.
+                      Размер и навигатор плиток — в спойлере «Плитки и порталы» ниже.
+                    </p>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Ширина</span><Stepper value={msz.w} onChange={(v) => resizeField('mw', v)} min={640} max={MAX_FIELD} step={160} /></div>
+                      <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Высота</span><Stepper value={msz.h} onChange={(v) => resizeField('mh', v)} min={640} max={MAX_FIELD} step={160} /></div>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -1892,6 +2214,69 @@ export default function MapEditor() {
                         <p className="text-[10px] text-dim leading-tight">Клик по стене — выбрать и тянуть, Delete — удалить выбранную. Можно убрать все стены одной кнопкой:</p>
                         <PxBtn color="coral" small className="w-full" onClick={removeAllWalls}>{Ic.trash(12)} Удалить все стены разом</PxBtn>
                       </>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <button
+                  onClick={() => setPlatesOpen((v) => !v)}
+                  className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
+                  title={platesOpen ? 'Свернуть' : 'Развернуть'}
+                >
+                  <span className={`text-[10px] shrink-0 ${platesOpen ? 'text-gold' : 'text-faint'}`}>{platesOpen ? '▾' : '▸'}</span>
+                  <span className="tick-label">Плитки и порталы · {(map.portals ?? []).length}{map.plateSize ? ` · ${platesX}×${platesY}` : ''}</span>
+                </button>
+                {platesOpen && (
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] text-faint leading-tight">Два способа сделать карту БОЛЬШОЙ: 1) просто увеличьте «Размер поля» выше; 2) ПЛИТКИ — страницы поля одинакового размера: СОСЕДНИЕ плитки стыкуются краями (фишка переходит ходьбой в любом месте стыка), ЛЮБЫЕ плитки связываются порталами-телепортами.</p>
+                    {!map.plateSize ? (
+                      <PxBtn color="sky" small className="w-full" onClick={enablePlates}>{Ic.grid(12)} Разбить поле на плитки</PxBtn>
+                    ) : (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] text-dim">Сторона плитки</span>
+                          <div className="flex gap-1">
+                            {PLATE_SIZES.map((ps) => (
+                              <button
+                                key={ps}
+                                onClick={() => { applyPlates(ps, Math.max(1, Math.ceil(msz.w / ps)), Math.max(1, Math.ceil(msz.h / ps))); sfx.hover(); }}
+                                className={`px-2 py-1 text-[9px] font-pixel border-2 cursor-pointer ${map.plateSize === ps ? 'border-gold text-gold' : 'border-edge text-faint hover:text-dim'}`}
+                              >{ps}</button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Плиток по X</span><Stepper value={platesX} onChange={(v) => applyPlates(map.plateSize!, v, platesY)} min={1} max={plateCountMax} step={1} /></div>
+                        <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Плиток по Y</span><Stepper value={platesY} onChange={(v) => applyPlates(map.plateSize!, platesX, v)} min={1} max={plateCountMax} step={1} /></div>
+                        <div>
+                          <div className="tick-label mb-1">Переход к плитке (клик — камера туда)</div>
+                          <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${Math.min(platesX, 8)}, minmax(0, 1fr))` }}>
+                            {Array.from({ length: Math.min(platesX * platesY, 64) }, (_, i) => {
+                              const col = i % platesX, row = Math.floor(i / platesX);
+                              return (
+                                <button
+                                  key={i}
+                                  onClick={() => jumpToPlate(col, row)}
+                                  className={`py-1 text-[9px] font-pixel border-2 cursor-pointer ${curPlateIdx === i ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}
+                                >{i + 1}</button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                        <PxBtn color="coral" small className="w-full" onClick={disablePlates}>Убрать разбивку (одно поле)</PxBtn>
+                      </>
+                    )}
+                    <p className="text-[10px] text-faint leading-tight border-t-2 border-edge pt-1.5">ПОРТАЛ (инструмент «Портал»): протяните зону входа, затем кликните по карте — куда переносить (плитку переключите навигатором выше). Фишка войдёт в зону — мгновенный перенос. Работает в JOURNEY при свободном хождении; в CLASSIC/SKILL связывайте плитки стрелками «Переход» между ячейками — их прыжок достаёт до любой плитки. Клик по порталу — выбрать/тянуть, Delete — удалить.</p>
+                    {selPortal !== null && (map.portals ?? [])[selPortal] && (
+                      <div className="border-2 border-gold/50 px-2 py-1.5 space-y-1.5">
+                        <div className="text-[10px] text-gold font-display uppercase">Портал {selPortal + 1}{(map.portals![selPortal].tx !== undefined ? ` → плитка ${plateNumOf(map.portals![selPortal].tx!, map.portals![selPortal].ty!)}` : ' — без точки перехода')}</div>
+                        <PxBtn color="sky" small className="w-full" onClick={() => { setPickTargetFor(selPortal); sfx.click(); }}>Указать точку перехода заново</PxBtn>
+                        <PxBtn color="coral" small className="w-full" onClick={() => removePortal(selPortal)}>{Ic.trash(12)} Удалить портал</PxBtn>
+                      </div>
+                    )}
+                    {(map.portals ?? []).length > 0 && (
+                      <PxBtn color="coral" small className="w-full" onClick={removeAllPortals}>{Ic.trash(12)} Удалить все порталы разом</PxBtn>
                     )}
                   </div>
                 )}
@@ -2130,6 +2515,7 @@ export default function MapEditor() {
                 {tool === 'hop' && <div className="text-coral font-pixel text-[8px]">ПЕРЕХОД: клик по ячейке А, затем по Б — при остановке на А фишка прыгнет на Б · Esc — отмена{linkFrom !== null ? ' · выбрана А, жмите Б' : ''}</div>}
                 {tool === 'erase' && <div className="text-coral font-pixel text-[8px]">ЛАСТИК: клик или тяните с кнопкой — стирает ТАЙЛЫ под курсором · ячейки не трогает</div>}
                 {tool === 'wall' && <div className="text-coral font-pixel text-[8px]">СТЕНА: протяните прямоугольник — фишка не зайдёт внутрь (работает ТОЛЬКО в JOURNEY, в игре невидима) · клик по стене — выбрать и тянуть · Delete — удалить</div>}
+                {tool === 'portal' && <div className="text-[rgb(192,122,255)] font-pixel text-[8px]">{pickTargetFor !== null ? `ПОРТАЛ ${pickTargetFor + 1}: кликните по карте — КУДА переносить (плитку переключите в панели «Плитки и порталы») · Esc — отмена` : 'ПОРТАЛ: протяните зону входа · после этого кликните по карте — куда переносить · клик по порталу — выбрать и тянуть · Delete — удалить'}</div>}
               </div>
               <div className="absolute bottom-3 right-3 tick-label text-faint text-right pointer-events-none">
                 колесо — зум · ПКМ — камера · Delete — удалить (по режиму из Опций) · R — поворот · жёлтый угол тайла — размер
