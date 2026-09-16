@@ -1,14 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../store';
 import { Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
 import { openRoom, dispatch } from '../useGame';
 import { genRoomCode } from '../net';
 import { newSession, fmtClock } from '../engine';
-import { idbAll, idbDel, idbGet, idbPut, uid } from '../db';
+import { exportGame, importGame, idbAll, idbDel, idbGet, idbPut, uid } from '../db';
 import { downloadHostBat } from '../host/hostPackage';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import type { BossAnimDef, GameMap, MapMode, SessionSnapshot, TokenDef } from '../types';
-import { bossLibEntryOf, PLAYER_COLORS, PLAYER_NAMES } from '../types';
+import { bossLibEntryOf, isSoloMode, PLAYER_COLORS, PLAYER_NAMES } from '../types';
 import { sfx } from '../sound';
 
 /* ---------- создание игры ---------- */
@@ -41,9 +41,11 @@ const freshMapWithTokens = async (mapId: string): Promise<GameMap | null> => {
 };
 
 export function CreateScreen() {
-  const { maps, roms, setScreen, toast } = useApp();
+  const { maps, roms, setScreen, toast, refresh } = useApp();
   const ready = maps.filter((m) => m.ready);
   const [sel, setSel] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [expBusy, setExpBusy] = useState<string | null>(null);
   /* фильтры/сортировка списка карт: режим, консоль заданий, квизы/бонусы/ловушки */
   const [fMode, setFMode] = useState<'all' | MapMode>('all');
   const [fCons, setFCons] = useState<'all' | 'nes' | 'sega'>('all');
@@ -69,9 +71,10 @@ export function CreateScreen() {
   };
 
   const modeChip: Record<MapMode, { label: string; cls: string }> = {
-    classic: { label: 'CLASSIC', cls: 'border-edge text-faint' },
+    classic: { label: 'RETROPOLIA', cls: 'border-edge text-faint' },
     skill: { label: 'SKILL CHALLENGE', cls: 'border-magma/60 text-magma' },
-    journey: { label: 'JOURNEY', cls: 'border-teal/60 text-teal' },
+    journey: { label: 'TRIATHLON', cls: 'border-teal/60 text-teal' },
+    journey1p: { label: 'JOURNEY', cls: 'border-sky/60 text-sky' },
   };
 
   const shown = ready
@@ -88,7 +91,7 @@ export function CreateScreen() {
     .sort((a, b) => {
       if (sortBy === 'name') return a.name.localeCompare(b.name, 'ru');
       if (sortBy === 'mode') {
-        const order: MapMode[] = ['classic', 'skill', 'journey'];
+        const order: MapMode[] = ['classic', 'skill', 'journey', 'journey1p'];
         const d = order.indexOf(mapFacts(a).mode) - order.indexOf(mapFacts(b).mode);
         return d !== 0 ? d : a.name.localeCompare(b.name, 'ru');
       }
@@ -122,24 +125,81 @@ export function CreateScreen() {
     })();
   };
 
+  /* ЭКСПОРТ ИГРЫ: карта + задания (сохранения и ромы) в один .json —
+     передайте файл другу (соцсеть, мессенджер) — он загрузит его кнопкой
+     «Загрузить игру» и откроет СВОЮ комнату этой игры */
+  const exportOne = (m: GameMap) => {
+    if (expBusy) return;
+    setExpBusy(m.id);
+    void (async () => {
+      try {
+        const json = await exportGame(m.id);
+        const blob = new Blob([json], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        const safe = m.name.replace(/[^\wа-яёА-ЯЁ -]/g, '').trim() || 'game';
+        a.download = `${safe}.retrochallenge.json`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        sfx.success();
+        toast(`Игра «${m.name}» сохранена в файл — передайте его другу, тот откроет её кнопкой «Загрузить игру»`, 'ok');
+      } catch {
+        sfx.fail();
+        toast('Не удалось собрать файл игры', 'err');
+      } finally {
+        setExpBusy(null);
+      }
+    })();
+  };
+
+  /* ИМПОРТ ИГРЫ из файла: карта + ромы + сохранения заданий уезжают в библиотеку */
+  const importOne = (file: File) => {
+    void (async () => {
+      try {
+        const name = await importGame(await file.text());
+        await refresh();
+        sfx.success();
+        toast(`Игра «${name}» загружена в библиотеку — выбирайте и открывайте комнату`, 'ok');
+      } catch {
+        sfx.fail();
+        toast('Это не файл игры RETRO CHALLENGE GENERATOR (нужен .json, полученный кнопкой «Сохранить в файл»)', 'err');
+      }
+    })();
+  };
+
   return (
     <div className="h-full crt-grid-bg overflow-y-auto">
       <div className="max-w-4xl mx-auto px-6 py-8">
-        <div className="flex items-center gap-4 mb-2">
+        <div className="flex items-center gap-4 mb-2 flex-wrap">
           <GhostBtn onClick={() => setScreen('menu')}>{Ic.back(14)} Меню</GhostBtn>
           <h1 className="font-display text-2xl uppercase tracking-wider text-gold flex items-center gap-3">
             <span className="text-gold">{Ic.dice(22)}</span> Создание игры
           </h1>
+          <div className="ml-auto">
+            <PxBtn color="sky" onClick={() => { fileRef.current?.click(); sfx.click(); }}>{Ic.save(14)} Загрузить игру</PxBtn>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".json,application/json"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) importOne(f);
+                e.target.value = ''; // тот же файл можно выбрать повторно
+              }}
+            />
+          </div>
         </div>
-        <p className="text-[13px] text-dim mb-4">Выберите готовую карту — комната получит её автоматически, все игроки будут на одном поле.</p>
+        <p className="text-[13px] text-dim mb-4">Выберите готовую карту — комната получит её автоматически, все игроки будут на одном поле. Файл игры от друга — кнопка «Загрузить игру» сверху.</p>
         {ready.length > 0 && (
           <div className="mb-5 space-y-2">
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="tick-label text-faint mr-1 shrink-0">Режим:</span>
               {chip(fMode === 'all', 'Все', () => setFMode('all'))}
-              {chip(fMode === 'classic', 'Classic', () => setFMode('classic'))}
+              {chip(fMode === 'classic', 'Retropolia', () => setFMode('classic'))}
               {chip(fMode === 'skill', 'Skill Challenge', () => setFMode('skill'), 'magma')}
-              {chip(fMode === 'journey', 'Journey', () => setFMode('journey'), 'teal')}
+              {chip(fMode === 'journey', 'Triathlon', () => setFMode('journey'), 'teal')}
+              {chip(fMode === 'journey1p', 'Journey', () => setFMode('journey1p'), 'sky')}
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="tick-label text-faint mr-1 shrink-0">Консоль:</span>
@@ -167,19 +227,22 @@ export function CreateScreen() {
             </div>
           </div>
         )}
-        <div className="grid sm:grid-cols-2 gap-4">
+        <div className="grid gap-4"> {/* ОДНА игра на всю ширину строки (без деления на две плитки) */}
           {shown.map((m: GameMap) => (
             <button
               key={m.id}
               onClick={() => { setSel(m.id); sfx.hover(); }}
               className={`text-left pixel-panel pixel-corners p-4 transition-all cursor-pointer hover:-translate-y-0.5 ${sel === m.id ? 'border-gold shadow-[0_0_24px_rgba(255,207,63,0.25)]' : 'hover:border-edge2'}`}
             >
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
                 <span className="font-display uppercase text-paper text-lg">{m.name}</span>
-                <span className={`font-pixel text-[7px] px-1.5 py-0.5 border-2 shrink-0 ${modeChip[mapFacts(m).mode].cls}`}>{modeChip[mapFacts(m).mode].label}</span>
+                <span className="flex items-center gap-1.5 flex-wrap">
+                  {m.customName && <span className="font-pixel text-[7px] px-1.5 py-0.5 border-2 border-[#ff8b3f]/60 text-[#ff8b3f] shrink-0" title={`Свой режим: ${m.customName}`}>СВОЙ: {m.customName}</span>}
+                  <span className={`font-pixel text-[7px] px-1.5 py-0.5 border-2 shrink-0 ${modeChip[mapFacts(m).mode].cls}`}>{modeChip[mapFacts(m).mode].label}</span>
+                </span>
               </div>
-              <div className="tick-label text-faint mt-2">{(() => { const f = mapFacts(m); return `${f.cells} ячеек на маршруте`; })()}</div>
-              <div className="mt-2.5 grid grid-cols-2 gap-x-3 gap-y-1">
+              <div className="tick-label text-faint mt-2">{(() => { const f = mapFacts(m); return `${f.cells} ячеек на маршруте`; })()}{m.tileGrid ? ` · плиточный режим (${m.tileGrid.tiles.length} карт-локаций)` : ''}</div>
+              <div className="mt-2.5 grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-1">
                 {(() => {
                   const f = mapFacts(m);
                   const rows: { on: boolean; label: string; color: string }[] = [
@@ -203,20 +266,31 @@ export function CreateScreen() {
                 <span className="font-pixel text-[8px] text-faint">·</span>
                 <span className="font-display text-[11px] uppercase text-sky">{m.startTries ?? 60} попыток</span>
                 <span className="text-[10px] text-faint">у каждого игрока</span>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => { e.stopPropagation(); exportOne(m); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); exportOne(m); } }}
+                  title="Сохранить игру в файл: передайте его другу (соцсеть/мессенджер) — тот откроет игру кнопкой «Загрузить игру» и сам станет хостом"
+                  className="ml-auto btn-ghost pixel-corners px-3 py-1.5 text-[10px] font-display uppercase inline-flex items-center gap-1.5 cursor-pointer hover:text-gold"
+                >
+                  {expBusy === m.id ? 'Собираю…' : <>{Ic.save(12)} Сохранить в файл</>}
+                </span>
               </div>
             </button>
           ))}
           {shown.length === 0 && ready.length > 0 && (
-            <div className="pixel-corners border-[3px] border-dashed border-edge p-6 text-center text-dim text-sm sm:col-span-2">
+            <div className="pixel-corners border-[3px] border-dashed border-edge p-6 text-center text-dim text-sm">
               Под эти фильтры карт нет — ослабьте условия (сбросьте галочки сверху).
             </div>
           )}
           {ready.length === 0 && (
-            <div className="pixel-corners border-[3px] border-dashed border-edge p-6 text-center text-dim text-sm sm:col-span-2">
-              Готовых карт нет. Соберите карту и наполните её заданиями.
-              <div className="mt-3 flex gap-3 justify-center">
+            <div className="pixel-corners border-[3px] border-dashed border-edge p-6 text-center text-dim text-sm">
+              Готовых карт нет. Соберите карту и наполните её заданиями — или загрузите игру файлом от друга.
+              <div className="mt-3 flex gap-3 justify-center flex-wrap">
                 <PxBtn color="teal" onClick={() => setScreen('mapEditor')}>{Ic.map(14)} Редактор карт</PxBtn>
                 <PxBtn color="magma" onClick={() => setScreen('taskEditor')}>{Ic.cart(14)} Редактор заданий</PxBtn>
+                <PxBtn color="sky" onClick={() => { fileRef.current?.click(); sfx.click(); }}>{Ic.save(14)} Загрузить игру</PxBtn>
               </div>
             </div>
           )}
@@ -733,9 +807,10 @@ export function LobbyScreen() {
               <span className="text-gold">{Ic.map(16)}</span>
               <span className="font-display uppercase tracking-wider text-paper text-sm">{sessionMap.name}</span>
               {sessionMap.mode === 'skill' && <span className="font-pixel text-[7px] px-1.5 py-0.5 border-2 border-magma/60 text-magma shrink-0">SKILL CHALLENGE</span>}
-              {sessionMap.mode === 'journey' && <span className="font-pixel text-[7px] px-1.5 py-0.5 border-2 border-teal/60 text-teal shrink-0">JOURNEY</span>}
-              {sessionMap.mode === 'skill' && <span className="tick-label text-magma ml-auto">играет только хост · остальные — зрители</span>}
-              {sessionMap.mode !== 'skill' && <span className="tick-label text-faint ml-auto">карту раздаёт хост — у всех игроков она одинаковая</span>}
+              {sessionMap.mode === 'journey' && <span className="font-pixel text-[7px] px-1.5 py-0.5 border-2 border-teal/60 text-teal shrink-0">TRIATHLON</span>}
+              {sessionMap.mode === 'journey1p' && <span className="font-pixel text-[7px] px-1.5 py-0.5 border-2 border-sky/60 text-sky shrink-0">JOURNEY</span>}
+              {(sessionMap.mode === 'skill' || sessionMap.mode === 'journey1p') && <span className="tick-label text-magma ml-auto">играет только хост · остальные — зрители</span>}
+              {sessionMap.mode !== 'skill' && sessionMap.mode !== 'journey1p' && <span className="tick-label text-faint ml-auto">карту раздаёт хост — у всех игроков она одинаковая</span>}
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1">
               {(() => {
@@ -927,10 +1002,10 @@ export function LobbyScreen() {
             </PxBtn>
           )}
           {isHost && !resumeSnap && (() => {
-            const skillSolo = sessionMap?.mode === 'skill';
-            const fewPlayers = session.players.length < 2 && !skillSolo;
-            const notReady = skillSolo ? false : session.players.some((p) => !p.ready);
-            const notLoaded = skillSolo ? false : session.players.some((p) => !p.isHost && (sync[p.id] ?? 0) < 100);
+            const soloGame = isSoloMode(sessionMap?.mode); // SKILL CHALLENGE и одиночный JOURNEY — можно стартовать одному
+            const fewPlayers = session.players.length < 2 && !soloGame;
+            const notReady = soloGame ? false : session.players.some((p) => !p.ready);
+            const notLoaded = soloGame ? false : session.players.some((p) => !p.isHost && (sync[p.id] ?? 0) < 100);
             const blocked = fewPlayers || notReady || notLoaded;
             return (
               <PxBtn
@@ -938,9 +1013,9 @@ export function LobbyScreen() {
                 color="gold"
                 onClick={() => dispatch({ t: 'start' })}
                 disabled={blocked}
-                title={fewPlayers ? 'Для партии нужно минимум два игрока (в SKILL CHALLENGE можно начать и одному)' : notReady ? 'Все игроки должны быть готовы' : notLoaded ? 'Ждём, пока все игроки загрузят данные карты' : undefined}
+                title={fewPlayers ? 'Для партии нужно минимум два игрока (в SKILL CHALLENGE и одиночном JOURNEY можно начать и одному)' : notReady ? 'Все игроки должны быть готовы' : notLoaded ? 'Ждём, пока все игроки загрузят данные карты' : undefined}
               >
-                {Ic.dice(18)} {fewPlayers ? (skillSolo ? 'Начать (вы один — зрители подтянутся)' : 'Ждём игроков…') : notLoaded ? 'Загрузка данных…' : 'Начать игру'}
+                {Ic.dice(18)} {fewPlayers ? (soloGame ? 'Начать (вы один — зрители подтянутся)' : 'Ждём игроков…') : notLoaded ? 'Загрузка данных…' : 'Начать игру'}
               </PxBtn>
             );
           })()}

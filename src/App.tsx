@@ -12,6 +12,7 @@ import EditorsHub from './screens/EditorsHub';
 import EmulatorLauncher from './screens/EmulatorLauncher';
 import OptionsScreen from './screens/OptionsScreen';
 import GameScreen from './screens/GameScreen';
+import ChallengeWizard from './screens/ChallengeWizard';
 import { CreateScreen, JoinScreen, LoadScreen, LobbyScreen } from './screens/Lobby';
 
 export default function App() {
@@ -87,6 +88,7 @@ export default function App() {
       {screen === 'create' && <CreateScreen />}
       {screen === 'join' && <JoinScreen />}
       {screen === 'load' && <LoadScreen />}
+      {screen === 'challenge' && <ChallengeWizard />}
       {screen === 'lobby' && <LobbyScreen />}
       {screen === 'game' && <GameScreen />}
       {screen === 'mapEditor' && <MapEditor />}

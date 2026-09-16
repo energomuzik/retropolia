@@ -15,7 +15,7 @@ import {
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
-import { PLAYER_COLORS, SKIP_COST, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf } from '../types';
+import { PLAYER_COLORS, SKIP_COST, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, tileAt, tileRectOf, tileNumOf } from '../types';
 import type { AnimClip, CardDef, ChaosKind, GameMap, PortalZone, TaskDef, TokenDir } from '../types';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
@@ -157,7 +157,8 @@ export default function GameScreen() {
   const active = s ? s.players[s.turn % s.players.length] : null;
   const myTurn = !!active && active.id === me;
   const ch = s?.challenge ?? null;
-  const isJourney = map?.mode === 'journey';
+  const isJourney = isJourneyLike(map?.mode); // TRIATHLON и одиночный JOURNEY — одна механика свободного хождения
+  const isSoloJourney = map?.mode === 'journey1p';
   const isSkill = map?.mode === 'skill';
   const task = s && map && ch ? cellTaskOf(s, map, ch.cellIdx) : null;
   const activeChaos = task?.chaos ? [task.chaos] : [];
@@ -522,7 +523,7 @@ export default function GameScreen() {
         // скорость фишек — ТОЛЬКО из карты (кл/с); менять её можно в редакторе карт,
         // прямо во время партии скорость не меняется (не было такой функции и не нужно)
         const cps = clampMoveSpeed(m.moveSpeed ?? DEF_MOVE_SPEED);
-        const journeyMode = m.mode === 'journey';
+        const journeyMode = isJourneyLike(m.mode);
         const mszJ = journeyMode ? mapSize(m) : null;
         let anyoneMoving = false;
         const mapToks = m.mapTokens ?? [];
@@ -591,8 +592,19 @@ export default function GameScreen() {
                 const spd = cps * CELL * (dt / 60); // px за кадр — скорость из карты
                 // НЕВИДИМЫЕ СТЕНЫ: пробуем ось X и ось Y отдельно — фишка СКОЛЬЗИТ по стене,
                 // а не залипает в ней; центр фишки не заходит внутрь прямоугольника стены
-                const nx = Math.max(8, Math.min((mszJ?.w ?? 2048) - 8, self.x + (vx / len) * spd));
-                const ny = Math.max(8, Math.min((mszJ?.h ?? 2048) - 8, self.y + (vy / len) * spd));
+                let nx = Math.max(8, Math.min((mszJ?.w ?? 2048) - 8, self.x + (vx / len) * spd));
+                let ny = Math.max(8, Math.min((mszJ?.h ?? 2048) - 8, self.y + (vy / len) * spd));
+                // ПЛИТОЧНЫЙ РЕЖИМ КАРТ: фишка НЕ выходит за край СВОЕЙ карты-плитки
+                // (скользит по краю, как по стене); портал переносит НАПРЯМУЮ — без зажима
+                const tgJ = m.tileGrid;
+                if (tgJ) {
+                  const ct = tileAt(tgJ, self.x, self.y) ?? tileAt(tgJ, nx, ny);
+                  if (ct) {
+                    const tr = tileRectOf(tgJ, ct);
+                    nx = Math.max(tr.x + 8, Math.min(tr.x + tr.w - 8, nx));
+                    ny = Math.max(tr.y + 8, Math.min(tr.y + tr.h - 8, ny));
+                  }
+                }
                 if (!inWall(m, nx, self.y)) self.x = nx;
                 if (!inWall(m, self.x, ny)) self.y = ny;
                 self.dir = Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? 'right' : 'left') : (vy > 0 ? 'down' : 'up');
@@ -808,7 +820,7 @@ export default function GameScreen() {
           const fv = fitView(m, w, h);
           goal = { x: fv.x + worldPanRef.current.x, y: fv.y + worldPanRef.current.y, zoom: fv.zoom * worldZoom };
         } else {
-          /* JOURNEY: в свободном режиме каждый следит за СВОЕЙ фишкой (ходят одновременно);
+          /* TRIATHLON: в свободном режиме каждый следит за СВОЕЙ фишкой (ходят одновременно);
              пока идёт задание — камера у всех на игроке задания (трансляция, как всегда) */
           const followId = journeyMode && journeyFree ? me : act?.id;
           const followP = followId ? dispRef.current[followId] : undefined;
@@ -816,9 +828,24 @@ export default function GameScreen() {
           const focus = anyoneMoving ? 1.5 : 1.0; // приближаемся, пока фишку передвигают
           const zx = Math.min(2.6, baseZx * focus);
           const msz = mapSize(m);
+          let gx = (followP?.x ?? msz.w / 2) + lookPanRef.current.x;
+          let gy = (followP?.y ?? msz.h / 2) + lookPanRef.current.y;
+          /* ПЛИТОЧНЫЙ РЕЖИМ КАРТ: камера НЕ показывает соседние карты-локации —
+             центр кадра зажат в прямоугольник карты-плитки, ЗА КОТОРОЙ следует
+             наблюдаемый (своя фишка в свободном режиме / игрок задания) */
+          const tgC = m.tileGrid;
+          if (tgC && followP) {
+            const ft = tileAt(tgC, followP.x, followP.y);
+            if (ft) {
+              const fr = tileRectOf(tgC, ft);
+              const vw = w / (zx * lookZoomRef.current), vh = h / (zx * lookZoomRef.current);
+              gx = vw >= fr.w ? fr.x + fr.w / 2 : Math.max(fr.x + vw / 2, Math.min(fr.x + fr.w - vw / 2, gx));
+              gy = vh >= fr.h ? fr.y + fr.h / 2 : Math.max(fr.y + vh / 2, Math.min(fr.y + fr.h - vh / 2, gy));
+            }
+          }
           goal = {
-            x: (followP?.x ?? msz.w / 2) + lookPanRef.current.x,
-            y: (followP?.y ?? msz.h / 2) + lookPanRef.current.y,
+            x: gx,
+            y: gy,
             zoom: zx * lookZoomRef.current,
           };
         }
@@ -1131,7 +1158,7 @@ export default function GameScreen() {
     <div className="h-full crt-grid-bg flex flex-col overflow-hidden">
       {/* ---------- HUD ---------- */}
       <div className="shrink-0 border-b-[3px] border-edge bg-[rgba(7,9,18,0.82)] px-3 py-2 flex items-center gap-2 flex-wrap z-20">
-        <span className="font-pixel text-[9px] text-gold hidden sm:block">RETROPOLIA</span>
+        <span className="font-pixel text-[9px] text-gold hidden sm:block">RETRO CHALLENGE GENERATOR</span>
         {/* код комнаты: с включённым «скрывать код» — точки вместо кода; глазик рядом
             показывает/прячет код, выбор запоминается (общая опция с экраном лобби) */}
         <span className="hud-chip pixel-corners px-2.5 py-1 font-pixel text-[9px] text-sky" title={options.hideRoomCode ? 'Код скрыт' : 'Код комнаты'}>{options.hideRoomCode ? '••••' : s.code}</span>
@@ -1144,7 +1171,20 @@ export default function GameScreen() {
           {options.hideRoomCode ? Ic.eye(12) : Ic.eyeOff(12)}
         </button>
         {isSkill && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-magma">SKILL CHALLENGE</span>}
-        {isJourney && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal">JOURNEY</span>}
+        {map?.mode === 'journey' && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal">TRIATHLON</span>}
+        {isSoloJourney && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-sky">JOURNEY · ОДИН</span>}
+        {(() => {
+          /* плиточный режим: номер карты-локации, за которой сейчас камера
+             (в свободном хождении — своя фишка, иначе — игрок текущего хода/задания) */
+          const tg = map?.tileGrid;
+          if (!tg || !tg.tiles.length) return null;
+          const jFree = s.phase === 'playing' && !s.moving && !s.challenge && !s.pendingCard && !s.quiz && !s.awaitPost && !(s.fxs ?? []).some((f) => f.gate);
+          const followId = (isJourney && jFree ? me : active?.id) ?? '';
+          const fp = dispRef.current[followId];
+          const ft = fp ? tileAt(tg, fp.x, fp.y) : null;
+          if (!ft) return null;
+          return <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal" title="Плиточный режим: каждая плитка — отдельная карта-локация; между ними — порталы">📍 ЛОКАЦИЯ {tileNumOf(tg, ft.id)}/{tg.tiles.length}</span>;
+        })()}
         {isSkill && s.phase === 'playing' && (
           <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-gold" title="Лимит ходов хоста в SKILL CHALLENGE">
             ХОД {Math.min(s.turnNo ?? 1, SKILL_TURNS)}/{SKILL_TURNS}
@@ -1542,9 +1582,9 @@ export default function GameScreen() {
             <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.6)] z-10">
               <div className="pixel-panel pixel-corners pop-in p-7 max-w-lg w-full mx-4 text-center">
                 <span className="text-gold inline-block floaty">{isJourney ? Ic.pawn(40) : Ic.dice(40)}</span>
-                <div className="font-pixel text-gold text-[11px] mt-3">{isJourney ? 'ВСЕ СТАРТУЮТ ОДНОВРЕМЕННО' : 'ПЕРВЫМ ХОДИТ'}</div>
+                <div className="font-pixel text-gold text-[11px] mt-3">{isJourney ? (isSoloJourney ? 'ОДИНОКОЕ ПРИКЛЮЧЕНИЕ' : 'ВСЕ СТАРТУЮТ ОДНОВРЕМЕННО') : 'ПЕРВЫМ ХОДИТ'}</div>
                 {isJourney ? (
-                  <p className="text-[11px] text-dim mt-2">Жеребьёвки нет — каждый ведёт СВОЮ фишку со старта. Кто ПЕРВЫМ пересечёт ячейку задания — у того оно и откроется, остальные будут смотреть.</p>
+                  <p className="text-[11px] text-dim mt-2">{isSoloJourney ? 'Играет ТОЛЬКО ХОСТ — все подключившиеся смотрят трансляцию. Жеребьёвки нет: фишка хоста идёт свободно от старта.' : 'Жеребьёвки нет — каждый ведёт СВОЮ фишку со старта. Кто ПЕРВЫМ пересечёт ячейку задания — у того оно и откроется, остальные будут смотреть.'}</p>
                 ) : (
                   <div
                     className="font-display uppercase text-3xl mt-2"
@@ -1554,6 +1594,7 @@ export default function GameScreen() {
                   </div>
                 )}
                 {isSkill && <p className="text-[11px] text-magma mt-2">SKILL CHALLENGE: играть будет только хост — вы зритель{mePlayer?.spect ? ' (и вы тоже)' : ''}.</p>}
+                {isSoloJourney && mePlayer?.spect && <p className="text-[11px] text-sky mt-2">JOURNEY: играет хост — вы зритель трансляции.</p>}
                 {!isJourney && (
                   <div className="flex justify-center gap-4 mt-5 flex-wrap">
                     {roster.map((p) => (

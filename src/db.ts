@@ -1,10 +1,12 @@
 const DB_NAME = 'retropolia-db';
+import type { GameMap, RomDef, SaveDef } from './types';
 // v2: добавлено хранилище 'tokens' (фишки игроков)
 // v3: добавлены 'anims' (анимации автора), 'animTiles' и 'animGroups' (библиотека тайлов редактора анимаций)
 // v4: добавлено 'sounds' (звуковая библиотека для анимаций карт и фишек)
 // v5: добавлено 'bossAnims' (боссы: idle + реакции на победу/поражение со звуками)
-const DB_VERSION = 5;
-export const STORES = ['tiles', 'maps', 'roms', 'saves', 'blobs', 'sessions', 'tokens', 'anims', 'animTiles', 'animGroups', 'sounds', 'bossAnims'] as const;
+// v6: добавлено 'challenges' (свои челленджи из мастера «Создать челлендж»)
+const DB_VERSION = 6;
+export const STORES = ['tiles', 'maps', 'roms', 'saves', 'blobs', 'sessions', 'tokens', 'anims', 'animTiles', 'animGroups', 'sounds', 'bossAnims', 'challenges'] as const;
 export type StoreName = (typeof STORES)[number];
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -135,4 +137,98 @@ export async function importLibrary(json: string): Promise<number> {
     }
   }
   return n;
+}
+
+/* ---------- ЭКСПОРТ / ИМПОРТ ОДНОЙ ИГРЫ (кнопки в «Создании игры») ----------
+   Игра = карта + всё, что ей нужно для партии у ДРУГА: сохранения заданий
+   (уровни/боссы/моё задание) и РОМЫ (base64). Фишки/боссы/анимации/звуки/фоны
+   уже вшиты В КАРТУ — отдельно не возятся. Ром нужен только на ячейки с
+   заданиями: без него игра загрузится, но задания попросят ром отдельно. */
+
+export interface ExportedGame {
+  app: 'retropolia-game';
+  version: 1;
+  exportedAt: number;
+  map: GameMap;
+  saves: SaveDef[]; // сохранения заданий карты (kind: level/boss/mytask/private)
+  roms: { def: RomDef; b64: string }[]; // ромы заданий карты (base64 ArrayBuffer)
+}
+
+/** Собирает ОДНУ игру в JSON-строку для передачи другу (файл .json). */
+export async function exportGame(mapId: string): Promise<string> {
+  const me = await idbGet<GameMap>('maps', mapId);
+  if (!me) throw new Error('Карта не найдена');
+  const map = JSON.parse(JSON.stringify(me)) as GameMap;
+  // какие сохранения и ромы нужны заданиям карты
+  const saveIds = new Set<string>();
+  const romIds = new Set<string>();
+  for (const c of map.cells ?? []) {
+    const t = c.task;
+    if (!t) continue;
+    if (t.saveId) saveIds.add(t.saveId);
+    if (t.romId) romIds.add(t.romId);
+  }
+  const saves: SaveDef[] = [];
+  for (const s of await idbAll<SaveDef>('saves')) {
+    if (saveIds.has(String(s.key))) saves.push(JSON.parse(JSON.stringify(s.value)));
+  }
+  const roms: ExportedGame['roms'] = [];
+  for (const rid of romIds) {
+    const rd = await idbGet<RomDef>('roms', rid);
+    const blob = await idbGet<ArrayBuffer>('blobs', `rom-${rid}`);
+    if (rd && blob) roms.push({ def: JSON.parse(JSON.stringify(rd)), b64: abToB64(blob) });
+  }
+  return JSON.stringify({ app: 'retropolia-game', version: 1, exportedAt: Date.now(), map, saves, roms } as ExportedGame);
+}
+
+/** Импортирует игру из JSON-строки. Возвращает имя карты. Коллизии id решаются
+ *  новыми id с перенаправлением ссылок заданий (romId/saveId). */
+export async function importGame(json: string): Promise<string> {
+  const data = JSON.parse(json) as ExportedGame;
+  if (!data || data.app !== 'retropolia-game' || !data.map || !Array.isArray(data.map.cells)) {
+    throw new Error('Это не файл игры RETROPOLIA');
+  }
+  const map = JSON.parse(JSON.stringify(data.map)) as GameMap;
+  const now = Date.now();
+  // коллизия id карты → новая карта (можно импортировать одну игру несколько раз)
+  if (await idbGet('maps', map.id)) map.id = uid('map');
+  map.ready = true;
+  map.updatedAt = now;
+  // ромы: существующие не трогаем, новые пишем под свежими id + правим ссылки в заданиях
+  const romMap: Record<string, string> = {};
+  for (const r of data.roms ?? []) {
+    const hasDef = !!(await idbGet('roms', r.def.id));
+    const hasBlob = !!(await idbGet('blobs', `rom-${r.def.id}`));
+    let rid = r.def.id;
+    if (!hasDef || !hasBlob) {
+      if (hasDef || hasBlob) rid = uid('rom'); // частичная коллизия — пишем как новый
+      const def = { ...r.def, id: rid };
+      await idbPut('roms', rid, def);
+      await idbPut('blobs', `rom-${rid}`, b64ToAb(r.b64));
+    }
+    romMap[r.def.id] = rid;
+  }
+  // сохранения заданий: та же схема перенаправления + их romId → новый ром
+  const saveMap: Record<string, string> = {};
+  for (const s of data.saves ?? []) {
+    const exists = !!(await idbGet('saves', s.id));
+    let sid = s.id;
+    if (!exists) {
+      const def = { ...s, romId: romMap[s.romId] ?? s.romId };
+      await idbPut('saves', sid, def);
+    } else {
+      sid = uid('save');
+      await idbPut('saves', sid, { ...s, id: sid, romId: romMap[s.romId] ?? s.romId });
+    }
+    saveMap[s.id] = sid;
+  }
+  // ссылки заданий карты → новые id
+  for (const c of map.cells ?? []) {
+    const t = c.task;
+    if (!t) continue;
+    if (t.romId && romMap[t.romId]) t.romId = romMap[t.romId];
+    if (t.saveId && saveMap[t.saveId]) t.saveId = saveMap[t.saveId];
+  }
+  await idbPut('maps', map.id, map);
+  return map.name;
 }

@@ -1,7 +1,25 @@
-import type { CardDef, GameFx, GameMap, GameOptions, GameSession, PlayerState, TaskDef, TradeOffer, TokenDir } from './types';
-import { APP_VERSION, SKIP_COST, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS } from './types';
+import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, PlayerState, TaskDef, TradeOffer, TokenDir } from './types';
+import { APP_VERSION, SKIP_COST, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, tileAt, tileRectOf } from './types';
 import type { JoyId } from './types';
 import { CELL, cellAtPoint, cellCenter, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
+
+/* ПЛИТОЧНЫЙ РЕЖИМ КАРТ: пружка фишки НЕ может покинуть СВОЮ карту-плитку.
+   Возвращает координаты, зажатые в прямоугольник карты-плитки, где стоит точка
+   (или в прямоугольник точки (fx,fy), если исходная — вне любой плитки).
+   tileGrid нет — координаты без изменений (обычное бесконечное поле). */
+function clampToTile(map: GameMap, x: number, y: number, fx: number, fy: number): { x: number; y: number } {
+  const tg = map.tileGrid;
+  if (!tg) return { x, y };
+  const t = tileAt(tg, fx, fy) ?? tileAt(tg, x, y);
+  if (!t) return { x, y }; // вне всех плиток (не должно случаться) — обычный клэмп поля
+  const r = tileRectOf(tg, t);
+  return {
+    x: Math.max(r.x + 8, Math.min(r.x + r.w - 8, x)),
+    y: Math.max(r.y + 8, Math.min(r.y + r.h - 8, y)),
+  };
+}
+/** Режим разрешает стены/порталы со свободным хождением? */
+export const modeAllowsWalls = (m: MapMode | undefined): boolean => isJourneyLike(m);
 
 export type Action =
   | { t: 'hello'; id: string; name: string }
@@ -386,6 +404,23 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     }
     p.secLeft = Math.max(0, p.secLeft - spentSec);
     p.triesLeft = Math.max(0, p.triesLeft - spentTries);
+    /* СВОЙ ЧЕЛЛЕНДЖ — штраф за проигрыш и награда за победу (задаётся мастером
+       «Создать челлендж» и применяется в редакторе карт): минус ресурсы при
+       поражении, плюс ресурсы при победе — ПОМИМО обычной цены задания. */
+    const loseMin = Math.max(0, Math.floor(map.loseMin ?? 0));
+    const loseTries = Math.max(0, Math.floor(map.loseTries ?? 0));
+    const winMin = Math.max(0, Math.floor(map.winMin ?? 0));
+    const winTries = Math.max(0, Math.floor(map.winTries ?? 0));
+    if (!success && (loseMin > 0 || loseTries > 0)) {
+      p.secLeft = Math.max(0, p.secLeft - loseMin * 60);
+      p.triesLeft = Math.max(0, p.triesLeft - loseTries);
+      log(`💢 Штраф челленджа: −${loseMin} мин / −${loseTries} поп.`);
+    }
+    if (success && (winMin > 0 || winTries > 0)) {
+      p.secLeft += winMin * 60;
+      p.triesLeft += winTries;
+      log(`🎁 Награда челленджа: +${winMin} мин / +${winTries} поп.`);
+    }
     const ownerId = s.captured[ch.cellIdx];
     const owner = ownerId && ownerId !== p.id ? s.players.find((x) => x.id === ownerId && x.alive) : undefined;
     if (owner && (spentSec > 0 || spentTries > 0)) {
@@ -793,9 +828,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
 
   switch (a.t) {
     case 'hello': {
-      /* SKILL CHALLENGE: зрители могут подключаться и ВО ВРЕМЯ партии —
+      /* SKILL CHALLENGE и одиночный JOURNEY: зрители могут подключаться и ВО ВРЕМЯ партии —
         они добавляются как spect (ходов не получают, смотрят поле и трансляцию) */
-      const spectJoin = map.mode === 'skill' && (s.phase === 'playing' || s.phase === 'rollOff');
+      const spectJoin = isSoloMode(map.mode) && (s.phase === 'playing' || s.phase === 'rollOff');
       if (s.phase !== 'lobby' && !spectJoin) return s0;
       if (s.players.some((p) => p.id === a.id)) return s0;
       if (!spectJoin && s.players.length >= 4) return s0;
@@ -803,7 +838,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const np = mkPlayer(a.id, a.name, s.players.length % 4, false);
       if (spectJoin) { np.spect = true; np.ready = true; }
       s.players.push(np);
-      log(spectJoin ? `👁 ${a.name.toUpperCase()} подключается зрителем (SKILL CHALLENGE)` : `${a.name.toUpperCase()} подключается`);
+      log(spectJoin ? `👁 ${a.name.toUpperCase()} подключается зрителем` : `${a.name.toUpperCase()} подключается`);
       break;
     }
     case 'ready': {
@@ -820,10 +855,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     }
     case 'start': {
       if (s.phase !== 'lobby') break;
-      /* SKILL CHALLENGE: хост может начать и в одиночку — остальные в лобби
-        станут зрителями; в остальных режимах партия на двоих и более */
-      const soloSkill = map.mode === 'skill';
-      if (s.players.length < 2 && !soloSkill) break;
+      /* Одиночные режимы (SKILL CHALLENGE, JOURNEY-на-одного): хост может начать и в
+        одиночку — остальные в лобби станут зрителями; в остальных режимах партия
+        на двоих и более */
+      const soloMode = isSoloMode(map.mode);
+      if (s.players.length < 2 && !soloMode) break;
       /* Стартовые ресурсы — из карты (одинаковые для всех игроков).
          Старые карты без настроек получают прежние значения (60 мин / 60 попыток).
          SKILL CHALLENGE: ресурсы ВСЕГДА фиксированы — 60 минут и 60 попыток,
@@ -834,11 +870,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const startPos = startCellIdx(map);
       for (const p of s.players) {
         p.secLeft = sm * 60; p.triesLeft = st; p.pos = startPos;
-        if (soloSkill) p.spect = !p.isHost; // играет только хост — остальные смотрят
+        if (soloMode) p.spect = !p.isHost; // играет только хост — остальные смотрят
       }
-      if (map.mode === 'journey') {
-        // фишки ВСЕХ игроков стартуют ОДНОВРЕМЕННО от стартовой ячейки;
-        // жеребьёвки нет — панель «все стартуют одновременно» (готовность + выбор фишки)
+      if (isJourneyLike(map.mode)) {
+        // фишка хоста стартует ОДНОВРЕМЕННО (в TRIATHLON — фишки ВСЕХ игроков);
+        // жеребьёвки нет — панель готовности (в JOURNEY-на-одного она у хоста одна)
         const sc = map.cells[startPos];
         const scx = sc ? (sc.cx ?? (sc.x + (sc.w || 1) / 2) * CELL_PX) : 0;
         const scy = sc ? (sc.cy ?? (sc.y + (sc.h || 1) / 2) * CELL_PX) : 0;
@@ -850,12 +886,14 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       s.rollOffValues = {};
       s.rollOffReady = [];
       s.skillDone = [];
-      if (map.mode === 'journey') s.rollOffWinner = s.players[0]?.id ?? null; // без бросков: сразу панель готовности
-      log(soloSkill
+      if (isJourneyLike(map.mode)) s.rollOffWinner = s.players[0]?.id ?? null; // без бросков: сразу панель готовности
+      log(soloMode && map.mode === 'skill'
         ? `🧨 SKILL CHALLENGE! Играет только хост — лимит ${SKILL_TURNS} ходов. Остальные — зрители.`
-        : map.mode === 'journey'
-          ? `🧭 JOURNEY! У каждого: ${sm} мин и ${st} поп. Все фишки стартуют ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, тот и играет.`
-          : `Игра начинается! У каждого: ${sm} мин и ${st} поп. Бросок за первый ход…`);
+        : soloMode
+          ? `🧭 JOURNEY! Играет только хост (${sm} мин / ${st} поп.) — все остальные подключаются зрителями.`
+          : isJourneyLike(map.mode)
+            ? `🧭 TRIATHLON! У каждого: ${sm} мин и ${st} поп. Все фишки стартуют ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, тот и играет.`
+            : `Игра начинается! У каждого: ${sm} мин и ${st} поп. Бросок за первый ход…`);
       break;
     }
     case 'roll': {
@@ -893,7 +931,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         break;
       }
       if (s.phase !== 'playing') break;
-      if (map.mode === 'journey') break; // JOURNEY: кубиков нет — ходят фишкой напрямую
+      if (isJourneyLike(map.mode)) break; // TRIATHLON/JOURNEY: кубиков нет — ходят фишкой напрямую
       if (gatingFx()) break; // идёт анимация победы/поражения — ждём её
       const p = current();
       if (!p || p.id !== a.id || s.moving || s.challenge || s.pendingCard || s.awaitPost || s.quiz) break;
@@ -955,7 +993,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       // игрок подтвердил, что готов начать игру; старт происходит, когда готовы ВСЕ.
       // В JOURNEY жеребьёвки нет — панель готовности открывается сразу после старта
       if (s.phase !== 'rollOff') break;
-      if (!s.rollOffWinner && map.mode !== 'journey') break;
+      if (!s.rollOffWinner && !isJourneyLike(map.mode)) break;
       const p = actor();
       if (!p) break;
       /* фишки партии: пока игрок не взял свою фишку из набора карты — готовым не считается */
@@ -967,8 +1005,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       }
       if (s.players.filter((pl) => !pl.spect).every((pl) => (s.rollOffReady ?? []).includes(pl.id))) {
         s.phase = 'playing';
-        if (map.mode === 'journey') {
-          log('🚀 Все готовы! Фишки пошли ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, у того и откроется задание');
+        if (isJourneyLike(map.mode)) {
+          log(map.mode === 'journey1p'
+            ? '🚀 Все готовы! Игра началась — фишка хоста пошла'
+            : '🚀 Все готовы! Фишки пошли ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, у того и откроется задание');
         } else {
           const w = s.players.find((pl) => pl.id === s.rollOffWinner);
           log(`🚀 Все готовы! Игра началась — ход ${w?.name ?? '—'}`);
@@ -986,22 +1026,30 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       resolveLanding();
       break;
     }
-    /* ---------- JOURNEY: прямое управление фишкой — ВСЕ ИГРОКИ ОДНОВРЕМЕННО ---------- */
+    /* ---------- TRIATHLON / JOURNEY: прямое управление фишкой ----------
+       TRIATHLON — все игроки ходят ОДНОВРЕМЕННО; JOURNEY — только хост, остальные зрители. */
     case 'journeyMove': {
-      if (s.phase !== 'playing' || map.mode !== 'journey') break;
-      /* НОВЫЙ JOURNEY: очередь ходов отсутствует — каждый игрок ведёт СВОЮ фишку
+      if (s.phase !== 'playing' || !isJourneyLike(map.mode)) break;
+      /* Очередь ходов отсутствует — каждый игрок ведёт СВОЮ фишку
          (авторитет проверок — хост). Зритель и выбывший не ходят. */
       const p = s.players.find((x) => x.id === a.id);
       if (!p || p.spect || !p.alive) break;
       if (s.moving || s.challenge || s.pendingCard || s.quiz || s.awaitPost || gatingFx()) break;
       const mszW = map.mw ?? map.cols * CELL_PX;
       const mszH = map.mh ?? map.rows * CELL_PX;
-      const x = Math.max(0, Math.min(mszW, Number(a.x) || 0));
-      const y = Math.max(0, Math.min(mszH, Number(a.y) || 0));
+      let x = Math.max(0, Math.min(mszW, Number(a.x) || 0));
+      let y = Math.max(0, Math.min(mszH, Number(a.y) || 0));
+      const prev = s.journeyPos?.[p.id] ?? null;
+      /* ПЛИТОЧНЫЙ РЕЖИМ КАРТ: фишка не может покинуть СВОЮ карту-плитку — ходьба
+         зажимается в её прямоугольник. Обновление с tp (прыжок через портал)
+         НЕ зажимается — оно легально попадает на ДРУГУЮ карту-плитку. */
+      if (map.tileGrid && !a.tp) {
+        const cl = clampToTile(map, x, y, prev?.x ?? x, prev?.y ?? y);
+        x = cl.x; y = cl.y;
+      }
       /* НЕВИДИМЫЕ СТЕНЫ: фишка не может зайти в стену (клиент скользит по стене сам —
          сюда точка внутри стены попадает только при рассинхроне) */
       if (pointInWall(map, x, y)) break;
-      const prev = s.journeyPos?.[p.id] ?? null;
       /* защита от телепортаций: одно обновление не дальше 2.5 клеток от прошлой позиции.
          СТОП-обновление (mv=false) принимаем всегда — игрок реально стоит в этой точке,
          иначе при сетевом заторе цепочка отклонённых апдейтов «застревала» надолго. */

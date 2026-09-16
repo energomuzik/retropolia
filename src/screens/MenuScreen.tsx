@@ -9,6 +9,7 @@ const MENU: { key: string; label: string; screen: Screen; desc: string; color: s
   { key: 'create', label: 'Создать игру', screen: 'create', desc: 'выбрать карту · открыть комнату', color: '#ffcf3f', icon: Ic.dice },
   { key: 'join', label: 'Подключиться', screen: 'join', desc: 'войти в комнату по коду', color: '#5aa9ff', icon: Ic.globe },
   { key: 'load', label: 'Загрузить игру', screen: 'load', desc: 'сохранённые партии', color: '#8f97c9', icon: Ic.save },
+  { key: 'challenge', label: 'Создать челлендж', screen: 'challenge', desc: 'свой режим: ответы на вопросы — и правила готовы', color: '#ff8b3f', icon: Ic.trophy },
   { key: 'editors', label: 'Все редакторы', screen: 'editorsHub', desc: 'карты · задания · квизы · фишки', color: '#2ee6a8', icon: Ic.pen },
   { key: 'emulator', label: 'Запуск эмулятора', screen: 'emulator', desc: 'тест ромов · запись сохранений', color: '#ff5d73', icon: Ic.chip },
   { key: 'options', label: 'Опции', screen: 'options', desc: 'имя · трансляция · звук', color: '#8f97c9', icon: Ic.gear },
@@ -33,17 +34,18 @@ export default function MenuScreen() {
       <div className="absolute inset-0 starfield opacity-60 pointer-events-none" />
       <div className="relative z-10 h-full max-w-xl mx-auto px-6 py-6 flex flex-col">
         {/* логотип */}
-        <div className="text-center pt-6 sm:pt-10">
-          <h1 className="font-pixel text-gold title-glow glow-throb leading-none text-[40px] sm:text-[58px] tracking-tight">
-            RETRO<span className="text-paper">POLIA</span>
+        <div className="text-center pt-4 sm:pt-8">
+          <h1 className="font-pixel text-gold title-glow glow-throb leading-[1.08] tracking-tight text-[30px] sm:text-[44px]">
+            RETRO <span className="text-paper">CHALLENGE</span>
+            <span className="block text-[20px] sm:text-[30px] mt-1">GENERATOR</span>
           </h1>
-          <p className="mt-4 font-display text-dim uppercase tracking-[0.24em] text-[11px] sm:text-xs">
-            Настольная игра, где вместо денег — твой скилл
+          <p className="mt-3 font-display text-dim uppercase tracking-[0.22em] text-[10px] sm:text-[11px]">
+            Создай свой челлендж — и брось его друзьям
           </p>
         </div>
 
         {/* меню */}
-        <div className="mt-8 sm:mt-10 space-y-2.5 flex-1">
+        <div className="mt-6 sm:mt-8 space-y-2 flex-1 overflow-y-auto">
           {MENU.map((m, i) => (
             <button
               key={m.key}

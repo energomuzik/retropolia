@@ -1,12 +1,12 @@
 import { create } from 'zustand';
-import type { AnimDef, BossAnimDef, GameMap, GameOptions, GameSession, RomDef, SaveDef, SessionSnapshot, SoundDef, TileDef, TileGroup, TileImg, TokenDef } from './types';
+import type { AnimDef, BossAnimDef, CustomChallenge, GameMap, GameOptions, GameSession, RomDef, SaveDef, SessionSnapshot, SoundDef, TileDef, TileGroup, TileImg, TokenDef } from './types';
 import type { NetInfo, Room } from './net';
 import { idbAll, idbGet, idbPut } from './db';
 import { builtinTiles } from './assets';
 import { setVolume } from './sound';
 
 export type Screen =
-  | 'menu' | 'create' | 'join' | 'load' | 'lobby' | 'game'
+  | 'menu' | 'create' | 'join' | 'load' | 'lobby' | 'game' | 'challenge'
   | 'mapEditor' | 'taskEditor' | 'quizEditor' | 'tokenEditor'
   | 'editorsHub' | 'emulator' | 'options';
 
@@ -27,6 +27,7 @@ interface AppState {
   anims: AnimDef[]; // свободные анимации автора (для карт)
   bossAnims: BossAnimDef[]; // боссы (idle + реакции на победу/поражение)
   sounds: SoundDef[]; // звуковая библиотека (для анимаций и фишек)
+  challenges: CustomChallenge[]; // СВОИ челленджи (мастер «Создать челлендж»)
   animTiles: TileImg[]; // библиотека тайлов редактора анимаций (глобальная)
   animGroups: TileGroup[]; // папки/нарезки в панели редактора анимаций
   refresh: () => Promise<void>;
@@ -98,10 +99,11 @@ export const useApp = create<AppState>()((set, get) => ({
   anims: [],
   bossAnims: [],
   sounds: [],
+  challenges: [],
   animTiles: [],
   animGroups: [],
   refresh: async () => {
-    const [tiles, maps, roms, saves, tokens, anims, bossAnims, sounds, animTiles, animGroups] = await Promise.all([
+    const [tiles, maps, roms, saves, tokens, anims, bossAnims, sounds, challenges, animTiles, animGroups] = await Promise.all([
       idbAll<TileDef>('tiles'),
       idbAll<GameMap>('maps'),
       idbAll<RomDef>('roms'),
@@ -110,6 +112,7 @@ export const useApp = create<AppState>()((set, get) => ({
       idbAll<AnimDef>('anims'),
       idbAll<BossAnimDef>('bossAnims'),
       idbAll<SoundDef>('sounds'),
+      idbAll<CustomChallenge>('challenges'),
       idbAll<TileImg>('animTiles'),
       idbAll<TileGroup>('animGroups'),
     ]);
@@ -129,6 +132,7 @@ export const useApp = create<AppState>()((set, get) => ({
       anims: anims.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
       bossAnims: bossAnims.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
       sounds: sounds.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
+      challenges: challenges.map((e) => e.value).sort((a, b) => b.createdAt - a.createdAt),
       animTiles: animTiles.map((e) => e.value),
       animGroups: animGroups.map((e) => e.value),
     });

@@ -8,8 +8,8 @@ import {
 import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimDef, BossAnimDef, CellDef, CellType, GameMap, PlacedAnim, PlacedBoss, PlateBg, PortalZone, Stamp, TokenDef, TileGroup, TileImg, WallRect } from '../types';
-import { bossLibEntryOf, MAP_MODES, MAX_FIELD, PLATE_SIZES } from '../types';
+import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, GameMap, PlacedAnim, PlacedBoss, PlateBg, PortalZone, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
+import { bossLibEntryOf, challengeSummaryLines, isJourneyLike, MAP_MODES, MAX_FIELD, PLATE_SIZES, tileRectOf } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
 
@@ -132,7 +132,7 @@ const CELL_TYPES: { key: CellType; label: string; cls: string }[] = [
 ];
 
 export default function MapEditor() {
-  const { maps, tiles, tokens, anims, bossAnims, setScreen, refresh, toast } = useApp();
+  const { maps, tiles, tokens, anims, bossAnims, challenges, setScreen, refresh, toast } = useApp();
   const [map, setMap] = useState<GameMap | null>(null);
   const [tool, setTool] = useState<Tool>('select');
   const [tileId, setTileId] = useState('');
@@ -160,7 +160,9 @@ export default function MapEditor() {
   const [selPortal, setSelPortal] = useState<number | null>(null); // выбранный портал (индекс)
   const [pickTargetFor, setPickTargetFor] = useState<number | null>(null); // портал, для которого указываем точку перехода (следующий клик по канве = точка)
   const [platesOpen, setPlatesOpen] = useState(false); // спойлер «Плитки и порталы» в левой панели
-  const [bgScope, setBgScope] = useState<'plate' | 'all'>('plate'); // куда ложится НОВЫЙ фон при разбивке: «на эту плитку» (своя локация) или «на всю карту» (одна картинка на всё поле)
+  const [tilesOpen, setTilesOpen] = useState(false); // спойлер «Карты-плитки» (плиточный режим) в левой панели
+  const [selTileId, setSelTileId] = useState<string | null>(null); // активная карта-плитка (схема + её фон)
+  const [bgScope, setBgScope] = useState<'plate' | 'all'>('plate'); // куда ложится НОВЫЙ фон: «на эту плитку» (своя локация) или «на всю карту»
   const [extract, setExtract] = useState<{ file: File; src: string; name: string; busy: boolean; bgMode: 'auto' | 'custom'; bg: string; foundBg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; tiles: TileImg[] } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -569,6 +571,174 @@ export default function MapEditor() {
   };
   const curPlateIdx = PS && map ? Math.min(platesX * platesY - 1, Math.max(0, Math.floor(view.x / PS) + Math.floor(view.y / PS) * platesX)) : -1;
   const plateNumOf = (wx: number, wy: number) => (PS ? Math.floor(wx / PS) + Math.floor(wy / PS) * platesX + 1 : 1); // «Плитка N» по точке поля
+
+  /* ---------- ПЛИТОЧНЫЙ РЕЖИМ КАРТ: несколько отдельных карт-локаций ----------
+     Каждая карта-плитка — ОТДЕЛЬНАЯ карта фиксированного размера (как хотел автор):
+     в редакторе она выбирается кликом по схеме (камера прыгает на неё), в ИГРЕ фишка
+     зажата в пределах СВОЕЙ карты, а на другие попадает ТОЛЬКО через портал
+     (соседние они в схеме или нет — неважно). Бесконечное увеличение поля
+     (без tileGrid) продолжает работать как раньше. */
+  const TG: TileGrid | null = map?.tileGrid ?? null;
+  const activeTile = TG ? (TG.tiles.find((t) => t.id === selTileId) ?? TG.tiles[0] ?? null) : null;
+  const tileBgCount = map?.tileBgs ? Object.keys(map.tileBgs).length : 0;
+
+  const updTileGrid = (tg: TileGrid | undefined, extra?: Partial<GameMap>) => {
+    updMap({ tileGrid: tg, tileBgs: tg ? map?.tileBgs : undefined, ...extra } as Partial<GameMap>);
+    dirtyRef.current = true;
+  };
+
+  /** Поля → сетка плиток: всё нынешнее содержимое становится ПЕРВОЙ картой-плиткой. */
+  const enableTileMode = () => {
+    const m = mapRef.current;
+    if (!m) return;
+    const sz = mapSize(m);
+    const tg: TileGrid = { w: sz.w, h: sz.h, tiles: [{ id: uid('mt'), col: 0, row: 0 }] };
+    updTileGrid(tg);
+    setSelTileId(tg.tiles[0].id);
+    setTilesOpen(true);
+    sfx.coin();
+    toast(`Плиточный режим включён: всё поле стало КАРТОЙ №1 (${sz.w}×${sz.h}). Добавляйте новые карты-плитки кнопкой ниже — между ними ставьте порталы`, 'ok');
+  };
+
+  /** Обратно к обычному полю: содержимое остаётся на месте (плитки не двигались). */
+  const disableTileMode = () => {
+    const n = map?.tileGrid?.tiles.length ?? 0;
+    updTileGrid(undefined);
+    setSelTileId(null);
+    sfx.fail();
+    toast(n > 1
+      ? `Плиточный режим выключен — карты-плитки остались на поле подряд. Вернуть: включите режим снова (плитка №1 вернётся по размеру поля)`
+      : 'Плиточный режим выключен — снова одно обычное поле', 'info');
+  };
+
+  /** Размер КАЖДОЙ карты-плитки (все одинаковые) + поле под них. */
+  const resizeTileGrid = (axis: 'w' | 'h', v: number) => {
+    const m = mapRef.current;
+    if (!m?.tileGrid) return;
+    const tg = m.tileGrid;
+    const g = { ...tg, [axis]: Math.max(640, Math.min(MAX_FIELD, v)) };
+    const maxCol = Math.max(0, ...g.tiles.map((t) => t.col));
+    const maxRow = Math.max(0, ...g.tiles.map((t) => t.row));
+    updTileGrid(g, { mw: (maxCol + 1) * g.w, mh: (maxRow + 1) * g.h });
+  };
+
+  /** Новая карта-плитка: свободный слот схемы рядом с активной (право → лево → низ → верх). */
+  const addMapTile = () => {
+    const m = mapRef.current;
+    if (!m?.tileGrid) return;
+    const tg = m.tileGrid;
+    if (tg.tiles.length >= 24) { toast('Плиток максимум 24 — хватит на большой мир', 'err'); return; }
+    const anchor = activeTile ?? tg.tiles[0];
+    const taken = new Set(tg.tiles.map((t) => `${t.col},${t.row}`));
+    let spot: { col: number; row: number } | null = null;
+    const around = anchor
+      ? [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]
+      : [[0, 0]];
+    for (const [dc, dr] of around) {
+      const c = (anchor?.col ?? 0) + dc, r = (anchor?.row ?? 0) + dr;
+      if (!taken.has(`${c},${r}`)) { spot = { col: c, row: r }; break; }
+    }
+    if (!spot) {
+      // вокруг всё занято — ищем любой свободный слот в границах схемы
+      const maxCol = Math.max(0, ...tg.tiles.map((t) => t.col)) + 1;
+      const maxRow = Math.max(0, ...tg.tiles.map((t) => t.row)) + 1;
+      outer: for (let r = 0; r <= maxRow; r++) for (let c = 0; c <= maxCol; c++) {
+        if (!taken.has(`${c},${r}`)) { spot = { col: c, row: r }; break outer; }
+      }
+    }
+    if (!spot) return;
+    const nt = { id: uid('mt'), col: spot.col, row: spot.row };
+    const g = { ...tg, tiles: [...tg.tiles, nt] };
+    updTileGrid(g, { mw: Math.max(m.mw ?? 0, (spot.col + 1) * g.w), mh: Math.max(m.mh ?? 0, (spot.row + 1) * g.h) });
+    setSelTileId(nt.id);
+    jumpToTile(nt);
+    sfx.coin();
+    toast(`Добавлена карта-плитка №${g.tiles.length} — камера перешла на неё. Рисуйте новую локацию; связывайте карты порталами`, 'ok');
+  };
+
+  /** Удалить карту-плитку вместе с её содержимым (ячейки, штампы, стены, порталы, анимации, боссы). */
+  const removeMapTile = (id: string) => {
+    const m = mapRef.current;
+    if (!m?.tileGrid || m.tileGrid.tiles.length <= 1) { toast('Последнюю карту-плитку удалить нельзя — выключите плиточный режим', 'err'); return; }
+    const tg = m.tileGrid;
+    const victim = tg.tiles.find((t) => t.id === id);
+    if (!victim) return;
+    const r = tileRectOf(tg, victim);
+    const inRect = (x: number, y: number) => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+    // снимок для «Вернуть» (Ctrl+Z)
+    const snap = { map: JSON.parse(JSON.stringify(m)) as GameMap, removedTile: victim };
+    rememberDeleted({
+      label: `карту-плитку №${tg.tiles.findIndex((t) => t.id === id) + 1}`,
+      restore: async () => {
+        setMap(snap.map);
+        const cur = await idbGet<GameMap>('maps', snap.map.id);
+        if (cur) { await idbPut('maps', snap.map.id, snap.map); await useApp.getState().refresh(); }
+      },
+    });
+    const cells = m.cells.filter((c, ci) => { const cc = cellCenter(m, ci); return !inRect(cc.x, cc.y); });
+    const stamps = (m.stamps ?? []).filter((s) => !inRect(s.x, s.y));
+    const walls = (m.walls ?? []).filter((w) => !inRect(w.x + w.w / 2, w.y + w.h / 2));
+    const portals = (m.portals ?? []).filter((p) => !inRect(p.x + p.w / 2, p.y + p.h / 2) && !(p.tx !== undefined && p.ty !== undefined && inRect(p.tx, p.ty)));
+    const anims = (m.anims ?? []).filter((a) => !inRect(a.x, a.y));
+    const bosses = (m.bosses ?? []).filter((b) => !inRect(b.x, b.y));
+    const tileBgs = { ...(m.tileBgs ?? {}) };
+    delete tileBgs[id];
+    const tiles = tg.tiles.filter((t) => t.id !== id);
+    const maxCol = Math.max(0, ...tiles.map((t) => t.col));
+    const maxRow = Math.max(0, ...tiles.map((t) => t.row));
+    const mw = (maxCol + 1) * tg.w, mh = (maxRow + 1) * tg.h;
+    // стрелки-переходы на удалённые ячейки — чистим: пересчёт индексов оставшихся
+    const keptIdx = new Set<number>();
+    for (let i = 0; i < m.cells.length; i++) {
+      const cc = cellCenter(m, i);
+      if (!inRect(cc.x, cc.y)) keptIdx.add(i);
+    }
+    const remap = new Map<number, number>();
+    { let k = 0; for (let i = 0; i < m.cells.length; i++) if (keptIdx.has(i)) remap.set(i, k++); }
+    const cleaned = cells.map((c) => {
+      const next: CellDef = { ...c };
+      if (next.next !== null && next.next !== undefined) next.next = remap.get(next.next);
+      if (next.hop !== null && next.hop !== undefined) next.hop = remap.get(next.hop);
+      return next;
+    });
+    const upd: Partial<GameMap> = { cells: cleaned, stamps, walls, portals, anims, bosses, tileBgs: Object.keys(tileBgs).length ? tileBgs : undefined, mw, mh };
+    updTileGrid({ ...tg, tiles }, upd);
+    if (selTileId === id) setSelTileId(tiles[0]?.id ?? null);
+    setSelCell(null);
+    sfx.fail();
+    const lost = m.cells.length - cleaned.length;
+    toast(`Карта-плитка удалена вместе с содержимым (ячеек: ${lost}) — вернуть можно кнопкой «Вернуть»`, 'err');
+  };
+
+  /** Камера — на эту карту-плитку (вся в кадре), как «переход между картами». */
+  const jumpToTile = (t: { id: string; col: number; row: number }) => {
+    const cv = canvasRef.current;
+    const tg = mapRef.current?.tileGrid;
+    if (!cv || !tg) return;
+    const fit = Math.min(cv.clientWidth / (tg.w + 80), cv.clientHeight / (tg.h + 80)); // вся плитка в кадре
+    const z = Math.max(viewRef.current.zoom, Math.min(2, fit));
+    setView({ x: (t.col + 0.5) * tg.w, y: (t.row + 0.5) * tg.h, zoom: z });
+    sfx.hover();
+  };
+
+  const selectTile = (t: { id: string; col: number; row: number }) => {
+    setSelTileId(t.id);
+    jumpToTile(t);
+  };
+
+  /** Схема плиток: размер клетки — 26px, масштаб по самой длинной стороне сетки. */
+  const tgCols = TG ? Math.max(1, ...TG.tiles.map((t) => t.col)) + 1 : 1;
+  const tgRows = TG ? Math.max(1, ...TG.tiles.map((t) => t.row)) + 1 : 1;
+
+  /** Свой фон КАРТЫ-ПЛИТКИ (плиточный режим): ключ — id плитки. */
+  const setTileBg = (id: string, pb: PlateBg | undefined) => {
+    if (!map) return;
+    const rest = { ...(map.tileBgs ?? {}) };
+    if (pb) rest[id] = pb;
+    else delete rest[id];
+    updMap({ tileBgs: Object.keys(rest).length ? rest : undefined } as Partial<GameMap>);
+  };
+
   const updStamp = (idx: number, patch: Partial<Stamp>) =>
     setMap((m) => {
       if (!m || !m.stamps || !m.stamps[idx]) return m;
@@ -761,7 +931,13 @@ export default function MapEditor() {
     if (!f || !map) return;
     const r = await importImage(f, 2000, true);
     if (!r) { toast('Это не картинка', 'err'); return; }
-    if (map.plateSize && bgScope === 'plate') {
+    if (map.tileGrid && bgScope === 'plate') {
+      const t = activeTile ?? map.tileGrid.tiles[0];
+      if (!t) return;
+      setTileBg(t.id, { bg: r.url, bgMode: 'stretch' });
+      sfx.coin();
+      toast(`Фон загружен на КАРТУ-ПЛИТКУ №${map.tileGrid.tiles.findIndex((x) => x.id === t.id) + 1} — остальные карты не тронуты (другим — свой фон через схему плиток)`, 'ok');
+    } else if (map.plateSize && bgScope === 'plate') {
       const n = curPlateIdx + 1; // плитка, на которую сейчас смотрит камера
       setPlateBg(n, { bg: r.url, bgMode: 'stretch' });
       sfx.coin();
@@ -1610,6 +1786,31 @@ export default function MapEditor() {
           }
         }
 
+        // ПЛИТОЧНЫЙ РЕЖИМ КАРТ: рамки и подписи карт-плиток; активная — золотая
+        const TGz = m.tileGrid;
+        if (TGz && TGz.tiles.length) {
+          ctx.save();
+          ctx.font = `${11 / v.zoom}px "Press Start 2P", monospace`;
+          ctx.textAlign = 'left';
+          const pad = 8 / v.zoom;
+          TGz.tiles.forEach((t, i) => {
+            const r0 = tileRectOf(TGz, t);
+            const isActive = activeTile?.id === t.id;
+            ctx.save();
+            ctx.setLineDash([16 / v.zoom, 10 / v.zoom]);
+            ctx.strokeStyle = isActive ? 'rgba(255,207,63,0.95)' : 'rgba(46,230,168,0.45)';
+            ctx.lineWidth = (isActive ? 3 : 2) / v.zoom;
+            ctx.strokeRect(r0.x, r0.y, r0.w, r0.h);
+            ctx.restore();
+            const label = `КАРТА ${i + 1}`;
+            ctx.fillStyle = 'rgba(7,9,18,0.75)';
+            ctx.fillRect(r0.x + pad, r0.y + pad, label.length * (11 / v.zoom) * 1.12 + pad * 2, (11 / v.zoom) + pad * 2);
+            ctx.fillStyle = isActive ? 'rgba(255,207,63,0.95)' : 'rgba(46,230,168,0.85)';
+            ctx.fillText(label, r0.x + pad + 2, r0.y + pad + 11 / v.zoom);
+          });
+          ctx.restore();
+        }
+
         // НЕВИДИМЫЕ СТЕНЫ: коралловая штриховка — видна ТОЛЬКО в редакторе (в игре их нет)
         const drawWallRect = (x: number, y: number, w: number, h: number, selected: boolean) => {
           ctx.save();
@@ -1830,6 +2031,42 @@ export default function MapEditor() {
     toast('Карта сохранена', 'ok');
   };
 
+  /** ПРИМЕНЕНИЕ СВОЕГО ЧЕЛЛЕНДЖА (мастер «Создать челлендж»): режим + ресурсы +
+     штрафы/награды + размер поля (только на пустой карте) + плиточный режим. */
+  const applyChallenge = (cc: CustomChallenge) => {
+    const m = mapRef.current;
+    if (!m) return;
+    const r = cc.resolved;
+    const empty = m.cells.length === 0 && (m.stamps ?? []).length === 0;
+    const patch: Partial<GameMap> = {
+      mode: r.baseMode,
+      startMin: r.startMin,
+      startTries: r.startTries,
+      moveSpeed: r.speed,
+      customId: cc.id,
+      customName: cc.name,
+      loseMin: r.loseMin || undefined,
+      loseTries: r.loseTries || undefined,
+      winMin: r.winMin || undefined,
+      winTries: r.winTries || undefined,
+    };
+    let extra = '';
+    if (empty) {
+      patch.mw = r.mw;
+      patch.mh = r.mh;
+      if (r.tileMode && !m.tileGrid) {
+        patch.tileGrid = { w: r.mw, h: r.mh, tiles: [{ id: uid('mt'), col: 0, row: 0 }] };
+        extra = ' Включён плиточный режим — добавляйте карты-плитки в спойлере «Карты-плитки».';
+        setSelTileId((patch.tileGrid as TileGrid).tiles[0].id);
+      }
+    } else {
+      extra = ' Размер поля не тронут — карта уже не пуста.';
+    }
+    updMap(patch);
+    sfx.coin();
+    toast(`Свой режим «${cc.name}» применён: ${MAP_MODES.find((x) => x.id === r.baseMode)?.name ?? r.baseMode}, ${r.startMin} мин / ${r.startTries} поп.${extra}`, 'ok');
+  };
+
   const finish = async () => {
     if (!map) return;
     const starts = map.cells.filter((c) => c.type === 'start').length;
@@ -1857,13 +2094,38 @@ export default function MapEditor() {
         return;
       }
     }
-    /* НЕВИДИМЫЕ СТЕНЫ работают только в JOURNEY: карта со стенами в другом режиме не завершается.
+    /* НЕВИДИМЫЕ СТЕНЫ работают только в TRIATHLON/JOURNEY: карта со стенами в другом режиме не завершается.
      Удалить все стены разом — кнопка в левой панели «Невидимые стены» */
     const wallCnt = (map.walls ?? []).length;
-    if (wallCnt > 0 && (map.mode ?? 'classic') !== 'journey') {
+    if (wallCnt > 0 && !isJourneyLike(map.mode)) {
       sfx.fail();
-      toast(`На карте ${wallCnt} невидимых стен, но они работают только в JOURNEY. Измените режим игры на JOURNEY или удалите все стены (кнопка «Удалить все стены разом» в панели слева)`, 'err');
+      toast(`На карте ${wallCnt} невидимых стен, но они работают только в TRIATHLON/JOURNEY. Измените режим игры или удалите все стены (кнопка «Удалить все стены разом» в панели слева)`, 'err');
       return;
+    }
+    /* ПЛИТОЧНЫЙ РЕЖИМ: ячейки ВНЕ карт-плиток недостижимы в игре — карта не завершается */
+    if (map.tileGrid) {
+      const tg = map.tileGrid;
+      const outside = map.cells.filter((c, ci) => {
+        const cc = cellCenter(map, ci);
+        return !tg.tiles.some((t) => {
+          const r = tileRectOf(tg, t);
+          return cc.x >= r.x && cc.x < r.x + r.w && cc.y >= r.y && cc.y < r.y + r.h;
+        });
+      }).length;
+      if (outside > 0) {
+        sfx.fail();
+        toast(`${outside} ячеек лежат ВНЕ карт-плиток — в игре фишка до них не дойдёт. Уберите плиточный режим, верните плитку или передвиньте ячейки`, 'err');
+        return;
+      }
+      const pOut = (map.portals ?? []).filter((p) => p.tx !== undefined && p.ty !== undefined && !tg.tiles.some((t) => {
+        const r = tileRectOf(tg, t);
+        return p.tx! >= r.x && p.tx! < r.x + r.w && p.ty! >= r.y && p.ty! < r.y + r.h;
+      })).length;
+      if (pOut > 0) {
+        sfx.fail();
+        toast(`У ${pOut} портала(ов) точка перехода ВНЕ карт-плиток — укажите заново (клик по порталу → «Указать точку перехода заново»)`, 'err');
+        return;
+      }
     }
     /* ПОРТАЛЫ: у каждого должна быть точка перехода — иначе фишка перенесётся «в никуда» */
     const noTgt = (map.portals ?? []).filter((p) => p.tx === undefined || p.ty === undefined).length;
@@ -1929,8 +2191,11 @@ export default function MapEditor() {
   /* фон плиток: номер плитки под камерой, сколько плиток со своим фоном, что редактируем */
   const curPlateNum = curPlateIdx + 1;
   const plateBgCount = map?.plateBgs ? Object.keys(map.plateBgs).length : 0;
-  const bgIsPlate = !!(map && map.plateSize && bgScope === 'plate');
+  const bgIsPlate = !!(map && map.plateSize && !map.tileGrid && bgScope === 'plate');
   const plateBgCur = map?.plateSize ? (map.plateBgs ?? {})[curPlateNum] : undefined;
+  const bgIsTile = !!(map && map.tileGrid && bgScope === 'plate');
+  const tileBgCur = map && map.tileGrid && activeTile ? (map.tileBgs ?? {})[activeTile.id] : undefined;
+  const activeTileNum = map?.tileGrid && activeTile ? map.tileGrid.tiles.findIndex((t) => t.id === activeTile.id) + 1 : 0;
 
   return (
     <div className="h-full crt-grid-bg flex flex-col">
@@ -1979,22 +2244,40 @@ export default function MapEditor() {
           {map && (
             <>
               <div>
-                <div className="tick-label mb-2">{map.plateSize ? 'Фон: плитка / вся карта' : 'Общий фон карты'}</div>
-                {/* КУДА ЛОЖИТСЯ НОВЫЙ ФОН — выбор появляется при разбивке на плитки:
-                    «На эту плитку» = у каждой плитки своя картинка (другая локация),
-                    «На всю карту» = одна картинка на всё поле сразу (как раньше) */}
-                {map.plateSize && (
+                <div className="tick-label mb-2">{map.tileGrid ? 'Фон: карта-плитка / вся карта' : map.plateSize ? 'Фон: плитка / вся карта' : 'Общий фон карты'}</div>
+                {/* КУДА ЛОЖИТСЯ НОВЫЙ ФОН — выбор появляется при разбивке на плитки ИЛИ
+                    в плиточном режиме: «На эту плитку» = у каждой плитки своя картинка
+                    (другая локация), «На всю карту» = одна картинка на всё поле сразу */}
+                {(map.plateSize || map.tileGrid) && (
                   <>
                     <div className="flex gap-1.5 mb-1.5">
-                      <button onClick={() => { setBgScope('plate'); sfx.hover(); }} title="Фон ложится ТОЛЬКО на плитку, на которую сейчас смотрит камера — у каждой плитки своя локация" className={`flex-1 py-1 border-2 cursor-pointer font-display text-[9px] uppercase ${bgScope === 'plate' ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}>На эту плитку</button>
+                      <button onClick={() => { setBgScope('plate'); sfx.hover(); }} title="Фон ложится ТОЛЬКО на плитку, на которую сейчас смотрит камера — у каждой плитки своя локация" className={`flex-1 py-1 border-2 cursor-pointer font-display text-[9px] uppercase ${bgScope === 'plate' ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}>{map.tileGrid ? 'На эту карту-плитку' : 'На эту плитку'}</button>
                       <button onClick={() => { setBgScope('all'); sfx.hover(); }} title="Одна картинка на ВСЁ поле сразу — все плитки вместе (как раньше)" className={`flex-1 py-1 border-2 cursor-pointer font-display text-[9px] uppercase ${bgScope === 'all' ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}>На всю карту</button>
                     </div>
-                    {bgScope === 'plate' && (
+                    {bgScope === 'plate' && (map.tileGrid ? (
+                      <p className="text-[10px] text-teal leading-tight mb-1.5 border-2 border-teal/40 px-2 py-1">Сейчас редактируется <span className="text-gold">КАРТА № {activeTileNum}</span>. Другую карту — кликом по схеме в спойлере «Карты-плитки» ниже: камера перейдёт туда → загрузите её фон.</p>
+                    ) : (
                       <p className="text-[10px] text-sky leading-tight mb-1.5 border-2 border-sky/40 px-2 py-1">Сейчас редактируется плитка <span className="text-gold">№ {curPlateNum}</span>. Другую плитку — кликом по номеру в навигаторе спойлера «Плитки и порталы» ниже: камера прыгнет туда → загрузите её фон.</p>
-                    )}
+                    ))}
                   </>
                 )}
-                {bgIsPlate ? (
+                {bgIsTile ? (
+                  tileBgCur ? (
+                    <div className="space-y-1.5">
+                      <img src={tileBgCur.bg} alt="фон карты-плитки" className="w-full border-2 border-teal/60 object-cover h-20" />
+                      <div className="flex gap-1.5">
+                        <GhostBtn small className="flex-1" onClick={() => { bgRef.current?.click(); }}>Заменить</GhostBtn>
+                        <GhostBtn small className="flex-1" onClick={() => { setTileBg(activeTile!.id, undefined); sfx.fail(); }}>Убрать</GhostBtn>
+                      </div>
+                      <div className="flex gap-1.5 text-[10px]">
+                        <button onClick={() => setTileBg(activeTile!.id, { ...tileBgCur, bgMode: 'stretch' })} className={`flex-1 py-1 border-2 cursor-pointer ${tileBgCur.bgMode !== 'real' ? 'border-gold text-gold' : 'border-edge text-faint'}`}>растянуть</button>
+                        <button onClick={() => setTileBg(activeTile!.id, { ...tileBgCur, bgMode: 'real' })} className={`flex-1 py-1 border-2 cursor-pointer ${tileBgCur.bgMode === 'real' ? 'border-gold text-gold' : 'border-edge text-faint'}`}>1:1</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <GhostBtn small className="w-full" onClick={() => { bgRef.current?.click(); }}>{Ic.plus(12)} Загрузить фон карты № {activeTileNum}</GhostBtn>
+                  )
+                ) : bgIsPlate ? (
                   plateBgCur ? (
                     <div className="space-y-1.5">
                       <img src={plateBgCur.bg} alt="фон плитки" className="w-full border-2 border-sky/60 object-cover h-20" />
@@ -2026,7 +2309,7 @@ export default function MapEditor() {
                   <GhostBtn small className="w-full" onClick={() => { bgRef.current?.click(); }}>{Ic.plus(12)} Загрузить фон (картинку)</GhostBtn>
                 )}
                 <p className="text-[10px] text-faint mt-1 leading-tight">
-                  {bgIsPlate
+                  {(bgIsPlate || bgIsTile)
                     ? 'Свой фон ложится ТОЛЬКО на выбранную плитку — соседние не тронуты: каждой плитке можно дать свою «локацию». Одна картинка на всё поле — переключатель «На всю карту» выше. '
                     : ''}
                   Фон лежит ВНУТРИ карты и уедет игрокам сам. Большая картинка сожмётся до 2000px.
@@ -2169,8 +2452,8 @@ export default function MapEditor() {
               </div>
 
               <div>
-                <div className="tick-label mb-2">{map.plateSize ? 'Поле = плитки' : 'Размер поля (px)'}</div>
-                {!map.plateSize && (
+                <div className="tick-label mb-2">{map.tileGrid ? 'Карты-плитки' : map.plateSize ? 'Поле = плитки' : 'Размер поля (px)'}</div>
+                {!map.plateSize && !map.tileGrid && (
                   <div className="flex flex-wrap gap-1 mb-2">
                     {SIZE_PRESETS.map((p) => (
                       <button
@@ -2182,7 +2465,16 @@ export default function MapEditor() {
                   </div>
                 )}
                 <div className="space-y-2">
-                  {map.plateSize ? (
+                  {map.tileGrid ? (
+                    <>
+                      <p className="text-[10px] text-teal leading-tight border-2 border-teal/40 px-2 py-1.5">
+                        Плиточный режим: {map.tileGrid.tiles.length} карт-плиток по {map.tileGrid.w}×{map.tileGrid.h} px — у каждой своя локация.
+                        Схема и добавление плиток — в спойлере «Карты-плитки» ниже.
+                      </p>
+                      <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Ширина плитки</span><Stepper value={map.tileGrid.w} onChange={(v) => resizeTileGrid('w', v)} min={640} max={MAX_FIELD} step={160} /></div>
+                      <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Высота плитки</span><Stepper value={map.tileGrid.h} onChange={(v) => resizeTileGrid('h', v)} min={640} max={MAX_FIELD} step={160} /></div>
+                    </>
+                  ) : map.plateSize ? (
                     <p className="text-[10px] text-dim leading-tight border-2 border-sky/40 px-2 py-1.5">
                       Поле {msz.w}×{msz.h} px = {platesX}×{platesY} плиток по {map.plateSize} px{plateBgCount > 0 ? ` · своих фонов: ${plateBgCount}` : ''}.
                       Размер и навигатор плиток — в спойлере «Плитки и порталы» ниже.
@@ -2230,6 +2522,38 @@ export default function MapEditor() {
                     );
                   })}
                 </div>
+                {/* СВОИ ЧЕЛЛЕНДЖИ (мастер «Создать челлендж» с главного экрана): */}
+                {challenges.length > 0 && (
+                  <div className="mt-2">
+                    <div className="tick-label mb-1.5 text-[#ff8b3f]">Мои челленджи · {challenges.length}</div>
+                    <div className="space-y-1.5">
+                      {challenges.map((cc: CustomChallenge) => {
+                        const on = map.customId === cc.id;
+                        return (
+                          <button
+                            key={cc.id}
+                            onClick={() => { applyChallenge(cc); sfx.coin(); }}
+                            title={`Применить к карте: ${challengeSummaryLines(cc.answers).join(' · ')}`}
+                            className={`w-full text-left border-2 px-2.5 py-2 cursor-pointer transition-colors ${on ? 'border-[#ff8b3f] bg-[#ff8b3f]/10' : 'border-edge bg-panel hover:border-edge2'}`}
+                          >
+                            <div className={`font-display text-[11px] uppercase ${on ? 'text-[#ff8b3f]' : 'text-paper'}`}>{on ? '✓ ' : ''}{cc.name}</div>
+                            <div className="text-[9px] text-faint mt-0.5">свой режим · {MAP_MODES.find((x) => x.id === cc.resolved.baseMode)?.name ?? cc.resolved.baseMode}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                {map.customId && (
+                  <div className="mt-2 border-2 border-[#ff8b3f]/60 px-2 py-1.5 flex items-center gap-2">
+                    <span className="text-[10px] text-[#ff8b3f] leading-tight flex-1">СВОЙ РЕЖИМ: {map.customName ?? 'челлендж'}. Штрафы/награды уже работают в игре.</span>
+                    <button
+                      onClick={() => { updMap({ customId: undefined, customName: undefined, loseMin: undefined, loseTries: undefined, winMin: undefined, winTries: undefined }); sfx.fail(); }}
+                      title="Снять свой режим с карты (настройки карты останутся)"
+                      className="text-faint hover:text-coral cursor-pointer shrink-0 text-[12px] leading-none px-1"
+                    >×</button>
+                  </div>
+                )}
                 {/* описания челленджей — под спойлером, чтобы не занимали панель всегда */}
                 <button
                   onClick={() => setModeDescOpen((v) => !v)}
@@ -2245,7 +2569,7 @@ export default function MapEditor() {
                       <p key={md.id} className="text-[10px] text-faint leading-tight"><span className="text-dim font-display uppercase">{md.name}</span> — {md.hint}</p>
                     ))}
                     <p className="text-[10px] text-faint leading-tight">
-                      Отметка действует на ВСЮ карту и видна игрокам при выборе карты. CLASSIC — обычная игра с кубиками (по умолчанию).
+                      Отметка действует на ВСЮ карту и видна игрокам при выборе карты. RETROPOLIA — обычная игра с кубиками (по умолчанию).
                     </p>
                   </div>
                 )}
@@ -2263,15 +2587,85 @@ export default function MapEditor() {
                 {wallsOpen && (
                   <div className="space-y-1.5">
                     <p className="text-[10px] text-faint leading-tight">Зоны, куда фишка НЕ может зайти («невидимые стены» в играх). Ходить изначально можно ВЕЗДЕ — стены только исключения. Инструмент «Стена»: протяните прямоугольник по полю. В игре стены не рисуются.</p>
-                    <p className={`text-[10px] leading-tight border-2 px-2 py-1.5 ${(map.mode ?? 'classic') === 'journey' ? 'text-teal border-teal/40' : 'text-magma border-magma/40'}`}>
-                      {(map.mode ?? 'classic') === 'journey'
-                        ? 'Режим JOURNEY — стены активны: фишки не смогут их пересечь.'
-                        : 'Стены работают ТОЛЬКО в JOURNEY: с любым другим режимом карту не завершить — смените режим или удалите все стены.'}
+                    <p className={`text-[10px] leading-tight border-2 px-2 py-1.5 ${isJourneyLike(map.mode) ? 'text-teal border-teal/40' : 'text-magma border-magma/40'}`}>
+                      {isJourneyLike(map.mode)
+                        ? `Режим ${map.mode === 'journey1p' ? 'JOURNEY' : 'TRIATHLON'} — стены активны: фишки не смогут их пересечь.`
+                        : 'Стены работают ТОЛЬКО в TRIATHLON и JOURNEY: с любым другим режимом карту не завершить — смените режим или удалите все стены.'}
                     </p>
                     {(map.walls ?? []).length > 0 && (
                       <>
                         <p className="text-[10px] text-dim leading-tight">Клик по стене — выбрать и тянуть, Delete — удалить выбранную. Можно убрать все стены одной кнопкой:</p>
                         <PxBtn color="coral" small className="w-full" onClick={removeAllWalls}>{Ic.trash(12)} Удалить все стены разом</PxBtn>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* ПЛИТОЧНЫЙ РЕЖИМ КАРТ: схема плиток-локаций, добавление/выбор/удаление */}
+              <div>
+                <button
+                  onClick={() => setTilesOpen((v) => !v)}
+                  className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
+                  title={tilesOpen ? 'Свернуть' : 'Развернуть'}
+                >
+                  <span className={`text-[10px] shrink-0 ${tilesOpen ? 'text-gold' : 'text-faint'}`}>{tilesOpen ? '▾' : '▸'}</span>
+                  <span className="tick-label">Карты-плитки{map.tileGrid ? ` · ${map.tileGrid.tiles.length}` : ''}{tileBgCount > 0 ? ` · фонов: ${tileBgCount}` : ''}</span>
+                </button>
+                {tilesOpen && (
+                  <div className="space-y-2">
+                    {!map.tileGrid ? (
+                      <>
+                        <p className="text-[10px] text-faint leading-tight">ПЛИТОЧНЫЙ РЕЖИМ — мир из нескольких ОТДЕЛЬНЫХ карт-локаций одного размера: сейчас редактируете одну карту, игрок через ПОРТАЛ попадает на другую (соседнюю или любую далёкую). Бесконечное увеличение поля (панель «Размер поля») тоже остаётся доступным.</p>
+                        <PxBtn color="teal" small className="w-full" onClick={enableTileMode}>{Ic.grid(12)} Включить плиточный режим</PxBtn>
+                        <p className="text-[10px] text-faint leading-tight">Текущее поле станет картой №1 — всё нарисованное останется на ней.</p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-[10px] text-teal leading-tight border-2 border-teal/40 px-2 py-1.5">Плиточный режим ВКЛЮЧЁН: каждая плитка — отдельная карта-локация {map.tileGrid.w}×{map.tileGrid.h} px. В ИГРЕ фишка зажата в своей карте, на другие — только через порталы.</p>
+                        {/* СХЕМА ПЛИТОК: клик — перейти на карту (камера + её фон), крестик — удалить */}
+                        <div>
+                          <div className="tick-label mb-1">Схема плиток (клик — перейти на карту)</div>
+                          <div
+                            className="grid gap-1"
+                            style={{ gridTemplateColumns: `repeat(${Math.min(tgCols, 8)}, minmax(0, 1fr))` }}
+                          >
+                            {Array.from({ length: tgCols * tgRows }, (_, i) => {
+                              const col = i % tgCols, row = Math.floor(i / tgCols);
+                              const t = map.tileGrid!.tiles.find((x) => x.col === col && x.row === row);
+                              const idx = t ? map.tileGrid!.tiles.indexOf(t) : -1;
+                              if (!t) return <div key={i} className="aspect-square border-2 border-dashed border-edge/50" title="Свободный слот схемы" />;
+                              const isActive = activeTile?.id === t.id;
+                              const hasBg = !!(map.tileBgs ?? {})[t.id];
+                              return (
+                                <div key={i} className="relative">
+                                  <button
+                                    onClick={() => selectTile(t)}
+                                    title={`КАРТА ${idx + 1}: клик — редактировать эту локацию${hasBg ? ' · свой фон есть' : ''}`}
+                                    className={`relative w-full aspect-square border-2 cursor-pointer font-pixel text-[9px] ${isActive ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim hover:border-edge2'}`}
+                                  >
+                                    {idx + 1}
+                                    {hasBg && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-teal pointer-events-none" title="У этой карты свой фон" />}
+                                  </button>
+                                  {map.tileGrid!.tiles.length > 1 && (
+                                    <HoldDeleteButton
+                                      as="span"
+                                      onFire={() => removeMapTile(t.id)}
+                                      label={`карту-плитку №${idx + 1}`}
+                                      ariaLabel={`Удалить карту-плитку ${idx + 1}`}
+                                      title={`Удалить карту-плитку ${idx + 1} вместе с её содержимым`}
+                                      className={`absolute -top-1.5 -right-1.5 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center cursor-pointer ${isActive ? 'opacity-90' : 'opacity-70 hover:opacity-100'}`}
+                                    >×</HoldDeleteButton>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                          {tileBgCount > 0 && <p className="text-[9px] text-teal mt-1 leading-tight"><span className="inline-block w-1.5 h-1.5 bg-teal align-middle mr-0.5" /> — у карты свой фон ({tileBgCount} шт., загрузка в панели «Фон» выше)</p>}
+                        </div>
+                        <PxBtn color="teal" small className="w-full" onClick={addMapTile}>{Ic.plus(12)} Добавить карту-плитку</PxBtn>
+                        <p className="text-[10px] text-faint leading-tight">Новая плитка встаёт рядом с выбранной. Порталы (инструмент «Портал») связывают ЛЮБЫЕ плитки — соседние и далёкие: протяните зону входа на одной плитке, переключитесь на другую и кликните — точка перехода.</p>
+                        <PxBtn color="coral" small className="w-full" onClick={disableTileMode}>Выключить плиточный режим</PxBtn>
                       </>
                     )}
                   </div>

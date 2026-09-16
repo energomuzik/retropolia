@@ -353,6 +353,27 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     }
   }
 
+  // СВОИ ФОНЫ КАРТ-ПЛИТОК (плиточный режим карт): у каждой карты-плитки своя
+  // «локация». Рисуется ПОВЕРХ общего фона карты, ТОЛЬКО в пределах своей плитки.
+  if (map.tileGrid && map.tileBgs) {
+    const tg = map.tileGrid;
+    for (const t of tg.tiles) {
+      const pb = map.tileBgs[t.id];
+      if (!pb || !pb.bg) continue;
+      const img = getImage(pb.bg);
+      if (!img) continue;
+      const px = t.col * tg.w, py = t.row * tg.h;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(px, py, tg.w, tg.h);
+      ctx.clip();
+      ctx.imageSmoothingEnabled = true;
+      if (pb.bgMode === 'real') ctx.drawImage(img, px, py);
+      else ctx.drawImage(img, px, py, tg.w, tg.h);
+      ctx.restore();
+    }
+  }
+
   // СВОИ ФОНЫ ПЛИТОК: у каждой плитки может быть своя картинка («другая локация»).
   // Рисуется ПОВЕРХ общего фона карты, ТОЛЬКО в пределах своей плитки.
   if (map.plateSize && map.plateBgs) {
