@@ -8,7 +8,7 @@ import {
 import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimDef, BossAnimDef, CellDef, CellType, GameMap, PlacedAnim, PlacedBoss, PortalZone, Stamp, TokenDef, TileGroup, TileImg, WallRect } from '../types';
+import type { AnimDef, BossAnimDef, CellDef, CellType, GameMap, PlacedAnim, PlacedBoss, PlateBg, PortalZone, Stamp, TokenDef, TileGroup, TileImg, WallRect } from '../types';
 import { bossLibEntryOf, MAP_MODES, MAX_FIELD, PLATE_SIZES } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
@@ -160,6 +160,7 @@ export default function MapEditor() {
   const [selPortal, setSelPortal] = useState<number | null>(null); // выбранный портал (индекс)
   const [pickTargetFor, setPickTargetFor] = useState<number | null>(null); // портал, для которого указываем точку перехода (следующий клик по канве = точка)
   const [platesOpen, setPlatesOpen] = useState(false); // спойлер «Плитки и порталы» в левой панели
+  const [bgScope, setBgScope] = useState<'plate' | 'all'>('plate'); // куда ложится НОВЫЙ фон при разбивке: «на эту плитку» (своя локация) или «на всю карту» (одна картинка на всё поле)
   const [extract, setExtract] = useState<{ file: File; src: string; name: string; busy: boolean; bgMode: 'auto' | 'custom'; bg: string; foundBg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; tiles: TileImg[] } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -554,7 +555,9 @@ export default function MapEditor() {
     updMap({ plateSize: undefined } as Partial<GameMap>);
     dirtyRef.current = true;
     sfx.fail();
-    toast('Разбивка на плитки убрана — карта снова одно поле', 'info');
+    toast(plateBgCount > 0
+      ? `Разбивка на плитки убрана — карта снова одно поле. Свои фоны у ${plateBgCount} плитки(ок) спрятаны и вернутся, когда снова включите разбивку`
+      : 'Разбивка на плитки убрана — карта снова одно поле', 'info');
   };
   const jumpToPlate = (col: number, row: number) => {
     const cv = canvasRef.current;
@@ -744,14 +747,30 @@ export default function MapEditor() {
     sfx.fail();
   };
 
+  /* ФОН: при разбивке на плитки выбор КУДА — «на эту плитку» (своя локация, ключ = номер
+     плитки из навигатора) или «на всю карту» (одна картинка на всё поле, как раньше) */
+  const setPlateBg = (n: number, pb: PlateBg | undefined) => {
+    if (!map) return;
+    const rest = { ...(map.plateBgs ?? {}) };
+    if (pb) rest[n] = pb;
+    else delete rest[n];
+    updMap({ plateBgs: Object.keys(rest).length ? rest : undefined } as Partial<GameMap>);
+  };
   const setBg = async (files: FileList | null) => {
     const f = files?.[0];
     if (!f || !map) return;
     const r = await importImage(f, 2000, true);
     if (!r) { toast('Это не картинка', 'err'); return; }
-    updMap({ bg: r.url, bgMode: 'stretch' });
-    sfx.coin();
-    toast('Фон карты загружен', 'ok');
+    if (map.plateSize && bgScope === 'plate') {
+      const n = curPlateIdx + 1; // плитка, на которую сейчас смотрит камера
+      setPlateBg(n, { bg: r.url, bgMode: 'stretch' });
+      sfx.coin();
+      toast(`Фон загружен на ПЛИТКУ ${n} — остальные плитки не тронуты (другим плиткам — свой фон через навигатор)`, 'ok');
+    } else {
+      updMap({ bg: r.url, bgMode: 'stretch' });
+      sfx.coin();
+      toast('Общий фон карты загружен (на всё поле)', 'ok');
+    }
   };
 
   /* ---------- ЭКСТРАКТОР: нарезка тайлов из картинки с однотонным фоном ---------- */
@@ -1907,6 +1926,11 @@ export default function MapEditor() {
   const noTask = map?.cells.filter((c) => c.type === 'task' && !c.task).length ?? 0;
   const restCells = map?.cells.filter((c) => c.type === 'rest').length ?? 0;
   const msz = map ? mapSize(map) : { w: 0, h: 0 };
+  /* фон плиток: номер плитки под камерой, сколько плиток со своим фоном, что редактируем */
+  const curPlateNum = curPlateIdx + 1;
+  const plateBgCount = map?.plateBgs ? Object.keys(map.plateBgs).length : 0;
+  const bgIsPlate = !!(map && map.plateSize && bgScope === 'plate');
+  const plateBgCur = map?.plateSize ? (map.plateBgs ?? {})[curPlateNum] : undefined;
 
   return (
     <div className="h-full crt-grid-bg flex flex-col">
@@ -1955,8 +1979,38 @@ export default function MapEditor() {
           {map && (
             <>
               <div>
-                <div className="tick-label mb-2">Общий фон карты</div>
-                {map.bg ? (
+                <div className="tick-label mb-2">{map.plateSize ? 'Фон: плитка / вся карта' : 'Общий фон карты'}</div>
+                {/* КУДА ЛОЖИТСЯ НОВЫЙ ФОН — выбор появляется при разбивке на плитки:
+                    «На эту плитку» = у каждой плитки своя картинка (другая локация),
+                    «На всю карту» = одна картинка на всё поле сразу (как раньше) */}
+                {map.plateSize && (
+                  <>
+                    <div className="flex gap-1.5 mb-1.5">
+                      <button onClick={() => { setBgScope('plate'); sfx.hover(); }} title="Фон ложится ТОЛЬКО на плитку, на которую сейчас смотрит камера — у каждой плитки своя локация" className={`flex-1 py-1 border-2 cursor-pointer font-display text-[9px] uppercase ${bgScope === 'plate' ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}>На эту плитку</button>
+                      <button onClick={() => { setBgScope('all'); sfx.hover(); }} title="Одна картинка на ВСЁ поле сразу — все плитки вместе (как раньше)" className={`flex-1 py-1 border-2 cursor-pointer font-display text-[9px] uppercase ${bgScope === 'all' ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}>На всю карту</button>
+                    </div>
+                    {bgScope === 'plate' && (
+                      <p className="text-[10px] text-sky leading-tight mb-1.5 border-2 border-sky/40 px-2 py-1">Сейчас редактируется плитка <span className="text-gold">№ {curPlateNum}</span>. Другую плитку — кликом по номеру в навигаторе спойлера «Плитки и порталы» ниже: камера прыгнет туда → загрузите её фон.</p>
+                    )}
+                  </>
+                )}
+                {bgIsPlate ? (
+                  plateBgCur ? (
+                    <div className="space-y-1.5">
+                      <img src={plateBgCur.bg} alt="фон плитки" className="w-full border-2 border-sky/60 object-cover h-20" />
+                      <div className="flex gap-1.5">
+                        <GhostBtn small className="flex-1" onClick={() => { bgRef.current?.click(); }}>Заменить</GhostBtn>
+                        <GhostBtn small className="flex-1" onClick={() => { setPlateBg(curPlateNum, undefined); sfx.fail(); }}>Убрать</GhostBtn>
+                      </div>
+                      <div className="flex gap-1.5 text-[10px]">
+                        <button onClick={() => setPlateBg(curPlateNum, { ...plateBgCur, bgMode: 'stretch' })} className={`flex-1 py-1 border-2 cursor-pointer ${plateBgCur.bgMode !== 'real' ? 'border-gold text-gold' : 'border-edge text-faint'}`}>растянуть</button>
+                        <button onClick={() => setPlateBg(curPlateNum, { ...plateBgCur, bgMode: 'real' })} className={`flex-1 py-1 border-2 cursor-pointer ${plateBgCur.bgMode === 'real' ? 'border-gold text-gold' : 'border-edge text-faint'}`}>1:1</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <GhostBtn small className="w-full" onClick={() => { bgRef.current?.click(); }}>{Ic.plus(12)} Загрузить фон плитки {curPlateNum}</GhostBtn>
+                  )
+                ) : map.bg ? (
                   <div className="space-y-1.5">
                     <img src={map.bg} alt="фон" className="w-full border-2 border-edge object-cover h-20" />
                     <div className="flex gap-1.5">
@@ -1971,7 +2025,12 @@ export default function MapEditor() {
                 ) : (
                   <GhostBtn small className="w-full" onClick={() => { bgRef.current?.click(); }}>{Ic.plus(12)} Загрузить фон (картинку)</GhostBtn>
                 )}
-                <p className="text-[10px] text-faint mt-1 leading-tight">Фон лежит ВНУТРИ карты и уедет игрокам сам. Большая картинка сожмётся до 2000px.</p>
+                <p className="text-[10px] text-faint mt-1 leading-tight">
+                  {bgIsPlate
+                    ? 'Свой фон ложится ТОЛЬКО на выбранную плитку — соседние не тронуты: каждой плитке можно дать свою «локацию». Одна картинка на всё поле — переключатель «На всю карту» выше. '
+                    : ''}
+                  Фон лежит ВНУТРИ карты и уедет игрокам сам. Большая картинка сожмётся до 2000px.
+                </p>
               </div>
 
               {/* СЛОИ: фон — самый низ, тайловые слои (выбор + добавление), ячейки и стрелки — всегда самый верх */}
@@ -1987,7 +2046,7 @@ export default function MapEditor() {
                       <div className="flex items-center gap-1.5 border-2 border-edge bg-panel px-2 py-1.5">
                         <span className="text-[10px] shrink-0">🖼</span>
                         <span className="font-display text-[10px] uppercase text-dim flex-1 min-w-0 truncate">Фон</span>
-                        <span className="tick-label text-faint">{map.bg ? 'есть' : 'нет'} · низ</span>
+                        <span className="tick-label text-faint">{map.bg ? 'есть' : 'нет'}{plateBgCount > 0 ? ` + плиток: ${plateBgCount}` : ''} · низ</span>
                       </div>
                       {/* тайловые слои: клик — выбрать для рисования, крестик — удалить слой (кроме последнего) */}
                       {Array.from({ length: map.tileLayers ?? 2 }, (_, i) => i).map((i) => {
@@ -2125,7 +2184,7 @@ export default function MapEditor() {
                 <div className="space-y-2">
                   {map.plateSize ? (
                     <p className="text-[10px] text-dim leading-tight border-2 border-sky/40 px-2 py-1.5">
-                      Поле {msz.w}×{msz.h} px = {platesX}×{platesY} плиток по {map.plateSize} px.
+                      Поле {msz.w}×{msz.h} px = {platesX}×{platesY} плиток по {map.plateSize} px{plateBgCount > 0 ? ` · своих фонов: ${plateBgCount}` : ''}.
                       Размер и навигатор плиток — в спойлере «Плитки и порталы» ниже.
                     </p>
                   ) : (
@@ -2230,7 +2289,7 @@ export default function MapEditor() {
                 </button>
                 {platesOpen && (
                   <div className="space-y-1.5">
-                    <p className="text-[10px] text-faint leading-tight">Два способа сделать карту БОЛЬШОЙ: 1) просто увеличьте «Размер поля» выше; 2) ПЛИТКИ — страницы поля одинакового размера: СОСЕДНИЕ плитки стыкуются краями (фишка переходит ходьбой в любом месте стыка), ЛЮБЫЕ плитки связываются порталами-телепортами.</p>
+                    <p className="text-[10px] text-faint leading-tight">Два способа сделать карту БОЛЬШОЙ: 1) просто увеличьте «Размер поля» выше; 2) ПЛИТКИ — страницы поля одинакового размера: СОСЕДНИЕ плитки стыкуются краями (фишка переходит ходьбой в любом месте стыка), ЛЮБЫЕ плитки связываются порталами-телепортами. У каждой плитки — СВОЙ ФОН («другая локация»): навигатором прыгните на плитку и загрузите фон в панели «Фон» выше (переключатель «На эту плитку / На всю карту»).</p>
                     {!map.plateSize ? (
                       <PxBtn color="sky" small className="w-full" onClick={enablePlates}>{Ic.grid(12)} Разбить поле на плитки</PxBtn>
                     ) : (
@@ -2254,15 +2313,19 @@ export default function MapEditor() {
                           <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${Math.min(platesX, 8)}, minmax(0, 1fr))` }}>
                             {Array.from({ length: Math.min(platesX * platesY, 64) }, (_, i) => {
                               const col = i % platesX, row = Math.floor(i / platesX);
+                              const hasOwnBg = !!(map.plateBgs ?? {})[i + 1];
                               return (
                                 <button
                                   key={i}
                                   onClick={() => jumpToPlate(col, row)}
-                                  className={`py-1 text-[9px] font-pixel border-2 cursor-pointer ${curPlateIdx === i ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}
-                                >{i + 1}</button>
+                                  className={`relative py-1 text-[9px] font-pixel border-2 cursor-pointer ${curPlateIdx === i ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}
+                                >{i + 1}
+                                  {hasOwnBg && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-sky pointer-events-none" title="У этой плитки свой фон" />}
+                                </button>
                               );
                             })}
                           </div>
+                          {plateBgCount > 0 && <p className="text-[9px] text-sky mt-1 leading-tight"><span className="inline-block w-1.5 h-1.5 bg-sky align-middle mr-0.5" /> — у плитки свой фон ({plateBgCount} шт.)</p>}
                         </div>
                         <PxBtn color="coral" small className="w-full" onClick={disablePlates}>Убрать разбивку (одно поле)</PxBtn>
                       </>

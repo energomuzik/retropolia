@@ -353,6 +353,32 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     }
   }
 
+  // СВОИ ФОНЫ ПЛИТОК: у каждой плитки может быть своя картинка («другая локация»).
+  // Рисуется ПОВЕРХ общего фона карты, ТОЛЬКО в пределах своей плитки.
+  if (map.plateSize && map.plateBgs) {
+    const ps = map.plateSize;
+    const cols = Math.ceil(b.w / ps);
+    const rows = Math.ceil(b.h / ps);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const pb = map.plateBgs[r * cols + c + 1]; // ключ — номер плитки как в навигаторе (с 1)
+        if (!pb || !pb.bg) continue;
+        const img = getImage(pb.bg);
+        if (!img) continue;
+        const px = c * ps, py = r * ps;
+        const pw = Math.min(ps, b.w - px), ph = Math.min(ps, b.h - py); // краевая плитка может быть неполной
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(px, py, pw, ph);
+        ctx.clip();
+        ctx.imageSmoothingEnabled = true;
+        if (pb.bgMode === 'real') ctx.drawImage(img, px, py);
+        else ctx.drawImage(img, px, py, pw, ph);
+        ctx.restore();
+      }
+    }
+  }
+
   // СТАРЫЙ формат тайлов (глобальная библиотека) — только пока карта не переехала в штампы
   if (map.tiles.length > 0 && !(map.stamps && map.stamps.length)) {
     for (const pt of map.tiles) {
