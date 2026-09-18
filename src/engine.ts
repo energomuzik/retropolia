@@ -1,5 +1,5 @@
 import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, PlayerState, TaskDef, TradeOffer, TokenDir } from './types';
-import { APP_VERSION, SKIP_COST, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, tileAt, tileRectOf } from './types';
+import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, tileAt, tileRectOf, coinsStr } from './types';
 import type { JoyId } from './types';
 import { CELL, cellAtPoint, cellCenter, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
 
@@ -31,7 +31,7 @@ export type Action =
   | { t: 'rollOffReady'; id: string }
   | { t: 'resume'; snap: { state: GameSession; mapName: string }; claims: Record<string, string> }
   | { t: 'arrived'; id: string }
-  | { t: 'chooseMode'; id: string; mode: 'time' | 'tries' }
+  | { t: 'chooseMode'; id: string; mode: 'time' | 'tries' | 'coins' }
   | { t: 'startTask'; id: string }
   | { t: 'togglePause'; id: string }
   | { t: 'token'; id: string; tokenImg: string | null; tokenId?: string; tokenSize?: number }
@@ -39,7 +39,7 @@ export type Action =
   | { t: 'declareDone'; id: string }
   | { t: 'approve'; id: string }
   | { t: 'violate'; id: string }
-  | { t: 'skip'; id: string; instant: boolean; spentMs: number; loads: number; resource?: 'time' | 'tries' }
+  | { t: 'skip'; id: string; instant: boolean; spentMs: number; loads: number; resource?: 'time' | 'tries' | 'coins' }
   | { t: 'postChoice'; id: string; choice: 'continue' | 'end' }
   | { t: 'setCellTask'; id: string; cellIdx: number; task: TaskDef; cardId?: string }
   | { t: 'useCard'; id: string; cardId: string }
@@ -55,6 +55,9 @@ export type Action =
   | { t: 'journeyMove'; id: string; x: number; y: number; dir?: TokenDir; mv?: boolean; tp?: boolean } // JOURNEY: позиция СВОЕЙ фишки — любой игрок ходит одновременно (авторитет — хост); mv=false — фишка встала; tp — обновление несёт ПРЫЖОК ЧЕРЕЗ ПОРТАЛ (анти-телепорт не применять)
   | { t: 'fxDone'; id: string } // анимация fx (победа/поражение) у игрока закончилась — можно продолжать ход
   | { t: 'fxBreak'; id: string } // спектакль победы дошёл до разбития ячейки (пауза 1 с прошла — анимации начались)
+  | { t: 'maplessSpin'; id: string; cellIdx: number; romId: string; title: string } // БЕЗ КАРТЫ: рандомайзер остановился — хост записывает выпавшую игру в матч
+  | { t: 'maplessOpen'; id: string; cellIdx: number } // БЕЗ КАРТЫ: хост открывает следующий матч (задание на ячейке)
+  | { t: 'maplessFinish'; id: string } // БЕЗ КАРТЫ: все матчи сыграны — хост завершает партию победой (после анимаций)
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const rnd6 = () => 1 + Math.floor(Math.random() * 6);
@@ -62,7 +65,7 @@ const rnd6 = () => 1 + Math.floor(Math.random() * 6);
 function mkPlayer(id: string, name: string, color: number, isHost: boolean): PlayerState {
   return {
     id, name: name.slice(0, 14).toUpperCase() || 'ИГРОК', color, ready: isHost, isHost,
-    secLeft: START_SEC, triesLeft: START_TRIES, pos: 0, alive: true, skipTurns: 0, extraTurn: false,
+    secLeft: START_SEC, triesLeft: START_TRIES, coinsLeft: 0, pos: 0, alive: true, skipTurns: 0, extraTurn: false,
     inventory: [], oneDie: false, dicePlus: false, freeSkip: false, joyTurn: -1,
   };
 }
@@ -75,6 +78,7 @@ function normPlayer(p: PlayerState) {
   if (p.freeSkip === undefined) p.freeSkip = false;
   if (p.joyTurn === undefined) p.joyTurn = -1;
   if (p.spect === undefined) p.spect = false;
+  if (p.coinsLeft === undefined) p.coinsLeft = 0;
 }
 
 const CELL_PX = CELL; // клетка сетки поля
@@ -249,19 +253,29 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   };
 
   const checkElim = () => {
+    /* монеты-единственный ресурс (coinsOnly): вылетает тот, у кого кончились МОНЕТЫ;
+       в смешанном режиме монеты не убивают — вылет по времени+попыткам как раньше */
+    const coinsFatal = map.coinsOnly === true && map.startCoins !== undefined;
     for (const p of s.players) {
-      if (p.alive && !p.spect && p.secLeft <= 0 && p.triesLeft <= 0) {
+      const out = coinsFatal ? (p.coinsLeft ?? 0) <= 0 : (p.secLeft <= 0 && p.triesLeft <= 0 && (!coinsFatal || (p.coinsLeft ?? 0) <= 0));
+      if (p.alive && !p.spect && out) {
         p.alive = false;
         if (s.challenge && current().id === p.id) s.challenge = null;
         if (s.pendingCard && s.pendingCard.player === p.id) s.pendingCard = null;
         s.awaitPost = false;
         s.moving = null;
-        log(`💀 ${p.name} выбывает — ресурсы исчерпаны`);
+        log(`💀 ${p.name} выбывает — ${coinsFatal ? 'монеты исчерпаны' : 'ресурсы исчерпаны'}`);
         if (map.mode === 'skill' && p.isHost) log(`❌ SKILL CHALLENGE ПРОВАЛЕН: ресурсы исчерпаны до ${SKILL_TURNS} ходов`);
+        if (map.mapless && p.isHost) log(`❌ ЧЕЛЛЕНДЖ ПРОВАЛЕН: ресурсы исчерпаны на матче ${(s.mapless?.done ?? 0) + 1} из ${s.mapless?.total ?? '?'}`);
       }
     }
     const al = alive();
-    if (s.phase === 'playing' && (al.length === 0 || (al.length <= 1 && map.mode !== 'skill'))) {
+    /* В ОДИНОЧНЫХ режимах (JOURNEY-на-одного, SKILL CHALLENGE) один живой игрок —
+       НОРМА: партия не заканчивается после каждого задания. Финал одинокой партии:
+       ресурсы исчерпаны (вылет, al.length === 0) — поражение; в безкартовом челлендже
+       победу приносит maplessFinish после всех матчей. Фикс: раньше одиночный JOURNEY
+       «побеждал» после первого же пройденного задания. */
+    if (s.phase === 'playing' && (al.length === 0 || (al.length <= 1 && !isSoloMode(map.mode)))) {
       s.phase = 'over';
       s.winner = al[0]?.id ?? null;
       if (s.winner) log(`🏆 ${al[0].name} — ПОБЕДИТЕЛЬ!`);
@@ -320,21 +334,32 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     if (q.resolved) return;
     if (pending.length > 0) {
       const winner = pending.reduce((best, x) => (x.sentAt < best.sentAt ? x : best), pending[0]);
-      const kind = Math.random() < 0.5 ? 'time' : 'tries';
       const w = s.players.find((x) => x.id === winner.id);
-      if (w) {
-        if (kind === 'time') w.secLeft += 300;
-        else w.triesLeft += 5;
+      if (map.startCoins !== undefined) {
+        // МОНЕТЫ активны: бонус победителю квиза монетами
+        const wc = Math.max(0, Math.floor(map.quizWinCoins ?? 0));
+        if (w) w.coinsLeft = Math.min(COINS_MAX, (w.coinsLeft ?? 0) + wc);
+        q.resolved = true;
+        q.result = {
+          correct: true, deltaMin: 0, deltaTries: 0, targetName: winner.name, reason: 'correct',
+        };
+        log(`✔ ${winner.name}: верный ответ! +${wc} бронзы — капитал ${coinsStr(w?.coinsLeft ?? 0)}`);
+      } else {
+        const kind = Math.random() < 0.5 ? 'time' : 'tries';
+        if (w) {
+          if (kind === 'time') w.secLeft += 300;
+          else w.triesLeft += 5;
+        }
+        q.resolved = true;
+        q.result = {
+          correct: true,
+          deltaMin: kind === 'time' ? 5 : 0,
+          deltaTries: kind === 'time' ? 0 : 5,
+          targetName: winner.name,
+          reason: 'correct',
+        };
+        log(`✔ ${winner.name}: верный ответ! +5 ${kind === 'time' ? 'мин' : 'попыток'}`);
       }
-      q.resolved = true;
-      q.result = {
-        correct: true,
-        deltaMin: kind === 'time' ? 5 : 0,
-        deltaTries: kind === 'time' ? 0 : 5,
-        targetName: winner.name,
-        reason: 'correct',
-      };
-      log(`✔ ${winner.name}: верный ответ! +5 ${kind === 'time' ? 'мин' : 'попыток'}`);
     } else {
       q.resolved = true;
       q.result = { correct: false, deltaMin: 0, deltaTries: 0, targetName: '', reason: 'allWrong' };
@@ -397,13 +422,34 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     if (!ch) return;
     const p = current();
     const cellNo = ch.cellIdx + 1;
-    /* SKILL CHALLENGE: ячейка «сыграна» (пройдена или пропущена) — задание на ней
-       больше не открывается: встав на неё, фишка сама поедет к следующей неигранной */
-    if (map.mode === 'skill' && !(s.skillDone ?? []).includes(ch.cellIdx)) {
+    /* SKILL CHALLENGE и БЕЗКАРТОВАЯ ИГРА: ячейка «сыграна» (пройдена или пропущена) —
+       задание на ней больше не открывается */
+    if ((map.mode === 'skill' || map.mapless) && !(s.skillDone ?? []).includes(ch.cellIdx)) {
       s.skillDone = [...(s.skillDone ?? []), ch.cellIdx];
+    }
+    /* БЕЗ КАРТЫ: матч сыгран — счётчик двигается; все матчи — флаг победы,
+       партию завершит хост действием maplessFinish (после анимаций) */
+    if (s.mapless) {
+      s.mapless.done = Math.min(s.mapless.total, (s.mapless.done ?? 0) + 1);
+      if (s.mapless.done >= s.mapless.total) s.mapless.over = true;
+      log(`🎮 Матч ${s.mapless.done} из ${s.mapless.total} ${success ? 'ПРОЙДЕН' : 'закончен'} — осталось ${Math.max(0, s.mapless.total - s.mapless.done)}`);
     }
     p.secLeft = Math.max(0, p.secLeft - spentSec);
     p.triesLeft = Math.max(0, p.triesLeft - spentTries);
+    /* МОНЕТЫ (если включены на карте): победа — награда, пропуск/проигрыш — цена.
+       Выплаты монетами идут ПОВЕРХ обычной цены времени/попыток. */
+    if (map.startCoins !== undefined) {
+      const winC = Math.max(0, Math.floor(map.taskWinCoins ?? 0));
+      const skipC = Math.max(0, Math.floor(map.skipCoins ?? SKIP_COINS_DEFAULT));
+      if (success && winC > 0) {
+        p.coinsLeft = Math.min(COINS_MAX, (p.coinsLeft ?? 0) + winC);
+        log(`🪙 Награда монетами: +${winC} бронзы — капитал ${coinsStr(p.coinsLeft)}`);
+      }
+      if (!success && skipC > 0) {
+        p.coinsLeft = Math.max(0, (p.coinsLeft ?? 0) - skipC);
+        log(`🪙 Плата за пропуск: −${skipC} бронзы — капитал ${coinsStr(p.coinsLeft)}`);
+      }
+    }
     /* СВОЙ ЧЕЛЛЕНДЖ — штраф за проигрыш и награда за победу (задаётся мастером
        «Создать челлендж» и применяется в редакторе карт): минус ресурсы при
        поражении, плюс ресурсы при победе — ПОМИМО обычной цены задания. */
@@ -489,6 +535,12 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     } else if (!s.awaitPost && !gatingFx()) {
       endTurnNow(); // «Без очков»/«Половина победы»: права продолжить ход нет
     }
+  };
+
+  /* БЕЗ КАРТЫ: индекс следующего неигранного матча (ячейка задания вне skillDone) */
+  const maplessNextIdx = (): number => {
+    const done = s.skillDone ?? [];
+    return map.cells.findIndex((c, i) => c.type === 'task' && !done.includes(i) && !s.broken?.[i]);
   };
 
   const othersCount = () => alive().length - 1;
@@ -629,6 +681,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       cellIdx: p.pos, mode: null, started: false, paused: false, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
       status: 'choose', approvals: [], violations: [], lowStart: false,
     };
+    /* ТОЛЬКО МОНЕТЫ: выбора ресурса нет — задание сразу готово к запуску (платёж по итогам) */
+    if (map.coinsOnly && map.startCoins !== undefined) {
+      s.challenge.mode = 'coins';
+      s.challenge.status = 'ready';
+    }
     const owner = s.captured[p.pos] ? s.players.find((x) => x.id === s.captured[p.pos]) : null;
     log(`🎯 ${p.name}: задание на ячейке ${posName(p.pos)}${owner ? ` (хозяин ${owner.name})` : ''}`);
     /* пакость «Один кубик»: следующий бросок вставшего — только один кубик */
@@ -866,12 +923,17 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
          это условие челленджа и оно не меняется (настройки карты игнорируются). */
       const sm = map.mode === 'skill' ? 60 : Math.max(5, Math.min(180, Math.floor(map.startMin ?? START_SEC / 60)));
       const st = map.mode === 'skill' ? 60 : Math.max(5, Math.min(180, Math.floor(map.startTries ?? START_TRIES)));
+      // МОНЕТЫ: стартовый капитал — только если автор включил их на карте
+      const sc0 = map.startCoins !== undefined ? Math.max(0, Math.min(COINS_MAX, Math.floor(map.startCoins))) : 0;
       // все игроки начинают на СТАРТОВОЙ ячейке (первая с типом «старт», иначе №1)
       const startPos = startCellIdx(map);
       for (const p of s.players) {
-        p.secLeft = sm * 60; p.triesLeft = st; p.pos = startPos;
+        p.secLeft = sm * 60; p.triesLeft = st; p.coinsLeft = sc0; p.pos = startPos;
         if (soloMode) p.spect = !p.isHost; // играет только хост — остальные смотрят
       }
+      /* БЕЗКАРТОВАЯ ИГРА и SKILL CHALLENGE (он теперь тоже без карты): счётчик матчей */
+      const mlTotal = map.mapless?.total ?? (map.mode === 'skill' ? SKILL_TURNS : 0);
+      if (mlTotal > 0) s.mapless = { done: 0, total: mlTotal, over: false };
       if (isJourneyLike(map.mode)) {
         // фишка хоста стартует ОДНОВРЕМЕННО (в TRIATHLON — фишки ВСЕХ игроков);
         // жеребьёвки нет — панель готовности (в JOURNEY-на-одного она у хоста одна)
@@ -887,13 +949,18 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       s.rollOffReady = [];
       s.skillDone = [];
       if (isJourneyLike(map.mode)) s.rollOffWinner = s.players[0]?.id ?? null; // без бросков: сразу панель готовности
+      /* БЕЗ КАРТЫ (SKILL CHALLENGE и челленджи без карты): жеребьёвка не нужна —
+         сразу панель готовности хоста (без кубиков) */
+      if (map.mode === 'skill' || map.mapless) s.rollOffWinner = s.players.find((p) => p.isHost)?.id ?? null;
       log(soloMode && map.mode === 'skill'
-        ? `🧨 SKILL CHALLENGE! Играет только хост — лимит ${SKILL_TURNS} ходов. Остальные — зрители.`
-        : soloMode
-          ? `🧭 JOURNEY! Играет только хост (${sm} мин / ${st} поп.) — все остальные подключаются зрителями.`
-          : isJourneyLike(map.mode)
-            ? `🧭 TRIATHLON! У каждого: ${sm} мин и ${st} поп. Все фишки стартуют ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, тот и играет.`
-            : `Игра начинается! У каждого: ${sm} мин и ${st} поп. Бросок за первый ход…`);
+        ? `🧨 SKILL CHALLENGE! Играет только хост — ${SKILL_TURNS} случайных игр из рандомайзера. Остальные — зрители.`
+        : map.mapless
+          ? `🎲 ЧЕЛЛЕНДЖ БЕЗ КАРТЫ! Матчей: ${mlTotal}${map.mapless.random ? ' (рандомайзер)' : ''} — играет только хост (${sm} мин / ${st} поп.${map.startCoins !== undefined ? `, монет: ${sc0}` : ''}).`
+          : soloMode
+            ? `🧭 JOURNEY! Играет только хост (${sm} мин / ${st} поп.) — все остальные подключаются зрителями.`
+            : isJourneyLike(map.mode)
+              ? `🧭 TRIATHLON! У каждого: ${sm} мин и ${st} поп. Все фишки стартуют ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, тот и играет.`
+              : `Игра начинается! У каждого: ${sm} мин и ${st} поп. Бросок за первый ход…`);
       break;
     }
     case 'roll': {
@@ -1085,6 +1152,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
             cellIdx: i, mode: null, started: false, paused: false, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
             status: 'choose', approvals: [], violations: [], lowStart: false,
           };
+          /* ТОЛЬКО МОНЕТЫ: без окна выбора — задание сразу готово (платёж по итогам) */
+          if (map.coinsOnly && map.startCoins !== undefined) {
+            s.challenge.mode = 'coins';
+            s.challenge.status = 'ready';
+          }
           const owner = s.captured[i] ? s.players.find((pl) => pl.id === s.captured[i]) : null;
           log(`🎯 ${p.name} ПЕРВЫМ пересёк ячейку ${posName(i)} — задание его!${owner ? ` (хозяин ${owner.name})` : ''}`);
           break;
@@ -1117,21 +1189,78 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       log(`💥 ${wn} побеждает и РАЗБИВАЕТ ячейку №${fx.cellIdx + 1}!`);
       break;
     }
+    /* ---------- БЕЗ КАРТЫ: челлендж без карты и SKILL CHALLENGE (25 случайных игр) ----------
+       Экран карты не показывается: хост крутит рандомайзер (или идёт по списку) —
+       выпавшая игра записывается в текущий матч и открывается задание. */
+    case 'maplessSpin': {
+      const host = s.players.find((p) => p.isHost);
+      if (s.phase !== 'playing' || !host || a.id !== host.id) break;
+      if (!map.mapless?.random && map.mode !== 'skill') break; // рандомайзер есть только там
+      const cell = map.cells[a.cellIdx];
+      if (!cell || cell.type !== 'task') break;
+      s.sessionTasks = s.sessionTasks ?? {};
+      s.sessionTasks[a.cellIdx] = {
+        romId: a.romId,
+        title: a.title.slice(0, 40) || 'Случайная игра',
+        desc: map.mode === 'skill'
+          ? `Случайный матч из рандомайзера (хост крутит колесо — играется выпавшее)`
+          : 'Случайный матч: игра выпала из рандомайзера челленджа',
+      };
+      log(`🎰 Рандомайзер остановился: «${a.title.slice(0, 40)}» — матч ${(s.mapless?.done ?? 0) + 1} из ${s.mapless?.total ?? '?'}`);
+      break;
+    }
+    case 'maplessOpen': {
+      const host = s.players.find((p) => p.isHost);
+      if (s.phase !== 'playing' || !host || a.id !== host.id) break;
+      if (!map.mapless && map.mode !== 'skill') break;
+      if (s.challenge || s.moving || s.pendingCard || s.quiz || s.awaitPost || gatingFx()) break;
+      const cell = map.cells[a.cellIdx];
+      if (!cell || cell.type !== 'task') break;
+      if (!cellTaskOf(s, map, a.cellIdx)) break; // задания нет (рандом ещё не крутанут) — открывать нечего
+      if ((s.skillDone ?? []).includes(a.cellIdx)) break; // матч уже сыгран
+      const p = host;
+      p.pos = a.cellIdx;
+      s.turn = Math.max(0, s.players.indexOf(p));
+      if (!s.revealed.includes(a.cellIdx)) s.revealed.push(a.cellIdx);
+      s.notice = null;
+      s.challenge = {
+        cellIdx: a.cellIdx, mode: null, started: false, paused: false, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
+        status: 'choose', approvals: [], violations: [], lowStart: false,
+      };
+      /* ТОЛЬКО МОНЕТЫ: без окна выбора — задание сразу готово (платёж по итогам) */
+      if (map.coinsOnly && map.startCoins !== undefined) {
+        s.challenge.mode = 'coins';
+        s.challenge.status = 'ready';
+      }
+      log(`🎯 ${p.name} открывает матч ${(s.mapless?.done ?? 0) + 1} из ${s.mapless?.total ?? '?'}`);
+      break;
+    }
+    case 'maplessFinish': {
+      const host = s.players.find((p) => p.isHost);
+      if (s.phase !== 'playing' || !host || a.id !== host.id) break;
+      if (!s.mapless?.over) break; // матчи ещё не все сыграны
+      if (s.challenge || s.pendingCard || s.quiz || s.awaitPost || gatingFx()) break;
+      s.phase = 'over';
+      s.winner = host.alive && !host.spect ? host.id : null;
+      log(`🏆 ЧЕЛЛЕНДЖ ПРОЙДЕН! ${host.name} сыграл все ${s.mapless.total} матчей${s.winner ? ` — капитал ${coinsStr(host.coinsLeft ?? 0)}` : ''}`);
+      break;
+    }
     case 'chooseMode': {
       const ch = s.challenge;
       const p = current();
       if (!ch || ch.status !== 'choose' || p.id !== a.id) break;
-      // с нулём ресурса выбирать его нельзя
+      // с нулём ресурса выбирать его нельзя (монеты можно — ими платят по итогам)
       if (a.mode === 'time' && p.secLeft <= 0) break;
       if (a.mode === 'tries' && p.triesLeft <= 0) break;
+      if (a.mode === 'coins' && map.startCoins === undefined) break;
       ch.mode = a.mode;
       // пакость «Штраф ×2» удваивает цену пропуска
       const need = SKIP_COST * (cellTaskOf(s, map, ch.cellIdx)?.chaos === 'skipX2' ? 2 : 1);
       // если ресурса меньше цены пропуска — пропуск станет доступен только на нуле
-      const remaining = a.mode === 'time' ? Math.floor(p.secLeft / 60) : p.triesLeft;
-      ch.lowStart = remaining < need;
+      const remaining = a.mode === 'time' ? Math.floor(p.secLeft / 60) : a.mode === 'tries' ? p.triesLeft : Math.max(0, (p.coinsLeft ?? 0) - Math.max(0, Math.floor(map.skipCoins ?? SKIP_COINS_DEFAULT)));
+      ch.lowStart = a.mode !== 'coins' && remaining < need;
       ch.status = 'ready'; // выбран ресурс, но запуск — по команде игрока
-      log(`${p.name}: ${a.mode === 'time' ? 'играет на ВРЕМЯ ⏱' : 'играет на ПОПЫТКИ 🎯'}`);
+      log(`${p.name}: ${a.mode === 'time' ? 'играет на ВРЕМЯ ⏱' : a.mode === 'tries' ? 'играет на ПОПЫТКИ 🎯' : 'играет на МОНЕТЫ 🪙 — платёж по итогам'}`);
       break;
     }
     case 'startTask': {
@@ -1144,11 +1273,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (ch.mode === 'tries') {
         ch.loads = 1;
         ch.reloadId++;
-      } else {
+      } else if (ch.mode === 'time') {
         ch.startedAt = Date.now();
         ch.accMs = 0;
-      }
-      log(`▶ ${p.name} запускает задание${ch.mode === 'tries' ? ' — попытка №1' : ' — таймер пошёл'}`);
+      } // монеты: во время игры ничего не тратится — платёж только по итогам
+      log(`▶ ${p.name} запускает задание${ch.mode === 'tries' ? ' — попытка №1' : ch.mode === 'time' ? ' — таймер пошёл' : ' — монетная игра'}`);
       break;
     }
     case 'togglePause': {
@@ -1190,6 +1319,13 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const ch = s.challenge;
       const p = current();
       if (!ch || ch.status !== 'playing' || p.id !== a.id) break;
+      // МОНЕТЫ: перезапуски бесплатны и не ограничены — платёж только по итогам
+      if (ch.mode === 'coins') {
+        ch.reloadId++;
+        if (ch.paused) ch.paused = false;
+        log(`↻ ${p.name}: перезапуск задания (монеты — без списаний)`);
+        break;
+      }
       // при нуле ресурса перезапускать нечего: в попытках каждая загрузка стоит попытку,
       // во времени — время уже вышло, задание непроходимо. Единственный путь — «Пропустить».
       {
@@ -1253,6 +1389,18 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const ch = s.challenge;
       const p = current();
       if (!ch || p.id !== a.id) break;
+
+      /* МОНЕТЫ: пропуск платой в бронзе (цена — map.skipCoins, 0 = бесплатно);
+         при нулевом капитале пропуск разрешён свободно — игрок всё равно банкрот
+         (в coinsOnly checkElim его выбьет, в смешанном он просто без монет) */
+      if (ch.mode === 'coins' || (a.instant && a.resource === 'coins')) {
+        const needC = Math.max(0, Math.floor(map.skipCoins ?? SKIP_COINS_DEFAULT));
+        const have = p.coinsLeft ?? 0;
+        if (have > 0 && have < needC) break; // монет не хватает на плату — играйте, побеждайте и зарабатывайте
+        finishChallenge(false, 0, 0);
+        checkElim();
+        break;
+      }
 
       // пакость «Штраф ×2»: цена пропуска удваивается
       const need = SKIP_COST * (cellTaskOf(s, map, ch.cellIdx)?.chaos === 'skipX2' ? 2 : 1);
@@ -1566,11 +1714,18 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (!correct) {
         // ОШИБКА: игрок выбывает из окна, квиз продолжается.
         // Ресурс снимается сразу — если только вопрос не помечен «без штрафа».
+        // МОНЕТЫ активны: штраф монетами (вместо случайных минут/попыток).
         if (!qd.noPenalty) {
-          const kind = Math.random() < 0.5 ? 'time' : 'tries';
-          if (kind === 'time') answerer.secLeft = Math.max(0, answerer.secLeft - 300);
-          else answerer.triesLeft = Math.max(0, answerer.triesLeft - 5);
-          log(`✖ ${answerer.name}: неверно (−5 ${kind === 'time' ? 'мин' : 'попыток'})`);
+          if (map.startCoins !== undefined) {
+            const lc = Math.max(0, Math.floor(map.quizLoseCoins ?? 0));
+            answerer.coinsLeft = Math.max(0, (answerer.coinsLeft ?? 0) - lc);
+            log(`✖ ${answerer.name}: неверно (−${lc} бронзы) — капитал ${coinsStr(answerer.coinsLeft)}`);
+          } else {
+            const kind = Math.random() < 0.5 ? 'time' : 'tries';
+            if (kind === 'time') answerer.secLeft = Math.max(0, answerer.secLeft - 300);
+            else answerer.triesLeft = Math.max(0, answerer.triesLeft - 5);
+            log(`✖ ${answerer.name}: неверно (−5 ${kind === 'time' ? 'мин' : 'попыток'})`);
+          }
         } else {
           log(`✖ ${answerer.name}: неверно (без штрафа)`);
         }
@@ -1582,11 +1737,17 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       // ВЕРНЫЙ ОТВЕТ в режиме «квиз продолжается»: бонус выдаётся СРАЗУ,
       // игрок больше не отвечает, а квиз идёт, пока не ответят все.
       if (qd.continueOnCorrect && qd.type !== 'mystery') {
-        const kind = Math.random() < 0.5 ? 'time' : 'tries';
-        if (kind === 'time') answerer.secLeft += 300;
-        else answerer.triesLeft += 5;
+        if (map.startCoins !== undefined) {
+          const wc = Math.max(0, Math.floor(map.quizWinCoins ?? 0));
+          answerer.coinsLeft = Math.min(COINS_MAX, (answerer.coinsLeft ?? 0) + wc);
+          log(`✔ ${answerer.name}: верно! +${wc} бронзы — капитал ${coinsStr(answerer.coinsLeft)}`);
+        } else {
+          const kind = Math.random() < 0.5 ? 'time' : 'tries';
+          if (kind === 'time') answerer.secLeft += 300;
+          else answerer.triesLeft += 5;
+          log(`✔ ${answerer.name}: верно! +5 ${kind === 'time' ? 'мин' : 'попыток'} — квиз продолжается`);
+        }
         if (!correctBy.includes(answerer.id)) correctBy.push(answerer.id);
-        log(`✔ ${answerer.name}: верно! +5 ${kind === 'time' ? 'мин' : 'попыток'} — квиз продолжается`);
         tryCloseWindow();
         break;
       }
@@ -1628,14 +1789,22 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const loserId = qd.type === 'mystery' ? q.targetId : q.askerId;
       const loser = s.players.find((x) => x.id === loserId);
       if (!loser) { s.quiz = null; endTurnNow(); break; }
-      const kind = Math.random() < 0.5 ? 'time' : 'tries';
       let deltaMin = 0;
       let deltaTries = 0;
-      if (kind === 'time') { loser.secLeft = Math.max(0, loser.secLeft - 300); deltaMin = -5; }
-      else { loser.triesLeft = Math.max(0, loser.triesLeft - 5); deltaTries = -5; }
+      if (map.startCoins !== undefined) {
+        // МОНЕТЫ активны: штраф за таймаут монетами
+        const lc = Math.max(0, Math.floor(map.quizLoseCoins ?? 0));
+        loser.coinsLeft = Math.max(0, (loser.coinsLeft ?? 0) - lc);
+        q.result = { correct: false, deltaMin: 0, deltaTries: 0, targetName: loser.name, reason: 'timeout' };
+        log(`⏰ Время вышло! ${loser.name}: −${lc} бронзы — капитал ${coinsStr(loser.coinsLeft)}`);
+      } else {
+        const kind = Math.random() < 0.5 ? 'time' : 'tries';
+        if (kind === 'time') { loser.secLeft = Math.max(0, loser.secLeft - 300); deltaMin = -5; }
+        else { loser.triesLeft = Math.max(0, loser.triesLeft - 5); deltaTries = -5; }
+        q.result = { correct: false, deltaMin, deltaTries, targetName: loser.name, reason: 'timeout' };
+        log(`⏰ Время вышло! ${loser.name}: ${kind === 'time' ? '−5 мин' : '−5 попыток'}`);
+      }
       q.resolved = true;
-      q.result = { correct: false, deltaMin, deltaTries, targetName: loser.name, reason: 'timeout' };
-      log(`⏰ Время вышло! ${loser.name}: ${kind === 'time' ? '−5 мин' : '−5 попыток'}`);
       checkElim();
       break;
     }

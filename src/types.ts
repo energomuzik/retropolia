@@ -404,14 +404,27 @@ export interface ChallengeAnswers {
   cellAmount: 'few' | 'mid' | 'many';     // сколько ячеек ориентировочно
   resTime: boolean;                       // использовать время
   resTries: boolean;                      // использовать попытки
+  resCoins: boolean;                      // использовать МОНЕТЫ (третий ресурс)
   startMin: number;                       // стартовых минут
   startTries: number;                     // стартовых попыток
-  penalties: boolean;                     // нужны ли штрафы за проигрыш задания
+  startCoins: number;                     // стартовый капитал, бронзовых единиц (100 = 1 серебряная)
+  coinsOnly: boolean;                     // ТОЛЬКО монеты: задания не тратят время/попытки, 0 монет = поражение
+  taskWinCoins: number;                   // награда за ПОБЕДУ в задании, бронзы
+  skipCoins: number;                      // цена ПРОПУСКА/проигрыша задания, бронзы (0 = бесплатно)
+  quizWinCoins: number;                   // награда за ВЕРНЫЙ ответ в квизе, бронзы
+  quizLoseCoins: number;                  // штраф за НЕВЕРНЫЙ ответ в квизе, бронзы
+  penalties: boolean;                     // нужны ли штрафы за проигрыш задания (время/попытки)
   loseMin: number;                        // ... отнимать минут за проигрыш
   loseTries: number;                      // ... отнимать попыток за проигрыш
   winMin: number;                         // ... возвращать минут за победу (награда)
   winTries: number;                       // ... возвращать попыток за победу
   speed: number;                          // скорость фишек, клеток/с
+  /* --- БЕЗКАРТОВЫЙ ЧЕЛЛЕНДЖ: играем без создания карты — только матчи-игры --- */
+  mapless?: boolean;                      // без карты: игрок просто играет в игры по очереди (без фишек и соперников)
+  maplessRandom?: boolean;                // игры выбирает РАНДОМАЙЗЕР (колесо фортуны); false — игры играются по списку
+  maplessRomIds?: string[];               // список игр (по порядку) для режима «по списку»
+  maplessFolder?: string;                 // папка ромов для рандомайзера ('' — все ромы)
+  maplessCount?: number;                  // сколько случайных игр до победы (для рандомайзера)
 }
 export interface ResolvedChallenge {
   baseMode: MapMode;      // выбранный режим игры
@@ -419,11 +432,24 @@ export interface ResolvedChallenge {
   tileMode: boolean;      // включить плиточный режим
   startMin: number;
   startTries: number;
+  resCoins: boolean;      // монеты включены (иначе монетные поля игнорируются)
+  startCoins: number;     // стартовый капитал, бронзы
+  coinsOnly: boolean;     // только монеты
+  taskWinCoins: number;
+  skipCoins: number;
+  quizWinCoins: number;
+  quizLoseCoins: number;
   loseMin: number;
   loseTries: number;
   winMin: number;
   winTries: number;
   speed: number;
+  /* безкартовый челлендж */
+  mapless: boolean;
+  maplessRandom: boolean;
+  maplessRomIds: string[];
+  maplessFolder: string;
+  maplessCount: number;
 }
 export interface CustomChallenge {
   id: string;
@@ -435,13 +461,21 @@ export interface CustomChallenge {
 }
 /** Читаемые ответы мастера — для сводки в окне создания и описания режима. */
 export const challengeSummaryLines = (a: ChallengeAnswers): string[] => {
+  if (a.mapless) {
+    const games = a.maplessRandom
+      ? `рандомайзер из папки «${a.maplessFolder || 'все ромы'}» — ${a.maplessCount ?? 25} игр`
+      : `по списку — ${a.maplessRomIds?.length ?? 0} игр`;
+    const res = [a.resTime ? 'время' : '', a.resTries ? 'попытки' : '', a.resCoins ? `монеты (старт ${coinsStr(a.startCoins)})` : ''].filter(Boolean).join(' + ') || 'без ресурсов';
+    return [`БЕЗ КАРТЫ: ${games}`, `Ресурсы: ${res}`, a.resCoins ? `задание: +${a.taskWinCoins} бронзы за победу, пропуск ${a.skipCoins} бронзы` : 'без монетной экономики'];
+  }
   const players = a.players === 'solo' ? 'Играет один, остальные — зрители' : a.players === 'together' ? 'Все играют одновременно' : 'Играют по очереди (кубики)';
   const platform = a.platform === 'phone' ? 'Телефон' : a.platform === 'pc' ? 'Компьютер' : 'Телефон и компьютер';
   const field = a.field === 's' ? 'Малая карта' : a.field === 'm' ? 'Средняя карта' : a.field === 'l' ? 'Большая карта' : 'Плиточный режим (несколько карт-локаций)';
   const amount = a.cellAmount === 'few' ? 'немного ячеек (10–20)' : a.cellAmount === 'mid' ? 'средне ячеек (20–40)' : 'много ячеек (40+)';
-  const res = [a.resTime ? 'время' : '', a.resTries ? 'попытки' : ''].filter(Boolean).join(' + ') || 'без ресурсов';
-  const pen = a.penalties ? `штрафы за проигрыш: −${a.loseMin} мин / −${a.loseTries} поп.; награда за победу: +${a.winMin} мин / +${a.winTries} поп.` : 'без штрафов и наград';
-  return [players, platform, field, `Ячейки: ${amount}`, `Ресурсы: ${res} (старт ${a.startMin} мин / ${a.startTries} поп.)`, pen, `Скорость фишек: ${a.speed} кл/с`];
+  const res = [a.resTime ? 'время' : '', a.resTries ? 'попытки' : '', a.resCoins ? `монеты (старт ${coinsStr(a.startCoins)})` : ''].filter(Boolean).join(' + ') || 'без ресурсов';
+  const pen = a.penalties ? `штрафы за проигрыш: −${a.loseMin} мин / −${a.loseTries} поп.; награда за победу: +${a.winMin} мин / +${a.winTries} поп.` : 'без штрафов и наград (время/попытки)';
+  const coinEco = a.resCoins ? `монеты: +${a.taskWinCoins} бронзы за победу в задании, пропуск ${a.skipCoins} бронзы, квиз +${a.quizWinCoins}/−${a.quizLoseCoins} бронзы` : '';
+  return [players, platform, field, `Ячейки: ${amount}`, `Ресурсы: ${res} (старт ${a.startMin} мин / ${a.startTries} поп.)`, pen, coinEco, `Скорость фишек: ${a.speed} кл/с`].filter(Boolean);
 };
 
 export interface PlateBg {
@@ -483,6 +517,12 @@ export interface GameMap {
   tileBgs?: { [tileId: string]: PlateBg }; // свои фоны КАРТ-ПЛИТОК в плиточном режиме: ключ — id карты-плитки, у каждой своя «локация»
   customId?: string; // свой челлендж (мастер «Создать челлендж»), применённый к карте
   customName?: string; // имя своего челленджа — показывается в редакторе и при выборе карты
+  startCoins?: number; // МОНЕТЫ: стартовый капитал каждого игрока, бронзовых единиц (100 = 1 серебряная); нет — монеты не используются
+  coinsOnly?: boolean; // ТОЛЬКО монеты: задания не тратят время/попытки (их выбор не предлагается), 0 монет = вылет
+  taskWinCoins?: number; // награда: +бронзы за ПОБЕДУ в задании (монеты активны)
+  skipCoins?: number; // цена пропуска/проигрыша задания, бронзы (0 = бесплатно; нет — 5)
+  quizWinCoins?: number; // награда: +бронзы за ВЕРНЫЙ ответ в квизе (монеты активны)
+  quizLoseCoins?: number; // штраф: −бронзы за НЕВЕРНЫЙ ответ в квизе (монеты активны)
   loseMin?: number; // штраф челленджа: минут за проигрыш задания (0/нет — как раньше)
   loseTries?: number; // штраф челленджа: попыток за проигрыш задания
   winMin?: number; // награда челленджа: минут за победу в задании
@@ -490,9 +530,18 @@ export interface GameMap {
   tileLayers?: number; // количество тайловых слоёв (2..6); нет = 2. Фон — самый низ, ячейки и стрелки — самый верх; новые тайлы ставятся на выбранный слой левой панели
   smoothMove?: boolean; // плавное движение фишек без прыжков (для анимированных фишек); нет — прыжки по клеткам как раньше
   moveSpeed?: number; // скорость хода ВСЕХ фишек карты, клеток в секунду (0.5..6); нет — 1.2. Действует и на «плавно», и на «прыжками»
+  mapless?: MaplessCfg; // БЕЗКАРТОВАЯ ИГРА (челлендж без карты): экран карты не показывается — только матчи-игры; для SKILL CHALLENGE поле не нужно — он всегда без карты
   ready: boolean;
   createdAt: number;
   updatedAt: number;
+}
+
+/* БЕЗКАРТОВАЯ ИГРА: конфиг из челленджа, вшитый в сгенерированную карту.
+   Экран игры вместо поля показывает список матчей/рандомайзер. */
+export interface MaplessCfg {
+  total: number; // всего матчей до победы
+  random: boolean; // игры выбирает рандомайзер (колесо фортуны); false — по списку
+  pool?: { romId: string; title: string }[]; // пул для рандомайзера (вшит из челленджа — виден всем без библиотеки)
 }
 
 export interface TileDef {
@@ -547,6 +596,7 @@ export interface PlayerState {
   isHost: boolean;
   secLeft: number;
   triesLeft: number;
+  coinsLeft?: number; // МОНЕТЫ: капитал в бронзовых единицах (1 серебряная = 100); нет/0 — монет нет
   pos: number; // индекс в cells
   alive: boolean;
   skipTurns: number;
@@ -727,7 +777,7 @@ export interface GameFx {
 
 export interface ChallengeState {
   cellIdx: number;
-  mode: 'time' | 'tries' | null;
+  mode: 'time' | 'tries' | 'coins' | null;
   started: boolean; // нажата ли «Запуск задания»
   paused: boolean;
   startedAt: number;
@@ -769,7 +819,8 @@ export interface GameSession {
   trades: TradeOffer[]; // предложения обмена карточками (активные и последние закрытые)
   revealed: number[]; // индексы ячеек, на которые хоть раз ступали (для режима «скрытые ячейки»)
   journeyPos?: Record<string, { x: number; y: number; dir?: 'up' | 'down' | 'left' | 'right'; ts?: number; mv?: boolean; tp?: boolean }>; // JOURNEY: авторитетные позиции ВСЕХ фишек в px поля (пишет хост); mv — «идёт сейчас» (false = стоит); tp — это обновление несёт ПРЫЖОК ЧЕРЕЗ ПОРТАЛ (принимать без анти-телепорта, у зрителей — мгновенный снап)
-  skillDone?: number[]; // SKILL CHALLENGE: ячейки, которые хост уже ПРОШЁЛ или ПРОПУСТИЛ — встав на них снова, фишка сама едет к следующей неигранной
+  skillDone?: number[]; // SKILL CHALLENGE / БЕЗКАРТОВАЯ ИГРА: ячейки, которые хост уже ПРОШЁЛ или ПРОПУСТИЛ — встав на них снова, фишка сама едет к следующей неигранной
+  mapless?: { done: number; total: number; over: boolean }; // БЕЗКАРТОВАЯ ИГРА: сколько матчей сыграно, сколько всего, флаг «все матчи сыграны — пора завершать победой» (завершает хост действием maplessFinish после анимаций)
   fxs?: GameFx[]; // разовые анимации-спектакль (последние несколько)
   /* Разбитые ячейки: победитель разбил ячейку победой над заданием. Пока ячейка
      разбита — она считается ПУСТОЙ (передышка), хозяин — победитель. Без нового
@@ -808,9 +859,92 @@ export interface NetMsg {
   p?: unknown;
 }
 
-export const APP_VERSION = 28; // 28: ПЛИТОЧНЫЙ РЕЖИМ КАРТ (схема плиток в левой панели, каждая карта-плитка — своя локация, порталы между любыми), JOURNEY→TRIATHLON, новый одиночный JOURNEY, CLASSIC→RETROPOLIA, мастер «Создать челлендж», экспорт/импорт игр
+export const APP_VERSION = 29; // 29: МОНЕТЫ (бронза/серебро/золото/платина, 1:100) — третий ресурс челленджа и карт: награды за победу в задании и верный ответ квиза, цена пропуска; БЕЗКАРТОВЫЕ ЧЕЛЛЕНДЖИ — игра без создания карты: матчи по списку или РАНДОМАЙЗЕР (колесо фортуны) из папки ромов; SKILL CHALLENGE по умолчанию без карты — 25 случайных игр
 export const START_SEC = 60 * 60;
 export const START_TRIES = 60;
 export const SKIP_COST = 5;
+
+/* ---------- МОНЕТЫ: третий ресурс (мастер «Создать челлендж» и редактор карт) ----------
+   Единое хранилище — БРОНЗОВЫЕ единицы. Курс: 1 платиновая = 100 золотых =
+   10 000 серебряных = 1 000 000 бронзовых. Капитал игрока отображается всеми
+   ступенями сразу (например «2 плат. 3 зол. 42 серебр. 5 бронзы»). Кап — 99 платиновых. */
+export const COINS_MAX = 99 * 100 * 100 * 100; // 99 платиновых в бронзе
+export const SKIP_COINS_DEFAULT = 5; // цена пропуска монетами по умолчанию (5 бронзы)
+/** Разложить бронзовые единицы на ступени (платина/золото/серебро/бронза). */
+export const coinsSplit = (v: number): { pl: number; go: number; si: number; br: number } => {
+  const b = Math.max(0, Math.floor(v));
+  return { br: b % 100, si: Math.floor(b / 100) % 100, go: Math.floor(b / 10000) % 100, pl: Math.floor(b / 1000000) };
+};
+/** Полная строка капитала: только ненулевые ступени («1 серебр. 50 бронзы»). */
+export const coinsStr = (v: number): string => {
+  const { pl, go, si, br } = coinsSplit(v);
+  const parts: string[] = [];
+  if (pl) parts.push(`${pl} плат.`);
+  if (go) parts.push(`${go} зол.`);
+  if (si) parts.push(`${si} серебр.`);
+  if (br || parts.length === 0) parts.push(`${br} бронзы`);
+  return parts.join(' ');
+};
+/** Короткая строка для чипов HUD: «2П 3З 42С 5Б». */
+export const coinsShort = (v: number): string => {
+  const { pl, go, si, br } = coinsSplit(v);
+  const parts: string[] = [];
+  if (pl) parts.push(`${pl}П`);
+  if (go) parts.push(`${go}З`);
+  if (si) parts.push(`${si}С`);
+  if (br || parts.length === 0) parts.push(`${br}Б`);
+  return parts.join(' ');
+};
 export const PLAYER_COLORS = ['#ff5d5d', '#5aa9ff', '#35d46f', '#ffcf3f'];
 export const PLAYER_NAMES = ['КРАСНЫЙ', 'СИНИЙ', 'ЗЕЛЁНЫЙ', 'ЖЁЛТЫЙ'];
+
+/* ---------- ГЕНЕРАЦИЯ КАРТЫ ДЛЯ БЕЗКАРТОВОГО ЧЕЛЛЕНДЖА ----------
+   Играть без создания карты: под капотом — линейный трек из матчей-ячеек
+   (режим JOURNEY — играет только хост, остальные зрители), но экран игры
+   НЕ показывает поле: вместо него — список матчей и рандомайзер.
+   Карта сохраняется в библиотеку, поэтому сохранения/экспорт работают как обычно. */
+export function buildMaplessMap(ch: CustomChallenge, roms: RomDef[]): GameMap {
+  const r = ch.resolved;
+  const romName = (id: string) => roms.find((x) => x.id === id)?.name ?? 'игра';
+  const total = r.maplessRandom
+    ? Math.max(1, Math.min(99, Math.floor(r.maplessCount || 25)))
+    : Math.max(1, (r.maplessRomIds ?? []).length);
+  const cells: CellDef[] = [
+    { n: 1, x: 0, y: 0, type: 'start' },
+  ];
+  if (!r.maplessRandom) {
+    (r.maplessRomIds ?? []).forEach((rid, i) => {
+      cells.push({ n: i + 2, x: i + 1, y: 0, type: 'task', task: { romId: rid, title: romName(rid), desc: `Матч ${i + 1} из ${total} — игра по списку челленджа` } });
+    });
+  } else {
+    for (let i = 0; i < total; i++) cells.push({ n: i + 2, x: i + 1, y: 0, type: 'task', task: null });
+  }
+  const pool = r.maplessRandom
+    ? (r.maplessRomIds ?? []).map((rid) => ({ romId: rid, title: romName(rid) }))
+    : undefined;
+  const now = Date.now();
+  const coinsOn = r.resCoins;
+  return {
+    id: `mapless-${ch.id}`,
+    name: ch.name,
+    cols: total + 2, rows: 2,
+    mw: (total + 2) * 64, mh: 192,
+    mode: 'journey1p', // играет только хост, остальные — зрители; кубиков нет
+    tiles: [],
+    cells,
+    bonusCards: [], trapCards: [], quizzes: [],
+    startMin: r.startMin, startTries: r.startTries,
+    startCoins: coinsOn ? r.startCoins : undefined,
+    coinsOnly: coinsOn && r.coinsOnly ? true : undefined,
+    taskWinCoins: coinsOn ? r.taskWinCoins : undefined,
+    skipCoins: coinsOn ? r.skipCoins : undefined,
+    quizWinCoins: coinsOn ? r.quizWinCoins : undefined,
+    quizLoseCoins: coinsOn ? r.quizLoseCoins : undefined,
+    moveSpeed: r.speed,
+    customId: ch.id,
+    customName: ch.name,
+    mapless: { total, random: !!r.maplessRandom, pool },
+    ready: true,
+    createdAt: now, updatedAt: now,
+  };
+}

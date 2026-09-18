@@ -7,8 +7,8 @@ import { newSession, fmtClock } from '../engine';
 import { exportGame, importGame, idbAll, idbDel, idbGet, idbPut, uid } from '../db';
 import { downloadHostBat } from '../host/hostPackage';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
-import type { BossAnimDef, GameMap, MapMode, SessionSnapshot, TokenDef } from '../types';
-import { bossLibEntryOf, isSoloMode, PLAYER_COLORS, PLAYER_NAMES } from '../types';
+import type { BossAnimDef, CustomChallenge, GameMap, MapMode, SessionSnapshot, TokenDef } from '../types';
+import { bossLibEntryOf, buildMaplessMap, challengeSummaryLines, coinsStr, isSoloMode, PLAYER_COLORS, PLAYER_NAMES } from '../types';
 import { sfx } from '../sound';
 
 /* ---------- создание игры ---------- */
@@ -41,8 +41,13 @@ const freshMapWithTokens = async (mapId: string): Promise<GameMap | null> => {
 };
 
 export function CreateScreen() {
-  const { maps, roms, setScreen, toast, refresh } = useApp();
-  const ready = maps.filter((m) => m.ready);
+  const { maps, roms, setScreen, toast, refresh, challenges } = useApp();
+  /* БЕЗКАРТОВЫЕ карты (сгенерированные из челленджей) в общем списке не показываются —
+     их комнаты открываются из секции «Челленджи без карты» ниже */
+  const ready = maps.filter((m) => m.ready && !m.mapless);
+  /* челленджи без карты — из мастера «Создать челлендж» (вариант «ВООБЩЕ БЕЗ КАРТЫ») */
+  const maplessCh = (challenges ?? []).filter((c: CustomChallenge) => c.resolved?.mapless);
+  const [mlBusy, setMlBusy] = useState<string | null>(null);
   const [sel, setSel] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [expBusy, setExpBusy] = useState<string | null>(null);
@@ -167,6 +172,51 @@ export function CreateScreen() {
     })();
   };
 
+  /* ЗАПУСК БЕЗКАРТОВОГО ЧЕЛЛЕНДЖА: генерируем линейный трек матчей (играется хостом,
+     остальные — зрители), сохраняем его в библиотеку (работают сохранения/экспорт)
+     и открываем комнату. Экран игры покажет матчи и рандомайзер вместо поля. */
+  const startMapless = (ch: CustomChallenge) => {
+    if (mlBusy) return;
+    const r = ch.resolved;
+    const ids = r.maplessRomIds ?? [];
+    if (!r.maplessRandom && ids.length === 0) {
+      sfx.fail();
+      toast('В челлендже не выбрано ни одной игры', 'err');
+      return;
+    }
+    if (r.maplessRandom && ids.length === 0) {
+      sfx.fail();
+      toast('Пул рандомайзера пуст — в выбранной папке нет ромов (или библиотека пуста)', 'err');
+      return;
+    }
+    const missing = ids.filter((rid) => !roms.some((x) => x.id === rid)).length;
+    if (missing === ids.length) {
+      sfx.fail();
+      toast('Ни одного рома этого челленджа нет в вашей библиотеке — загрузите ромы в «Запуске эмулятора»', 'err');
+      return;
+    }
+    if (missing > 0) toast(`${missing} из ${ids.length} игр челленджа нет в библиотеке — они будут пропущены рандомайзером заменой`, 'err');
+    setMlBusy(ch.id);
+    void (async () => {
+      try {
+        const map = buildMaplessMap(ch, roms);
+        await idbPut('maps', map.id, map);
+        await refresh();
+        const st2 = useApp.getState();
+        const code = genRoomCode();
+        const session = newSession(code, map.id, st2.selfId, st2.options.name);
+        openRoom(code, true, { session, map });
+        sfx.start();
+        toast(`Челлендж «${ch.name}» — комната ${code} открыта. Играет хост, остальные — зрители`, 'ok');
+      } catch {
+        sfx.fail();
+        toast('Не удалось открыть челлендж', 'err');
+      } finally {
+        setMlBusy(null);
+      }
+    })();
+  };
+
   return (
     <div className="h-full crt-grid-bg overflow-y-auto">
       <div className="max-w-4xl mx-auto px-6 py-8">
@@ -191,6 +241,36 @@ export function CreateScreen() {
           </div>
         </div>
         <p className="text-[13px] text-dim mb-4">Выберите готовую карту — комната получит её автоматически, все игроки будут на одном поле. Файл игры от друга — кнопка «Загрузить игру» сверху.</p>
+
+        {/* ---------- ЧЕЛЛЕНДЖИ БЕЗ КАРТЫ: запускаются в один клик ---------- */}
+        {maplessCh.length > 0 && (
+          <div className="mb-6 space-y-2">
+            <div className="tick-label text-[#ff8b3f]">Челленджи без карты · {maplessCh.length}</div>
+            <div className="space-y-2">
+              {maplessCh.map((ch: CustomChallenge) => (
+                <div key={ch.id} className="pixel-panel pixel-corners p-4">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <div className="min-w-0 flex-1">
+                      <div className="font-display uppercase text-paper text-lg">{ch.name}</div>
+                      <div className="text-[11px] text-faint mt-1 leading-snug">
+                        {ch.resolved.maplessRandom
+                          ? `🎰 Рандомайзер · ${ch.resolved.maplessCount ?? 25} игр · пул: ${ch.resolved.maplessRomIds?.length ?? 0}`
+                          : `По списку · ${ch.resolved.maplessRomIds?.length ?? 0} игр`}
+                        {ch.resolved.resCoins ? ` · 🪙 ${coinsStr(ch.resolved.startCoins)}` : ' · время/попытки'}
+                        {ch.resolved.coinsOnly ? ' · только монеты' : ''}
+                      </div>
+                      <div className="text-[10px] text-faint mt-0.5 truncate">{challengeSummaryLines(ch.answers).join(' · ')}</div>
+                    </div>
+                    <PxBtn color="gold" disabled={mlBusy === ch.id} onClick={() => { startMapless(ch); }}>
+                      {mlBusy === ch.id ? 'Открываю…' : <>{Ic.play(14)} Играть</>}
+                    </PxBtn>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-[10px] text-faint leading-tight">Безкартовые челленджи создаются в «Создать челлендж» — вариант «ВООБЩЕ БЕЗ КАРТЫ»: играете матчи по очереди (без фишек и соперников), подключившиеся друзья смотрят трансляцию.</p>
+          </div>
+        )}
         {ready.length > 0 && (
           <div className="mb-5 space-y-2">
             <div className="flex flex-wrap items-center gap-1.5">

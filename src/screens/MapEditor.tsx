@@ -9,7 +9,7 @@ import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, GameMap, PlacedAnim, PlacedBoss, PlateBg, PortalZone, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
-import { bossLibEntryOf, challengeSummaryLines, isJourneyLike, MAP_MODES, MAX_FIELD, PLATE_SIZES, tileRectOf } from '../types';
+import { bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, MAP_MODES, MAX_FIELD, PLATE_SIZES, tileRectOf } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
 
@@ -2032,11 +2032,17 @@ export default function MapEditor() {
   };
 
   /** ПРИМЕНЕНИЕ СВОЕГО ЧЕЛЛЕНДЖА (мастер «Создать челлендж»): режим + ресурсы +
-     штрафы/награды + размер поля (только на пустой карте) + плиточный режим. */
+     МОНЕТЫ + штрафы/награды + размер поля (только на пустой карте) + плиточный режим. */
   const applyChallenge = (cc: CustomChallenge) => {
     const m = mapRef.current;
     if (!m) return;
     const r = cc.resolved;
+    /* БЕЗКАРТОВЫЙ челлендж к карте не применяется — он играется из «Создания игры» */
+    if (r.mapless) {
+      sfx.fail();
+      toast(`«${cc.name}» — челлендж БЕЗ КАРТЫ. Он не применяется к карте: запустите его в «Создание игры», секция «Челленджи без карты»`, 'err');
+      return;
+    }
     const empty = m.cells.length === 0 && (m.stamps ?? []).length === 0;
     const patch: Partial<GameMap> = {
       mode: r.baseMode,
@@ -2045,12 +2051,19 @@ export default function MapEditor() {
       moveSpeed: r.speed,
       customId: cc.id,
       customName: cc.name,
+      startCoins: r.resCoins ? Math.max(0, r.startCoins) : undefined,
+      coinsOnly: r.resCoins && r.coinsOnly ? true : undefined,
+      taskWinCoins: r.resCoins ? r.taskWinCoins : undefined,
+      skipCoins: r.resCoins ? r.skipCoins : undefined,
+      quizWinCoins: r.resCoins ? r.quizWinCoins : undefined,
+      quizLoseCoins: r.resCoins ? r.quizLoseCoins : undefined,
       loseMin: r.loseMin || undefined,
       loseTries: r.loseTries || undefined,
       winMin: r.winMin || undefined,
       winTries: r.winTries || undefined,
     };
     let extra = '';
+    if (r.resCoins) extra += ` Монеты: старт ${coinsStr(r.startCoins)}, +${r.taskWinCoins} бр за победу, пропуск ${r.skipCoins} бр.`;
     if (empty) {
       patch.mw = r.mw;
       patch.mh = r.mh;
@@ -2503,6 +2516,41 @@ export default function MapEditor() {
                     <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><Stepper value={map.startTries ?? 60} onChange={(v) => updMap({ startTries: v })} min={5} max={180} step={5} /></div>
                   </div>
                 )}
+                {/* МОНЕТЫ: третий ресурс — бронза/серебро/золото/платина (1:100) */}
+                <div className="mt-3 border-t-2 border-edge pt-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="tick-label text-teal">🪙 Монеты</span>
+                    <button
+                      onClick={() => { sfx.hover(); updMap(map.startCoins === undefined ? { startCoins: 100, taskWinCoins: 10, skipCoins: 5, quizWinCoins: 5, quizLoseCoins: 5 } : { startCoins: undefined, coinsOnly: undefined, taskWinCoins: undefined, skipCoins: undefined, quizWinCoins: undefined, quizLoseCoins: undefined }); }}
+                      className={`px-2 py-1 text-[9px] font-pixel border-2 cursor-pointer ${map.startCoins !== undefined ? 'border-teal text-teal' : 'border-edge text-faint hover:text-dim'}`}
+                    >{map.startCoins !== undefined ? 'включены ✓' : 'выключены'}</button>
+                  </div>
+                  {map.startCoins !== undefined ? (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] text-dim">Стартовый капитал</span>
+                        <Stepper value={map.startCoins} onChange={(v) => updMap({ startCoins: v })} min={0} max={99999} step={25} suffix=" бр" />
+                      </div>
+                      <div className="text-[9px] text-faint leading-tight">{coinsStr(map.startCoins)} · 100 бронзы = 1 серебряная, 100 серебр. = 1 золотая, 100 зол. = 1 платиновая</div>
+                      <div className="flex items-center justify-between"><span className="text-[11px] text-dim">+ за победу в задании</span><Stepper value={map.taskWinCoins ?? 10} onChange={(v) => updMap({ taskWinCoins: v })} min={0} max={9999} step={5} suffix=" бр" /></div>
+                      <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Цена пропуска задания</span><Stepper value={map.skipCoins ?? 5} onChange={(v) => updMap({ skipCoins: v })} min={0} max={9999} step={5} suffix=" бр" /></div>
+                      <div className="flex items-center justify-between"><span className="text-[11px] text-dim">+ за верный ответ квиза</span><Stepper value={map.quizWinCoins ?? 5} onChange={(v) => updMap({ quizWinCoins: v })} min={0} max={9999} step={5} suffix=" бр" /></div>
+                      <div className="flex items-center justify-between"><span className="text-[11px] text-dim">− за неверный ответ квиза</span><Stepper value={map.quizLoseCoins ?? 5} onChange={(v) => updMap({ quizLoseCoins: v })} min={0} max={9999} step={5} suffix=" бр" /></div>
+                      <label className="flex items-center gap-2 cursor-pointer pt-1">
+                        <input
+                          type="checkbox"
+                          checked={!!map.coinsOnly}
+                          onChange={(e) => { sfx.hover(); updMap({ coinsOnly: e.target.checked || undefined }); }}
+                          className="accent-[#2ee6a8] w-4 h-4 cursor-pointer"
+                        />
+                        <span className="text-[11px] text-paper">Только монеты — без времени/попыток (0 монет = вылет)</span>
+                      </label>
+                      <p className="text-[9px] text-faint leading-tight">Пропуск 0 бр = бесплатный. В монетном режиме перезапуски задания бесплатны. Квизы при включённых монетах платят бронзой вместо минут/попыток.</p>
+                    </div>
+                  ) : (
+                    <p className="text-[9px] text-faint leading-tight">Включите — и у игроков появится капитал: награды за победы и плату за пропуски можно настроить здесь или мастером «Создать челлендж».</p>
+                  )}
+                </div>
               </div>
 
               <div>
@@ -2537,7 +2585,7 @@ export default function MapEditor() {
                             className={`w-full text-left border-2 px-2.5 py-2 cursor-pointer transition-colors ${on ? 'border-[#ff8b3f] bg-[#ff8b3f]/10' : 'border-edge bg-panel hover:border-edge2'}`}
                           >
                             <div className={`font-display text-[11px] uppercase ${on ? 'text-[#ff8b3f]' : 'text-paper'}`}>{on ? '✓ ' : ''}{cc.name}</div>
-                            <div className="text-[9px] text-faint mt-0.5">свой режим · {MAP_MODES.find((x) => x.id === cc.resolved.baseMode)?.name ?? cc.resolved.baseMode}</div>
+                            <div className="text-[9px] text-faint mt-0.5">{cc.resolved.mapless ? 'без карты · играется из «Создания игры»' : `свой режим · ${MAP_MODES.find((x) => x.id === cc.resolved.baseMode)?.name ?? cc.resolved.baseMode}`}</div>
                           </button>
                         );
                       })}

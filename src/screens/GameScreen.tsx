@@ -15,8 +15,9 @@ import {
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
-import { PLAYER_COLORS, SKIP_COST, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, tileAt, tileRectOf, tileNumOf } from '../types';
+import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, tileAt, tileRectOf, tileNumOf, coinsShort, coinsStr } from '../types';
 import type { AnimClip, CardDef, ChaosKind, GameMap, PortalZone, TaskDef, TokenDir } from '../types';
+import Randomizer from './Randomizer';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
 import { startLoop, stopLoop, syncLoops, stopGroup, killGroup, stopOneShot, playOneShot } from '../loopsnd';
@@ -160,6 +161,12 @@ export default function GameScreen() {
   const isJourney = isJourneyLike(map?.mode); // TRIATHLON и одиночный JOURNEY — одна механика свободного хождения
   const isSoloJourney = map?.mode === 'journey1p';
   const isSkill = map?.mode === 'skill';
+  /* БЕЗ КАРТЫ: челлендж без карты (map.mapless) и SKILL CHALLENGE — он теперь тоже
+     играется без карты: рандомайзер игр вместо поля. Экран карты не показывается. */
+  const isMapless = !!(map?.mapless) || isSkill;
+  const coinsActive = map?.startCoins !== undefined; // монеты включены на карте
+  const coinsOnly = coinsActive && !!map?.coinsOnly; // только монеты — время/попытки не предлагаются
+  const skipCoinsNeed = Math.max(0, Math.floor(map?.skipCoins ?? SKIP_COINS_DEFAULT)); // цена пропуска в бронзе
   const task = s && map && ch ? cellTaskOf(s, map, ch.cellIdx) : null;
   const activeChaos = task?.chaos ? [task.chaos] : [];
   // «Реверс крестовины»: смена кнопок запрещена, пока задание с этой пакостью идёт
@@ -922,6 +929,26 @@ export default function GameScreen() {
     tileMapRef.current = new Map(useApp.getState().tiles.map((t) => [t.id, t])) as never;
   }, [st.tiles]);
 
+  /* ---------- БЕЗ КАРТЫ: автопилот хоста ----------
+     Победа в матче → окно «играть дальше» подтверждается само; все матчи сыграны →
+     после анимаций партия завершается победой (maplessFinish). */
+  const maplessAutoRef = useRef('');
+  const maplessFxGate = !!(s?.fxs ?? []).some((f) => f.gate);
+  useEffect(() => {
+    if (!isMapless || !room?.isHost || !s || !me || s.phase !== 'playing') return;
+    if (s.awaitPost && !maplessFxGate) {
+      dispatch({ t: 'postChoice', id: me, choice: 'continue' });
+      return;
+    }
+    if (s.mapless?.over && !s.challenge && !s.pendingCard && !s.quiz && !s.awaitPost && !maplessFxGate) {
+      const key = `over-${s.mapless.done}`;
+      if (maplessAutoRef.current !== key) {
+        maplessAutoRef.current = key;
+        dispatch({ t: 'maplessFinish', id: me });
+      }
+    }
+  }, [isMapless, room?.isHost, s, me, maplessFxGate]);
+
   if (!s || !map || !room) {
     return (
       <div className="h-full crt-grid-bg flex items-center justify-center">
@@ -1171,6 +1198,13 @@ export default function GameScreen() {
           {options.hideRoomCode ? Ic.eye(12) : Ic.eyeOff(12)}
         </button>
         {isSkill && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-magma">SKILL CHALLENGE</span>}
+        {map?.mapless && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-[#ff8b3f]">БЕЗ КАРТЫ</span>}
+        {/* БЕЗ КАРТЫ: счётчик матчей вместо счётчика ходов */}
+        {isMapless && s.phase === 'playing' && s.mapless && (
+          <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-gold" title={isSkill ? 'Сыграно случайных игр из 25' : 'Сыграно матчей челленджа'}>
+            МАТЧ {Math.min(s.mapless.done + 1, s.mapless.total)}/{s.mapless.total}
+          </span>
+        )}
         {map?.mode === 'journey' && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal">TRIATHLON</span>}
         {isSoloJourney && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-sky">JOURNEY · ОДИН</span>}
         {(() => {
@@ -1185,7 +1219,7 @@ export default function GameScreen() {
           if (!ft) return null;
           return <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal" title="Плиточный режим: каждая плитка — отдельная карта-локация; между ними — порталы">📍 ЛОКАЦИЯ {tileNumOf(tg, ft.id)}/{tg.tiles.length}</span>;
         })()}
-        {isSkill && s.phase === 'playing' && (
+        {isSkill && s.phase === 'playing' && !s.mapless && (
           <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-gold" title="Лимит ходов хоста в SKILL CHALLENGE">
             ХОД {Math.min(s.turnNo ?? 1, SKILL_TURNS)}/{SKILL_TURNS}
           </span>
@@ -1214,6 +1248,7 @@ export default function GameScreen() {
                     <>
                       <span className="text-sky">{fmtClock(p.secLeft)}</span>
                       <span className="text-gold">{p.triesLeft} поп.</span>
+                      {coinsActive && <span className="text-teal" title={`Монеты: ${coinsStr(p.coinsLeft ?? 0)}`}>🪙 {coinsShort(p.coinsLeft ?? 0)}</span>}
                       <span>№{p.pos + 1}</span>
                     </>
                   )}
@@ -1296,6 +1331,130 @@ export default function GameScreen() {
             lookDragRef.current = null;
           }}
         />
+
+        {/* ---------- БЕЗ КАРТЫ: матчи-игры вместо поля ----------
+            Челленджи без карты и SKILL CHALLENGE: экран карты не показывается —
+            вместо него список матчей и рандомайзер «колесо фортуны». Канвас остаётся
+            под панелью (не размонтируется), чтобы рендер-цикл и эффекты жили. */}
+        {isMapless && s.phase === 'playing' && (() => {
+          const hostP = s.players.find((p) => p.isHost);
+          const doneCells = s.skillDone ?? [];
+          const nextIdx = map.cells.findIndex((c, i) => c.type === 'task' && !doneCells.includes(i) && !s.broken?.[i]);
+          /* пул рандомайзера: для безкартового челленджа — вшит в карту; для SKILL —
+             уникальные ромы заданий карты */
+          const pool: { romId: string; title: string }[] = map.mapless?.random
+            ? (map.mapless.pool ?? [])
+            : map.mode === 'skill'
+              ? Array.from(new Map(map.cells.filter((c) => c.type === 'task' && c.task).map((c) => [c.task!.romId, { romId: c.task!.romId, title: c.task!.title }])).values())
+              : [];
+          const nextTask = nextIdx >= 0 ? cellTaskOf(s, map, nextIdx) : null;
+          const busy = !!(s.challenge || s.moving || s.pendingCard || s.quiz || s.awaitPost || maplessFxGate);
+          const ml = s.mapless;
+          return (
+            <div className={`absolute inset-0 z-[15] bg-[rgba(7,9,18,0.97)] overflow-y-auto ${peekMap ? 'hidden' : ''}`}>
+              <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
+                {/* шапка челленджа */}
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="font-display uppercase text-xl text-[#ff8b3f]">{map.name}</span>
+                  <span className="font-pixel text-[8px] px-1.5 py-0.5 border-2 border-magma/60 text-magma">{isSkill ? 'SKILL CHALLENGE' : 'ЧЕЛЛЕНДЖ БЕЗ КАРТЫ'}</span>
+                  {ml && (
+                    <span className="ml-auto font-display uppercase text-lg text-gold">
+                      {ml.over ? 'ФИНИШ!' : `МАТЧ ${Math.min(ml.done + 1, ml.total)} / ${ml.total}`}
+                    </span>
+                  )}
+                </div>
+                {/* полоса прогресса матчей */}
+                {ml && (
+                  <div className="flex items-center gap-1">
+                    {Array.from({ length: ml.total }).map((_, i) => (
+                      <span key={i} className={`h-2 flex-1 min-w-[3px] ${i < ml.done ? 'bg-teal' : i === ml.done && !ml.over ? 'bg-gold pulse-ring' : 'bg-edge'}`} />
+                    ))}
+                  </div>
+                )}
+                {/* ресурсы хоста */}
+                {hostP && !hostP.spect && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-sky">⏱ {fmtClock(hostP.secLeft)}</span>
+                    <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-gold">🎯 {hostP.triesLeft} ПОП.</span>
+                    {coinsActive && <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-teal">🪙 {coinsStr(hostP.coinsLeft ?? 0)}</span>}
+                    {!hostP.alive && <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-coral">РЕСУРСЫ ИСЧЕРПАНЫ</span>}
+                  </div>
+                )}
+
+                {s.phase === 'playing' && ml && !ml.over && (
+                  busy ? (
+                    <div className="pixel-panel pixel-corners p-6 text-center">
+                      <span className="font-pixel text-[9px] text-dim blink-hard">МАТЧ {(ml.done ?? 0) + 1} ИГРАЕТСЯ — ОКНО ЗАДАНИЯ НА ЭКРАНЕ</span>
+                    </div>
+                  ) : hostP?.id === me && hostP.alive ? (
+                    <div className="pixel-panel pixel-corners p-5 space-y-4">
+                      <div className="font-display uppercase text-sm text-paper">
+                        {map.mapless?.random || isSkill ? 'Крутаните колесо — выпавшая игра станет матчем' : 'Следующий матч по списку'}
+                      </div>
+                      {map.mapless?.random || isSkill ? (
+                        <Randomizer
+                          items={pool}
+                          disabled={busy}
+                          onPicked={(item) => {
+                            if (nextIdx < 0) return;
+                            dispatch({ t: 'maplessSpin', id: me, cellIdx: nextIdx, romId: item.romId, title: item.title });
+                            dispatch({ t: 'maplessOpen', id: me, cellIdx: nextIdx });
+                          }}
+                        />
+                      ) : (
+                        <div className="space-y-3">
+                          <div className="border-[3px] border-edge px-4 py-3">
+                            <div className="tick-label text-gold mb-1">Игра матча №{(ml.done ?? 0) + 1}</div>
+                            <div className="font-display uppercase text-paper text-lg truncate">{nextTask?.title ?? '—'}</div>
+                            {nextTask?.desc && <div className="text-[11px] text-dim mt-1">{nextTask.desc}</div>}
+                          </div>
+                          <PxBtn big color="gold" className="w-full pulse-ring" disabled={!nextTask}
+                            onClick={() => { sfx.start(); if (nextIdx >= 0) dispatch({ t: 'maplessOpen', id: me, cellIdx: nextIdx }); }}>
+                            {Ic.play(16)} Играть матч {(ml.done ?? 0) + 1}
+                          </PxBtn>
+                        </div>
+                      )}
+                      {pool.length === 0 && (map.mapless?.random || isSkill) && (
+                        <p className="text-[11px] text-magma">Пул игр пуст — {isSkill ? 'добавьте на карту задания с ромами' : 'в челлендже не выбрана ни одна игра'}.</p>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="pixel-panel pixel-corners p-6 text-center">
+                      <span className="font-pixel text-[9px] text-dim blink-hard">ХОСТ ГОТОВИТ СЛЕДУЮЩИЙ МАТЧ…</span>
+                    </div>
+                  )
+                )}
+
+                {/* список матчей (безкартовый челлендж по списку) */}
+                {map.mapless && !map.mapless.random && (
+                  <div className="border-2 border-edge divide-y-2 divide-edge max-h-56 overflow-y-auto">
+                    {map.cells.filter((c) => c.type === 'task').map((c) => {
+                      const i = map.cells.indexOf(c);
+                      const played = doneCells.includes(i);
+                      const t = cellTaskOf(s, map, i);
+                      return (
+                        <div key={i} className={`flex items-center gap-2 px-3 py-1.5 text-[11px] ${played ? 'text-faint' : 'text-paper'}`}>
+                          <span className={`font-pixel text-[8px] ${played ? 'text-teal' : 'text-gold'}`}>{played ? '✓' : '·'}</span>
+                          <span className="font-pixel text-[8px] text-faint w-8">№{c.n}</span>
+                          <span className={`truncate ${played ? 'line-through' : ''}`}>{t?.title ?? '—'}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* лог партии */}
+                <div className="space-y-1">
+                  {s.log.slice(0, 8).map((l, i) => (
+                    <div key={`${l}-${i}`} className={`text-[10.5px] leading-tight px-2.5 py-1.5 bg-[rgba(7,9,18,0.8)] border-l-[3px] ${i === 0 ? 'border-gold text-paper' : 'border-edge text-dim'}`}>
+                      {l}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* чей ход */}
         {s.phase === 'playing' && active && (
@@ -1691,8 +1850,22 @@ export default function GameScreen() {
                   </div>
                   <p className="text-[12px] text-dim mt-2">
                     {winner
-                      ? `${winner.name} выдержал ${SKILL_TURNS} ходов — ресурсы на месте!`
-                      : `Ресурсы исчерпаны раньше, чем истекли ${SKILL_TURNS} ходов.`}
+                      ? `${winner.name} сыграл ${s.mapless?.total ?? SKILL_TURNS} случайных игр — ресурсы на месте! Финальный капитал: ${coinsStr(winner.coinsLeft ?? 0)}`
+                      : `Ресурсы исчерпаны раньше, чем сыграны все ${s.mapless?.total ?? SKILL_TURNS} игр.`}
+                  </p>
+                </>
+              ) : isMapless ? (
+                <>
+                  <div className={`font-pixel text-sm mt-3 title-glow ${winner ? 'text-teal' : 'text-coral'}`}>
+                    {winner ? 'ЧЕЛЛЕНДЖ ПРОЙДЕН!' : 'ЧЕЛЛЕНДЖ ПРОВАЛЕН'}
+                  </div>
+                  <div className="font-display uppercase text-2xl text-paper mt-2" style={{ color: winner ? PLAYER_COLORS[winner.color] : undefined }}>
+                    {winner?.name ?? 'РЕСУРСЫ ИСЧЕРПАНЫ'}
+                  </div>
+                  <p className="text-[12px] text-dim mt-2">
+                    {winner
+                      ? `Все ${s.mapless?.total ?? '?'} матчей сыграны! Финальный капитал: ${coinsStr(winner.coinsLeft ?? 0)}`
+                      : 'Ресурсы исчерпаны раньше, чем сыграны все матчи.'}
                   </p>
                 </>
               ) : (
@@ -1748,7 +1921,7 @@ export default function GameScreen() {
       {ch && task && (
         <div className={peekMap ? 'hidden' : undefined}>
         <Modal
-          title={`Ячейка №${ch.cellIdx + 1} · ${task.title}`}
+          title={isMapless && s.mapless ? `Матч ${Math.min(s.mapless.done + 1, s.mapless.total)} · ${task.title}` : `Ячейка №${ch.cellIdx + 1} · ${task.title}`}
           icon={Ic.cart(16)}
           w="max-w-4xl"
           locked
@@ -1789,35 +1962,59 @@ export default function GameScreen() {
                   {myTurn ? (
                     <div>
                       <div className="font-display uppercase text-sm text-paper mb-3">Чем платите за задание?</div>
-                      <div className="grid grid-cols-2 gap-3">
-                        <button
-                          onClick={() => { sfx.coin(); dispatch({ t: 'chooseMode', id: me, mode: 'time' }); }}
-                          disabled={(mePlayer?.secLeft ?? 0) <= 0}
-                          className="pixel-panel pixel-corners p-4 text-left hover:border-sky hover:-translate-y-0.5 transition-all cursor-pointer group disabled:opacity-35 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:border-edge"
-                        >
-                          <span className="text-sky">{Ic.clock(22)}</span>
-                          <div className="font-display uppercase text-paper group-hover:text-sky mt-2">Время</div>
-                          <div className="font-pixel text-[10px] text-sky mt-1">{fmtClock(mePlayer?.secLeft ?? 0)}</div>
-                          <div className="text-[10px] text-dim mt-1.5">{(mePlayer?.secLeft ?? 0) <= 0 ? 'Время исчерпано — ресурс недоступен' : 'Таймер стартует по кнопке «Запуск задания».'}</div>
-                        </button>
-                        <button
-                          onClick={() => { sfx.coin(); dispatch({ t: 'chooseMode', id: me, mode: 'tries' }); }}
-                          disabled={(mePlayer?.triesLeft ?? 0) <= 0}
-                          className="pixel-panel pixel-corners p-4 text-left hover:border-gold hover:-translate-y-0.5 transition-all cursor-pointer group disabled:opacity-35 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:border-edge"
-                        >
-                          <span className="text-gold">{Ic.target(22)}</span>
-                          <div className="font-display uppercase text-paper group-hover:text-gold mt-2">Попытки</div>
-                          <div className="font-pixel text-[10px] text-gold mt-1">{mePlayer?.triesLeft ?? 0} ПОП.</div>
-                          <div className="text-[10px] text-dim mt-1.5">{(mePlayer?.triesLeft ?? 0) <= 0 ? 'Попытки исчерпаны — ресурс недоступен' : 'Запуск = 1 попытка, каждый перезапуск — ещё одна.'}</div>
-                        </button>
+                      <div className={`grid ${coinsActive ? 'sm:grid-cols-3' : 'grid-cols-2'} gap-3`}>
+                        {!coinsOnly && (
+                          <button
+                            onClick={() => { sfx.coin(); dispatch({ t: 'chooseMode', id: me, mode: 'time' }); }}
+                            disabled={(mePlayer?.secLeft ?? 0) <= 0}
+                            className="pixel-panel pixel-corners p-4 text-left hover:border-sky hover:-translate-y-0.5 transition-all cursor-pointer group disabled:opacity-35 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:border-edge"
+                          >
+                            <span className="text-sky">{Ic.clock(22)}</span>
+                            <div className="font-display uppercase text-paper group-hover:text-sky mt-2">Время</div>
+                            <div className="font-pixel text-[10px] text-sky mt-1">{fmtClock(mePlayer?.secLeft ?? 0)}</div>
+                            <div className="text-[10px] text-dim mt-1.5">{(mePlayer?.secLeft ?? 0) <= 0 ? 'Время исчерпано — ресурс недоступен' : 'Таймер стартует по кнопке «Запуск задания».'}</div>
+                          </button>
+                        )}
+                        {!coinsOnly && (
+                          <button
+                            onClick={() => { sfx.coin(); dispatch({ t: 'chooseMode', id: me, mode: 'tries' }); }}
+                            disabled={(mePlayer?.triesLeft ?? 0) <= 0}
+                            className="pixel-panel pixel-corners p-4 text-left hover:border-gold hover:-translate-y-0.5 transition-all cursor-pointer group disabled:opacity-35 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:border-edge"
+                          >
+                            <span className="text-gold">{Ic.target(22)}</span>
+                            <div className="font-display uppercase text-paper group-hover:text-gold mt-2">Попытки</div>
+                            <div className="font-pixel text-[10px] text-gold mt-1">{mePlayer?.triesLeft ?? 0} ПОП.</div>
+                            <div className="text-[10px] text-dim mt-1.5">{(mePlayer?.triesLeft ?? 0) <= 0 ? 'Попытки исчерпаны — ресурс недоступен' : 'Запуск = 1 попытка, каждый перезапуск — ещё одна.'}</div>
+                          </button>
+                        )}
+                        {coinsActive && (
+                          <button
+                            onClick={() => { sfx.coin(); dispatch({ t: 'chooseMode', id: me, mode: 'coins' }); }}
+                            className="pixel-panel pixel-corners p-4 text-left hover:border-teal hover:-translate-y-0.5 transition-all cursor-pointer group"
+                          >
+                            <span className="text-teal">🪙</span>
+                            <div className="font-display uppercase text-paper group-hover:text-teal mt-2">Монеты</div>
+                            <div className="font-pixel text-[10px] text-teal mt-1">{coinsShort(mePlayer?.coinsLeft ?? 0)}</div>
+                            <div className="text-[10px] text-dim mt-1.5">Во время игры ничего не тратится: победа +{map.taskWinCoins ?? 0} бр · пропуск {map.skipCoins ?? 5} бр.</div>
+                          </button>
+                        )}
                       </div>
                       <div className="mt-3 flex justify-end gap-2 flex-wrap">
-                        <GhostBtn onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'time', spentMs: 0, loads: 0 })} disabled={(mePlayer?.secLeft ?? 0) < 60}>
-                          {Ic.bolt(12)} Сразу пропустить · {skipNeed} мин
-                        </GhostBtn>
-                        <GhostBtn onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'tries', spentMs: 0, loads: 0 })} disabled={(mePlayer?.triesLeft ?? 0) <= 0}>
-                          {Ic.bolt(12)} Сразу пропустить · {skipNeed} поп.
-                        </GhostBtn>
+                        {coinsActive && (
+                          <GhostBtn onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'coins', spentMs: 0, loads: 0 })} disabled={(mePlayer?.coinsLeft ?? 0) > 0 && (mePlayer?.coinsLeft ?? 0) < skipCoinsNeed}>
+                            {Ic.bolt(12)} Сразу пропустить · {skipCoinsNeed} бр
+                          </GhostBtn>
+                        )}
+                        {!coinsOnly && (
+                          <>
+                            <GhostBtn onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'time', spentMs: 0, loads: 0 })} disabled={(mePlayer?.secLeft ?? 0) < 60}>
+                              {Ic.bolt(12)} Сразу пропустить · {skipNeed} мин
+                            </GhostBtn>
+                            <GhostBtn onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'tries', spentMs: 0, loads: 0 })} disabled={(mePlayer?.triesLeft ?? 0) <= 0}>
+                              {Ic.bolt(12)} Сразу пропустить · {skipNeed} поп.
+                            </GhostBtn>
+                          </>
+                        )}
                       </div>
                       <div className="mt-2 space-y-2">
                         {immuneBtns}
@@ -1834,9 +2031,14 @@ export default function GameScreen() {
               {ch.status !== 'choose' && (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className={`hud-chip pixel-corners px-3 py-1.5 font-display text-[11px] uppercase flex items-center gap-1.5 ${ch.mode === 'time' ? 'text-sky' : 'text-gold'}`}>
-                      {ch.mode === 'time' ? Ic.clock(13) : Ic.target(13)} {ch.mode === 'time' ? 'Режим времени' : 'Режим попыток'}
+                    <span className={`hud-chip pixel-corners px-3 py-1.5 font-display text-[11px] uppercase flex items-center gap-1.5 ${ch.mode === 'time' ? 'text-sky' : ch.mode === 'coins' ? 'text-teal' : 'text-gold'}`}>
+                      {ch.mode === 'time' ? Ic.clock(13) : ch.mode === 'coins' ? <span>🪙</span> : Ic.target(13)} {ch.mode === 'time' ? 'Режим времени' : ch.mode === 'coins' ? 'Монетная игра' : 'Режим попыток'}
                     </span>
+                    {ch.mode === 'coins' && (
+                      <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-teal" title="Монеты платятся по итогам: победа — награда, пропуск — цена">
+                        🪙 {coinsShort(mePlayer?.coinsLeft ?? 0)} · победа +{map.taskWinCoins ?? 0} бр · пропуск {map.skipCoins ?? 5} бр · перезапуски бесплатны
+                      </span>
+                    )}
                     {info && ch.mode === 'time' && (
                       <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-sky">
                         {fmtClock(Math.max(0, (mePlayer?.secLeft ?? 0) - info.ms / 1000))} · потрачено {info.min} мин
@@ -1941,17 +2143,34 @@ export default function GameScreen() {
                           <PxBtn big color="gold" className="w-full pulse-ring" onClick={() => { sfx.start(); dispatch({ t: 'startTask', id: me }); }}>
                             {Ic.play(16)} Запуск задания
                           </PxBtn>
-                          <p className="text-[10px] text-dim leading-tight">
-                            Эмулятор загружен и ждёт. {ch.mode === 'time' ? 'Таймер пойдёт' : 'Попытка спишется'} только после запуска — можно спокойно подготовиться.
-                          </p>
-                          <GhostBtn
-                            className="w-full"
-                            disabled={ch.lowStart === true}
-                            title={ch.lowStart ? 'Ресурса меньше цены пропуска — авансом заплатить нельзя. Запускайте и тратьте ресурс: «Пропустить» разблокируется на нуле' : undefined}
-                            onClick={() => dispatch({ t: 'skip', id: me, instant: true, spentMs: 0, loads: 0 })}
-                          >
-                            {Ic.bolt(13)} Заплатить {skipNeed} и пропустить
-                          </GhostBtn>
+                          {ch.mode === 'coins' ? (
+                            <p className="text-[10px] text-dim leading-tight">
+                              Эмулятор загружен и ждёт. Монетная игра: во время задания ничего не списывается — победа принесёт {map.taskWinCoins ?? 0} бр, пропуск обойдётся в {map.skipCoins ?? 5} бр. Перезапуски бесплатны и бесконечны.
+                            </p>
+                          ) : (
+                            <p className="text-[10px] text-dim leading-tight">
+                              Эмулятор загружен и ждёт. {ch.mode === 'time' ? 'Таймер пойдёт' : 'Попытка спишется'} только после запуска — можно спокойно подготовиться.
+                            </p>
+                          )}
+                          {ch.mode === 'coins' ? (
+                            <GhostBtn
+                              className="w-full"
+                              disabled={(mePlayer?.coinsLeft ?? 0) > 0 && (mePlayer?.coinsLeft ?? 0) < skipCoinsNeed}
+                              title={(mePlayer?.coinsLeft ?? 0) > 0 && (mePlayer?.coinsLeft ?? 0) < skipCoinsNeed ? 'Монет не хватает на плату за пропуск — играйте и побеждайте' : undefined}
+                              onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'coins', spentMs: 0, loads: 0 })}
+                            >
+                              {Ic.bolt(13)} Пропустить · {skipCoinsNeed} бр
+                            </GhostBtn>
+                          ) : (
+                            <GhostBtn
+                              className="w-full"
+                              disabled={ch.lowStart === true}
+                              title={ch.lowStart ? 'Ресурса меньше цены пропуска — авансом заплатить нельзя. Запускайте и тратьте ресурс: «Пропустить» разблокируется на нуле' : undefined}
+                              onClick={() => dispatch({ t: 'skip', id: me, instant: true, spentMs: 0, loads: 0 })}
+                            >
+                              {Ic.bolt(13)} Заплатить {skipNeed} и пропустить
+                            </GhostBtn>
+                          )}
                           {immuneBtns}
                         </>
                       )}
@@ -1978,24 +2197,37 @@ export default function GameScreen() {
                             </GhostBtn>
                           )}
                           <PxBtn color="teal" className="w-full" onClick={() => dispatch({ t: 'declareDone', id: me })}>{Ic.check(14)} Прошёл задание</PxBtn>
-                          <GhostBtn
-                            className="w-full"
-                            disabled={!naturalCanSkip}
-                            title={!naturalCanSkip ? (ch.lowStart ? 'Ресурса было меньше цены пропуска — кнопка разблокируется, когда ресурс закончится' : 'Сначала потратьте ресурсы — или платите сразу') : undefined}
-                            onClick={() => info && dispatch({ t: 'skip', id: me, instant: false, spentMs: info.ms, loads: info.loads })}
-                          >
-                            {Ic.bolt(13)} Пропустить · потратить {ch.mode === 'time'
-                              ? `${naturalCanSkip && remainingNow <= 0 ? Math.max(1, Math.ceil((info?.ms ?? 0) / 60000)) : Math.max(info?.min ?? 0, skipNeed)} мин`
-                              : `${naturalCanSkip && remainingNow <= 0 ? Math.max(1, mePlayer?.triesLeft ?? 0) : Math.max(info?.loads ?? 0, skipNeed)} поп.`}
-                          </GhostBtn>
-                          <GhostBtn
-                            className="w-full"
-                            disabled={!instantSkipAllowed}
-                            title={!instantSkipAllowed ? (ch.lowStart ? 'Ресурса было меньше цены пропуска — кнопка разблокируется, когда ресурс закончится' : 'Вы уже потратили достаточно ресурсов — используйте кнопку «Пропустить», она спишет фактическую цену') : undefined}
-                            onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: ch.mode === 'time' ? 'time' : 'tries', spentMs: 0, loads: 0 })}
-                          >
-                            {Ic.bolt(13)} Заплатить {skipNeed} {ch.mode === 'time' ? 'мин' : 'поп.'} и пропустить
-                          </GhostBtn>
+                          {ch.mode === 'coins' ? (
+                            <GhostBtn
+                              className="w-full"
+                              disabled={(mePlayer?.coinsLeft ?? 0) > 0 && (mePlayer?.coinsLeft ?? 0) < skipCoinsNeed}
+                              title={(mePlayer?.coinsLeft ?? 0) > 0 && (mePlayer?.coinsLeft ?? 0) < skipCoinsNeed ? 'Монет не хватает на плату за пропуск — играйте и побеждайте' : undefined}
+                              onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'coins', spentMs: 0, loads: 0 })}
+                            >
+                              {Ic.bolt(13)} Пропустить · {skipCoinsNeed} бр
+                            </GhostBtn>
+                          ) : (
+                            <>
+                              <GhostBtn
+                                className="w-full"
+                                disabled={!naturalCanSkip}
+                                title={!naturalCanSkip ? (ch.lowStart ? 'Ресурса было меньше цены пропуска — кнопка разблокируется, когда ресурс закончится' : 'Сначала потратьте ресурсы — или платите сразу') : undefined}
+                                onClick={() => info && dispatch({ t: 'skip', id: me, instant: false, spentMs: info.ms, loads: info.loads })}
+                              >
+                                {Ic.bolt(13)} Пропустить · потратить {ch.mode === 'time'
+                                  ? `${naturalCanSkip && remainingNow <= 0 ? Math.max(1, Math.ceil((info?.ms ?? 0) / 60000)) : Math.max(info?.min ?? 0, skipNeed)} мин`
+                                  : `${naturalCanSkip && remainingNow <= 0 ? Math.max(1, mePlayer?.triesLeft ?? 0) : Math.max(info?.loads ?? 0, skipNeed)} поп.`}
+                              </GhostBtn>
+                              <GhostBtn
+                                className="w-full"
+                                disabled={!instantSkipAllowed}
+                                title={!instantSkipAllowed ? (ch.lowStart ? 'Ресурса было меньше цены пропуска — кнопка разблокируется, когда ресурс закончится' : 'Вы уже потратили достаточно ресурсов — используйте кнопку «Пропустить», она спишет фактическую цену') : undefined}
+                                onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: ch.mode === 'time' ? 'time' : 'tries', spentMs: 0, loads: 0 })}
+                              >
+                                {Ic.bolt(13)} Заплатить {skipNeed} {ch.mode === 'time' ? 'мин' : 'поп.'} и пропустить
+                              </GhostBtn>
+                            </>
+                          )}
                           {immuneBtns}
                         </>
                       )}
