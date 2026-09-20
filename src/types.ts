@@ -1,4 +1,4 @@
-export type CellType = 'start' | 'task' | 'rest' | 'bonus' | 'trap' | 'quiz'; // rest — пустая клетка-передышка: ничего не происходит, ром не нужен
+export type CellType = 'start' | 'task' | 'rest' | 'bonus' | 'trap' | 'quiz' | 'loot'; // rest — пустая клетка-передышка: ничего не происходит, ром не нужен; loot — ЛУТБОКС (только RUBG): разовый подбор случайного предмета
 
 /* ---------- Типы сохранений (кнопки в «Запуске эмулятора») ----------
    level — «Уровень N» (обычные точки заданий), boss — «Босс N»,
@@ -379,15 +379,16 @@ export const tileNumOf = (g: TileGrid, id: string): number => g.tiles.findIndex(
                все подключившиеся — зрители.
    Внутренние id НЕ менялись (старые карты и сохранения совместимы) — сменились
    только отображаемые имена: CLASSIC → RETROPOLIA, JOURNEY → TRIATHLON. */
-export type MapMode = 'classic' | 'skill' | 'journey' | 'journey1p';
+export type MapMode = 'classic' | 'skill' | 'journey' | 'journey1p' | 'rubg';
 export const MAP_MODES: { id: MapMode; name: string; hint: string }[] = [
   { id: 'classic', name: 'RETROPOLIA', hint: 'Обычная игра с кубиками — ход по маршруту, ячейки, задания.' },
   { id: 'skill', name: 'SKILL CHALLENGE', hint: 'Играет только хост, лимит 25 ходов: остались ресурсы — челлендж пройден, нет — поражение. Каждый ход — задание: ячейки квизов, бонусов, штрафов и отдыха запрещены. Остальные игроки подключаются как зрители.' },
   { id: 'journey', name: 'TRIATHLON', hint: 'Приключение на ВСЕХ: все фишки стартуют одновременно и ходят напрямую в любые стороны, кубиков и передачи хода нет. Кто ПЕРВЫМ пересечёт ячейку задания — у того оно открывается, остальные фишки замирают и смотрят трансляцию. Побеждает последний с ресурсами.' },
   { id: 'journey1p', name: 'JOURNEY', hint: 'Одиночное приключение: механика TRIATHLON (свободное хождение без кубиков), но играет ТОЛЬКО ХОСТ — все подключившиеся игроки становятся зрителями трансляции.' },
+  { id: 'rubg', name: 'RUBG', hint: 'Retro Ultimate Battle Ground — «ретро-PUBG»: все летят на самолёте и прыгают где хотят; задания играются ЛИЧНО, без остановки других и без подтверждений (доверие); ресурс один — полоска HP; безопасная зона сжимается и жжёт вне себя; лутбоксы, стелс, атаки и кражи. Побеждает последний живой.' },
 ];
-/** Свободное хождение (механика JOURNEY) — TRIATHLON и одиночный JOURNEY. */
-export const isJourneyLike = (m: MapMode | undefined): boolean => m === 'journey' || m === 'journey1p';
+/** Свободное хождение (механика JOURNEY) — TRIATHLON, одиночный JOURNEY и RUBG. */
+export const isJourneyLike = (m: MapMode | undefined): boolean => m === 'journey' || m === 'journey1p' || m === 'rubg';
 /** Одиночные режимы: играет только хост, остальные — зрители (можно стартовать одному). */
 export const isSoloMode = (m: MapMode | undefined): boolean => m === 'skill' || m === 'journey1p';
 export const SKILL_TURNS = 25; // лимит ходов хоста в SKILL CHALLENGE
@@ -469,13 +470,12 @@ export const challengeSummaryLines = (a: ChallengeAnswers): string[] => {
     return [`БЕЗ КАРТЫ: ${games}`, `Ресурсы: ${res}`, a.resCoins ? `задание: +${a.taskWinCoins} бронзы за победу, пропуск ${a.skipCoins} бронзы` : 'без монетной экономики'];
   }
   const players = a.players === 'solo' ? 'Играет один, остальные — зрители' : a.players === 'together' ? 'Все играют одновременно' : 'Играют по очереди (кубики)';
-  const platform = a.platform === 'phone' ? 'Телефон' : a.platform === 'pc' ? 'Компьютер' : 'Телефон и компьютер';
   const field = a.field === 's' ? 'Малая карта' : a.field === 'm' ? 'Средняя карта' : a.field === 'l' ? 'Большая карта' : 'Плиточный режим (несколько карт-локаций)';
   const amount = a.cellAmount === 'few' ? 'немного ячеек (10–20)' : a.cellAmount === 'mid' ? 'средне ячеек (20–40)' : 'много ячеек (40+)';
   const res = [a.resTime ? 'время' : '', a.resTries ? 'попытки' : '', a.resCoins ? `монеты (старт ${coinsStr(a.startCoins)})` : ''].filter(Boolean).join(' + ') || 'без ресурсов';
   const pen = a.penalties ? `штрафы за проигрыш: −${a.loseMin} мин / −${a.loseTries} поп.; награда за победу: +${a.winMin} мин / +${a.winTries} поп.` : 'без штрафов и наград (время/попытки)';
   const coinEco = a.resCoins ? `монеты: +${a.taskWinCoins} бронзы за победу в задании, пропуск ${a.skipCoins} бронзы, квиз +${a.quizWinCoins}/−${a.quizLoseCoins} бронзы` : '';
-  return [players, platform, field, `Ячейки: ${amount}`, `Ресурсы: ${res} (старт ${a.startMin} мин / ${a.startTries} поп.)`, pen, coinEco, `Скорость фишек: ${a.speed} кл/с`].filter(Boolean);
+  return [players, field, `Ячейки: ${amount}`, `Ресурс: ${res} (старт ${a.startMin} мин / ${a.startTries} поп.)`, pen, coinEco, `Скорость фишек: ${a.speed} кл/с`].filter(Boolean);
 };
 
 export interface PlateBg {
@@ -597,6 +597,9 @@ export interface PlayerState {
   secLeft: number;
   triesLeft: number;
   coinsLeft?: number; // МОНЕТЫ: капитал в бронзовых единицах (1 серебряная = 100); нет/0 — монет нет
+  hp?: number; // RUBG: полоска здоровья 0..100 (проценты) — ЕДИНСТВЕННЫЙ ресурс режима
+  items?: RubgItem[]; // RUBG: инвентарь (хилки, оружие, карты воровства и стелса)
+  stealth?: boolean; // RUBG: игрок в стелсе — другие его фишку НЕ видят
   pos: number; // индекс в cells
   alive: boolean;
   skipTurns: number;
@@ -775,6 +778,98 @@ export interface GameFx {
   delay?: number;  // пауза ДО старта клипа, мс: секунда тишины после задания, потом спектакль
 }
 
+/* ---------- RUBG (Retro Ultimate Battle Ground) — «ретро-PUBG» ----------
+   Все играют ОДНОВРЕМЕННО: самолёт летит через карту, каждый выпрыгивает где хочет.
+   Задания играются ЛИЧНО (не останавливают других, без трансляции и подтверждений).
+   Ресурс один — полоска HP; безопасная зона сжимается, вне неё HP тает.
+   Вместо бонусов/штрафов — лутбоксы: хилки, оружие, карты воровства и стелса. */
+export type RubgItemKind = 'flask' | 'medkit' | 'bigmed' | 'pistol' | 'smg' | 'sniper' | 'steal' | 'stealth';
+export interface RubgItem {
+  id: string;
+  kind: RubgItemKind;
+  uses?: number; // карта воровства: 3 использования
+}
+export const RUBG_ITEMS: Record<RubgItemKind, { name: string; hp: number; radius: number; loot: number; icon: string }> = {
+  // hp — урон/лечение в ПРОЦЕНТАХ полоски; radius — радиус атаки в клетках (0 — не оружие); loot — вес в лут-таблице
+  flask:    { name: 'Фляжка',            hp: 10,  radius: 0,  loot: 26, icon: '🥃' },
+  medkit:   { name: 'Аптечка',           hp: 25,  radius: 0,  loot: 18, icon: '🧰' },
+  bigmed:   { name: 'Ящик медбрата',     hp: 75,  radius: 0,  loot: 7,  icon: '📦' },
+  pistol:   { name: 'Пистолет',          hp: 5,   radius: 3,  loot: 16, icon: '🔫' },
+  smg:      { name: 'Пистолет-пулемёт',  hp: 15,  radius: 6,  loot: 11, icon: '💥' },
+  sniper:   { name: 'Снайперка',         hp: 40,  radius: 12, loot: 5,  icon: '🎯' },
+  steal:    { name: 'Карта воровства',   hp: 0,   radius: 0,  loot: 12, icon: '🤏' }, // 3 использования
+  stealth:  { name: 'Карта стелса',      hp: 0,   radius: 0,  loot: 5,  icon: '👻' },
+};
+export const STEAL_USES = 3; // использования карты воровства
+export const rubgMkItem = (kind: RubgItemKind): RubgItem => ({
+  id: 'it' + Math.random().toString(36).slice(2, 9), kind,
+  ...(kind === 'steal' ? { uses: STEAL_USES } : {}),
+});
+/** Случайный предмет по весам лут-таблицы. */
+export const rubgRandomKind = (): RubgItemKind => {
+  const entries = Object.entries(RUBG_ITEMS) as [RubgItemKind, { loot: number }][];
+  const total = entries.reduce((a, [, v]) => a + v.loot, 0);
+  let roll = Math.random() * total;
+  for (const [kind, v] of entries) { roll -= v.loot; if (roll <= 0) return kind; }
+  return 'flask';
+};
+export const RUBG_HP_MAX = 100;      // полоска HP — проценты
+export const RUBG_WIN_HP = 10;       // +HP за победу в задании + случайный предмет
+export const RUBG_LOSE_HP = 5;       // −HP за проигрыш задания
+export const RUBG_STEAL_RANGE = 1.6; // дистанция кражи/атаки вплотную, клеток
+export const RUBG_STOP_CD = 15;      // кулдаун кнопки «Остановить вора», секунд
+export interface RubgZone {
+  cx: number; cy: number; r: number;        // ТЕКУЩИЙ круг (px поля) — пересчитывается хостом каждый тик
+  sx: number; sy: number; sr: number;       // ОТКУДА сжимаемся (начало текущей фазы сжатия)
+  tx: number; ty: number; tr: number;       // цель сжатия (куда сожмётся)
+  phase: 'wait' | 'shrink';                 // ждём или сжимаемся
+  phaseStart: number; phaseEnd: number;     // границы фазы, Date.now() хоста (клиенты рисуют интерполяцией)
+  idx: number;                              // номер фазы (0..RUBG_ZONE_PHASES.length-1)
+  dps: number;                              // урон ВНЕ зоны в секунду (% HP)
+  lastTick: number;                         // момент прошлого подсчёта урона
+}
+export interface RubgJob {
+  cellIdx: number;       // ячейка задания
+  startedAt: number;     // когда игрок вошёл
+}
+export interface RubgSteal {
+  thief: string; victim: string;
+  dur: number;           // сколько секунд есть у вора (чем дольше держал кнопку — тем больше)
+  startedAt: number;
+}
+export interface RubgPlane {
+  x0: number; y0: number; x1: number; y1: number; // отрезок полёта через карту
+  startAt: number;       // Date.now() хоста в момент старта полёта
+  speed: number;         // px в секунду
+  jumped: string[];      // кто уже выпрыгнул
+}
+export interface RubgState {
+  plane?: RubgPlane;                       // фаза полёта (rollOff): все прыгнули → playing
+  zone: RubgZone | null;                   // безопасная зона (появляется при старте партии)
+  jobs?: Record<string, RubgJob>;          // ЛИЧНЫЕ задания: key — id игрока
+  looted?: number[];                       // индексы ВСКРЫТЫХ лутбоксов (одноразовые)
+  stealth?: string[];                      // кто в стелсе сейчас
+  steals?: Record<string, RubgSteal>;      // активные кражи: key — id ЖЕРТВЫ
+  stopCd?: Record<string, number>;         // кулдаун «Остановить вора»: key — игрок, значение — ts последнего нажатия
+}
+export const RUBG_ZONE_PHASES: { wait: number; shrink: number; mul: number; dps: number }[] = [
+  { wait: 40, shrink: 30, mul: 0.65, dps: 1 },
+  { wait: 30, shrink: 25, mul: 0.6,  dps: 2 },
+  { wait: 25, shrink: 20, mul: 0.55, dps: 4 },
+  { wait: 20, shrink: 15, mul: 0.5,  dps: 8 },
+  { wait: 15, shrink: 15, mul: 0.45, dps: 12 },
+  { wait: 10, shrink: 20, mul: 0,    dps: 20 }, // финал: карта вся в запретной зоне
+];
+/** Позиция фишки в px поля (для RUBG-логики: расстояния, зона). */
+export const playerPx = (s: GameSession, map: GameMap, id: string): { x: number; y: number } | null => {
+  const jp = s.journeyPos?.[id];
+  if (jp) return { x: jp.x, y: jp.y };
+  const p = s.players.find((x) => x.id === id);
+  if (!p) return null;
+  const c = map.cells[p.pos];
+  return c ? { x: c.cx ?? (c.x + (c.w || 1) / 2) * 64, y: c.cy ?? (c.y + (c.h || 1) / 2) * 64 } : null;
+};
+
 export interface ChallengeState {
   cellIdx: number;
   mode: 'time' | 'tries' | 'coins' | null;
@@ -820,7 +915,8 @@ export interface GameSession {
   revealed: number[]; // индексы ячеек, на которые хоть раз ступали (для режима «скрытые ячейки»)
   journeyPos?: Record<string, { x: number; y: number; dir?: 'up' | 'down' | 'left' | 'right'; ts?: number; mv?: boolean; tp?: boolean }>; // JOURNEY: авторитетные позиции ВСЕХ фишек в px поля (пишет хост); mv — «идёт сейчас» (false = стоит); tp — это обновление несёт ПРЫЖОК ЧЕРЕЗ ПОРТАЛ (принимать без анти-телепорта, у зрителей — мгновенный снап)
   skillDone?: number[]; // SKILL CHALLENGE / БЕЗКАРТОВАЯ ИГРА: ячейки, которые хост уже ПРОШЁЛ или ПРОПУСТИЛ — встав на них снова, фишка сама едет к следующей неигранной
-  mapless?: { done: number; total: number; over: boolean }; // БЕЗКАРТОВАЯ ИГРА: сколько матчей сыграно, сколько всего, флаг «все матчи сыграны — пора завершать победой» (завершает хост действием maplessFinish после анимаций)
+  mapless?: { done: number; total: number; over: boolean }; // БЕЗКАРТОВАЯ ИГРА (СТАРЫЕ карты v0.36.0): сколько матчей сыграно, сколько всего, флаг «все матчи сыграны — пора завершать победой» (завершает хост действием maplessFinish после анимаций)
+  rubg?: RubgState; // RUBG: самолёт, зона, личные задания, кражи, стелс
   fxs?: GameFx[]; // разовые анимации-спектакль (последние несколько)
   /* Разбитые ячейки: победитель разбил ячейку победой над заданием. Пока ячейка
      разбита — она считается ПУСТОЙ (передышка), хозяин — победитель. Без нового
@@ -859,7 +955,7 @@ export interface NetMsg {
   p?: unknown;
 }
 
-export const APP_VERSION = 29; // 29: МОНЕТЫ (бронза/серебро/золото/платина, 1:100) — третий ресурс челленджа и карт: награды за победу в задании и верный ответ квиза, цена пропуска; БЕЗКАРТОВЫЕ ЧЕЛЛЕНДЖИ — игра без создания карты: матчи по списку или РАНДОМАЙЗЕР (колесо фортуны) из папки ромов; SKILL CHALLENGE по умолчанию без карты — 25 случайных игр
+export const APP_VERSION = 30; // 30: RUBG — «ретро-PUBG»: самолёт и прыжки, ЛИЧНЫЕ задания без остановки других (доверие, без подтверждений), полоска HP как ЕДИНСТВЕННЫЙ ресурс, сжимающаяся безопасная зона с уроном, лутбоксы (хилки/оружие/карты воровства и стелса), кража из кармана, стелс, атаки; ресурс теперь ТОЛЬКО ОДИН (попытки ИЛИ время ИЛИ монеты); удаление своих челленджей; вопрос «на чём играют» из мастера убран; безкартовые челленджи убраны — SKILL CHALLENGE снова играется НА КАРТЕ
 export const START_SEC = 60 * 60;
 export const START_TRIES = 60;
 export const SKIP_COST = 5;

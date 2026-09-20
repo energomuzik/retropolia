@@ -1,5 +1,6 @@
-import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, PlayerState, TaskDef, TradeOffer, TokenDir } from './types';
-import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, tileAt, tileRectOf, coinsStr } from './types';
+import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, PlayerState, RubgItemKind, TaskDef, TradeOffer, TokenDir } from './types';
+import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, tileAt, tileRectOf, coinsStr, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_STEAL_RANGE, RUBG_STOP_CD, rubgMkItem, rubgRandomKind, playerPx } from './types';
+import type { RubgItem } from './types';
 import type { JoyId } from './types';
 import { CELL, cellAtPoint, cellCenter, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
 
@@ -58,6 +59,17 @@ export type Action =
   | { t: 'maplessSpin'; id: string; cellIdx: number; romId: string; title: string } // БЕЗ КАРТЫ: рандомайзер остановился — хост записывает выпавшую игру в матч
   | { t: 'maplessOpen'; id: string; cellIdx: number } // БЕЗ КАРТЫ: хост открывает следующий матч (задание на ячейке)
   | { t: 'maplessFinish'; id: string } // БЕЗ КАРТЫ: все матчи сыграны — хост завершает партию победой (после анимаций)
+  | { t: 'rubgJump'; id: string; x: number; y: number } // RUBG: прыжок из самолёта в точку (x,y — под самолётом в момент нажатия)
+  | { t: 'rubgTick'; id: string } // RUBG: тик хоста (~1 с): фазы зоны, урон вне зоны, форс-высадка, финал
+  | { t: 'rubgJobDone'; id: string; cellIdx: number; win: boolean } // RUBG: игрок сам закрыл ЛИЧНОЕ задание (доверие): win — победа (+HP+лут), false — поражение (−HP)
+  | { t: 'rubgJobLeave'; id: string; cellIdx: number } // RUBG: игрок ушёл из личного задания без последствий
+  | { t: 'rubgUseItem'; id: string; itemId: string } // RUBG: использовать хилку (+HP)
+  | { t: 'rubgShoot'; id: string; itemId: string; targetId: string } // RUBG: выстрел по цели (играющему — 100%, идущему — шанс от расстояния)
+  | { t: 'rubgStealStart'; id: string; victimId: string; holdMs: number } // RUBG: отпустил кнопку кражи — старт мини-игры «карман» (holdMs = сколько держал)
+  | { t: 'rubgStealPick'; id: string; victimId: string; itemId: string } // RUBG: выбрал предмет из кармана жертвы
+  | { t: 'rubgStealFail'; id: string; victimId: string } // RUBG: время вышло — кража провалена (стелс слетает)
+  | { t: 'rubgStopThief'; id: string } // RUBG: жертва нажала «Остановить вора» (кулаул 15 с)
+  | { t: 'rubgStealth'; id: string } // RUBG: активировать стелс (сгорает карта стелса)
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const rnd6 = () => 1 + Math.floor(Math.random() * 6);
@@ -65,7 +77,7 @@ const rnd6 = () => 1 + Math.floor(Math.random() * 6);
 function mkPlayer(id: string, name: string, color: number, isHost: boolean): PlayerState {
   return {
     id, name: name.slice(0, 14).toUpperCase() || 'ИГРОК', color, ready: isHost, isHost,
-    secLeft: START_SEC, triesLeft: START_TRIES, coinsLeft: 0, pos: 0, alive: true, skipTurns: 0, extraTurn: false,
+    secLeft: START_SEC, triesLeft: START_TRIES, coinsLeft: 0, hp: RUBG_HP_MAX, pos: 0, alive: true, skipTurns: 0, extraTurn: false,
     inventory: [], oneDie: false, dicePlus: false, freeSkip: false, joyTurn: -1,
   };
 }
@@ -79,6 +91,9 @@ function normPlayer(p: PlayerState) {
   if (p.joyTurn === undefined) p.joyTurn = -1;
   if (p.spect === undefined) p.spect = false;
   if (p.coinsLeft === undefined) p.coinsLeft = 0;
+  if (p.hp === undefined) p.hp = RUBG_HP_MAX;
+  if (!Array.isArray(p.items)) p.items = [];
+  if (p.stealth === undefined) p.stealth = false;
 }
 
 const CELL_PX = CELL; // клетка сетки поля
@@ -212,6 +227,14 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   if (!Array.isArray(s.fxs)) s.fxs = [];
   if (!s.broken) s.broken = {};
   if (!s.bossDown) s.bossDown = {};
+  if (s.rubg !== undefined) {
+    // старые сессии RUBG без части полей
+    s.rubg.jobs = s.rubg.jobs ?? {};
+    s.rubg.looted = s.rubg.looted ?? [];
+    s.rubg.stealth = s.rubg.stealth ?? [];
+    s.rubg.steals = s.rubg.steals ?? {};
+    s.rubg.stopCd = s.rubg.stopCd ?? {};
+  }
   for (const pl of s.players) normPlayer(pl);
   const log: Log = (t) => { s.log = [t, ...s.log].slice(0, 50); };
   /* ЗРИТЕЛИ (SKILL CHALLENGE): подключены и смотрят, но не играют — ходов
@@ -256,15 +279,19 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     /* монеты-единственный ресурс (coinsOnly): вылетает тот, у кого кончились МОНЕТЫ;
        в смешанном режиме монеты не убивают — вылет по времени+попыткам как раньше */
     const coinsFatal = map.coinsOnly === true && map.startCoins !== undefined;
+    const isRubg = map.mode === 'rubg';
     for (const p of s.players) {
-      const out = coinsFatal ? (p.coinsLeft ?? 0) <= 0 : (p.secLeft <= 0 && p.triesLeft <= 0 && (!coinsFatal || (p.coinsLeft ?? 0) <= 0));
+      const out = isRubg
+        ? (p.hp ?? RUBG_HP_MAX) <= 0 // RUBG: единственный ресурс — полоска HP
+        : coinsFatal ? (p.coinsLeft ?? 0) <= 0 : (p.secLeft <= 0 && p.triesLeft <= 0 && (!coinsFatal || (p.coinsLeft ?? 0) <= 0));
       if (p.alive && !p.spect && out) {
         p.alive = false;
         if (s.challenge && current().id === p.id) s.challenge = null;
         if (s.pendingCard && s.pendingCard.player === p.id) s.pendingCard = null;
+        if (s.rubg?.jobs) delete s.rubg.jobs[p.id]; // личное задание мёртвого закрывается
         s.awaitPost = false;
         s.moving = null;
-        log(`💀 ${p.name} выбывает — ${coinsFatal ? 'монеты исчерпаны' : 'ресурсы исчерпаны'}`);
+        log(isRubg ? `💀 ${p.name} ВЫБЫВАЕТ — полоска HP на нуле!` : `💀 ${p.name} выбывает — ${coinsFatal ? 'монеты исчерпаны' : 'ресурсы исчерпаны'}`);
         if (map.mode === 'skill' && p.isHost) log(`❌ SKILL CHALLENGE ПРОВАЛЕН: ресурсы исчерпаны до ${SKILL_TURNS} ходов`);
         if (map.mapless && p.isHost) log(`❌ ЧЕЛЛЕНДЖ ПРОВАЛЕН: ресурсы исчерпаны на матче ${(s.mapless?.done ?? 0) + 1} из ${s.mapless?.total ?? '?'}`);
       }
@@ -308,8 +335,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     }
     /* JOURNEY (новый): очередь ходов ОТСУТСТВУЕТ — после задания все фишки снова
        ходят одновременно. turn остаётся на игроке только что сыгранного задания
-       (его камера, боссы, окно), передавать ход никому не нужно. */
-    if (map.mode === 'journey') return;
+       (его камера, боссы, окно), передавать ход никому не нужно.
+       RUBG: очередь ходов тоже отсутствует (все ходят всегда) — передавать нечего. */
+    if (map.mode === 'journey' || map.mode === 'rubg') return;
     nextTurn();
     /* SKILL CHALLENGE: хост выдержал лимит ходов с ресурсами — челлендж пройден */
     if (map.mode === 'skill' && s.phase === 'playing' && (s.turnNo ?? 1) > SKILL_TURNS) {
@@ -930,9 +958,28 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       for (const p of s.players) {
         p.secLeft = sm * 60; p.triesLeft = st; p.coinsLeft = sc0; p.pos = startPos;
         if (soloMode) p.spect = !p.isHost; // играет только хост — остальные смотрят
+        if (map.mode === 'rubg') { p.hp = RUBG_HP_MAX; p.items = []; p.stealth = false; }
       }
-      /* БЕЗКАРТОВАЯ ИГРА и SKILL CHALLENGE (он теперь тоже без карты): счётчик матчей */
-      const mlTotal = map.mapless?.total ?? (map.mode === 'skill' ? SKILL_TURNS : 0);
+      /* RUBG: самолёт через карту + начальная зона на всё поле +Personal jobs/lut */
+      if (map.mode === 'rubg') {
+        const W = map.mw ?? map.cols * CELL_PX;
+        const H = map.mh ?? map.rows * CELL_PX;
+        const ang = Math.random() * Math.PI * 2;
+        const half = Math.hypot(W, H) / 2 + CELL_PX;
+        const cx0 = W / 2, cy0 = H / 2;
+        s.rubg = {
+          plane: {
+            x0: cx0 - Math.cos(ang) * half, y0: cy0 - Math.sin(ang) * half,
+            x1: cx0 + Math.cos(ang) * half, y1: cy0 + Math.sin(ang) * half,
+            startAt: Date.now(), speed: Math.max(W, H) / 22, jumped: [],
+          },
+          zone: null, // зона появится на rubgTick №1 — строится от центра карты
+          jobs: {}, looted: [], stealth: [], steals: {}, stopCd: {},
+        };
+      }
+      /* БЕЗКАРТОВАЯ ИГРА (СТАРЫЕ карты v0.36.0): счётчик матчей.
+         SKILL CHALLENGE снова играется НА КАРТЕ — счётчик ему не нужен. */
+      const mlTotal = map.mapless?.total ?? 0;
       if (mlTotal > 0) s.mapless = { done: 0, total: mlTotal, over: false };
       if (isJourneyLike(map.mode)) {
         // фишка хоста стартует ОДНОВРЕМЕННО (в TRIATHLON — фишки ВСЕХ игроков);
@@ -949,18 +996,20 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       s.rollOffReady = [];
       s.skillDone = [];
       if (isJourneyLike(map.mode)) s.rollOffWinner = s.players[0]?.id ?? null; // без бросков: сразу панель готовности
-      /* БЕЗ КАРТЫ (SKILL CHALLENGE и челленджи без карты): жеребьёвка не нужна —
-         сразу панель готовности хоста (без кубиков) */
-      if (map.mode === 'skill' || map.mapless) s.rollOffWinner = s.players.find((p) => p.isHost)?.id ?? null;
-      log(soloMode && map.mode === 'skill'
-        ? `🧨 SKILL CHALLENGE! Играет только хост — ${SKILL_TURNS} случайных игр из рандомайзера. Остальные — зрители.`
-        : map.mapless
-          ? `🎲 ЧЕЛЛЕНДЖ БЕЗ КАРТЫ! Матчей: ${mlTotal}${map.mapless.random ? ' (рандомайзер)' : ''} — играет только хост (${sm} мин / ${st} поп.${map.startCoins !== undefined ? `, монет: ${sc0}` : ''}).`
-          : soloMode
-            ? `🧭 JOURNEY! Играет только хост (${sm} мин / ${st} поп.) — все остальные подключаются зрителями.`
-            : isJourneyLike(map.mode)
-              ? `🧭 TRIATHLON! У каждого: ${sm} мин и ${st} поп. Все фишки стартуют ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, тот и играет.`
-              : `Игра начинается! У каждого: ${sm} мин и ${st} поп. Бросок за первый ход…`);
+      /* БЕЗ КАРТЫ (старые челленджи без карты): жеребьёвка не нужна —
+         сразу панель готовности хоста (без кубиков). SKILL CHALLENGE — на карте, с жеребьёвкой. */
+      if (map.mapless) s.rollOffWinner = s.players.find((p) => p.isHost)?.id ?? null;
+      log(map.mode === 'rubg'
+        ? `🪂 RUBG! ${s.players.length} бойцов на борту. Самолёт летит — ПРЫГАЙТЕ, где хотите. Ресурс — полоска HP. Побеждает последний живой!`
+        : soloMode && map.mode === 'skill'
+          ? `🧨 SKILL CHALLENGE! Играет только хост — ${SKILL_TURNS} заданий на карте. Остальные — зрители.`
+          : map.mapless
+            ? `🎲 ЧЕЛЛЕНДЖ БЕЗ КАРТЫ! Матчей: ${mlTotal}${map.mapless.random ? ' (рандомайзер)' : ''} — играет только хост (${sm} мин / ${st} поп.${map.startCoins !== undefined ? `, монет: ${sc0}` : ''}).`
+            : soloMode
+              ? `🧭 JOURNEY! Играет только хост (${sm} мин / ${st} поп.) — все остальные подключаются зрителями.`
+              : isJourneyLike(map.mode)
+                ? `🧭 TRIATHLON! У каждого: ${sm} мин и ${st} поп. Все фишки стартуют ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, тот и играет.`
+                : `Игра начинается! У каждого: ${sm} мин и ${st} поп. Бросок за первый ход…`);
       break;
     }
     case 'roll': {
@@ -1129,6 +1178,48 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (prev && !stopped && !a.tp && Math.hypot(x - prev.x, y - prev.y) > CELL_PX * 2.5) break;
       s.journeyPos = s.journeyPos ?? {};
       s.journeyPos[p.id] = { x, y, dir: a.dir, ts: Date.now(), mv: a.mv !== false, tp: a.tp || undefined };
+      /* RUBG: вход в ячейку — ЛИЧНОЕ задание (никого не останавливает) или лутбокс.
+         Стелс слетает при входе в ячейку и при подборе предмета. */
+      if (map.mode === 'rubg' && s.rubg) {
+        const rg = s.rubg;
+        rg.jobs = rg.jobs ?? {};
+        rg.looted = rg.looted ?? [];
+        rg.stealth = rg.stealth ?? [];
+        for (let i = 0; i < map.cells.length; i++) {
+          const c = map.cells[i];
+          const r = cellRectOf(map, i);
+          if (!r) continue;
+          const inNew = x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+          if (!inNew) continue;
+          const inOld = !!prev && prev.x >= r.x && prev.x < r.x + r.w && prev.y >= r.y && prev.y < r.y + r.h;
+          if (inOld) continue; // уже стоял в ней — вход был раньше
+          p.pos = i;
+          if (!s.revealed.includes(i)) s.revealed.push(i);
+          if (c.type === 'loot') {
+            if (rg.looted.includes(i)) continue; // лутбокс одноразовый — вскрыт раньше
+            rg.looted.push(i);
+            const kind = rubgRandomKind();
+            (p.items ?? (p.items = [])).push(rubgMkItem(kind));
+            const meta = RUBG_ITEMS[kind];
+            rg.stealth = rg.stealth.filter((xid) => xid !== p.id); // подбор снимает стелс
+            p.stealth = false;
+            log(`📦 ${p.name} вскрыл ЛУТБОКС №${i + 1}: ${meta.icon} ${meta.name}${kind === 'steal' ? ` (${3} исп.)` : ''}`);
+            continue;
+          }
+          if (c.type === 'task') {
+            if (rg.jobs[p.id]) continue; // уже играешь личное задание
+            if (s.captured[i] === p.id) continue; // своя ячейка — отдых
+            if (s.broken?.[i]) continue; // разбитая пуста
+            const tk = cellTaskOf(s, map, i);
+            if (!tk) continue; // задания нет
+            rg.jobs[p.id] = { cellIdx: i, startedAt: Date.now() };
+            rg.stealth = rg.stealth.filter((xid) => xid !== p.id); // вход в ячейку снимает стелс
+            p.stealth = false;
+            log(`🎮 ${p.name} играет задание «${tk.title.slice(0, 30)}» — ЛИЧНО, остальные не ждут`);
+          }
+        }
+        break;
+      }
       /* пересёк ячейку задания? вход = прошлый центр был ВНЕ прямоугольника, новый — ВНУТРИ.
         КТО ПЕРВЫЙ пересёк — у того и задание: turn = этот игрок (все фишки замирают,
         остальные смотрят трансляцию — «всё как всегда»); после задания все снова ходят. */
@@ -1243,6 +1334,321 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       s.phase = 'over';
       s.winner = host.alive && !host.spect ? host.id : null;
       log(`🏆 ЧЕЛЛЕНДЖ ПРОЙДЕН! ${host.name} сыграл все ${s.mapless.total} матчей${s.winner ? ` — капитал ${coinsStr(host.coinsLeft ?? 0)}` : ''}`);
+      break;
+    }
+    /* ---------- RUBG (Retro Ultimate Battle Ground) — «ретро-PUBG» ----------
+       Самолёт, прыжки, ЛИЧНЫЕ задания без остановки других (доверие), полоска HP,
+       сжимающаяся зона, лутбоксы, стелс, атаки и кражи. Побеждает последний живой. */
+    case 'rubgJump': {
+      if (s.phase !== 'rollOff' || map.mode !== 'rubg' || !s.rubg?.plane) break;
+      const p = actor();
+      if (!p || p.spect || !p.alive) break;
+      const pl = s.rubg.plane;
+      if (pl.jumped.includes(a.id)) break;
+      const W = map.mw ?? map.cols * CELL_PX;
+      const H = map.mh ?? map.rows * CELL_PX;
+      const x = Math.max(16, Math.min(W - 16, Number(a.x) || 0));
+      const y = Math.max(16, Math.min(H - 16, Number(a.y) || 0));
+      /* точка должна лежать у линии полёта (под самолётом; запас 2 клетки — на пинг) */
+      const dxs = pl.x1 - pl.x0, dys = pl.y1 - pl.y0;
+      const len2 = dxs * dxs + dys * dys;
+      const t = Math.max(0, Math.min(1, ((x - pl.x0) * dxs + (y - pl.y0) * dys) / (len2 || 1)));
+      const distLine = Math.hypot(x - (pl.x0 + dxs * t), y - (pl.y0 + dys * t));
+      if (distLine > CELL_PX * 2) break; // далеко от линии — не прыгаем
+      pl.jumped.push(a.id);
+      s.journeyPos = s.journeyPos ?? {};
+      s.journeyPos[p.id] = { x, y, ts: Date.now(), mv: false };
+      log(`🪂 ${p.name} ПРЫГНУЛ из самолёта!`);
+      const roster = s.players.filter((q) => !q.spect);
+      if (roster.every((q) => pl.jumped.includes(q.id))) {
+        s.phase = 'playing';
+        const ph = RUBG_ZONE_PHASES[0];
+        const r0 = Math.hypot(W, H) / 2 * 0.75;
+        const tr = r0 * ph.mul;
+        const off = Math.max(0, r0 - tr) * 0.7;
+        const now = Date.now();
+        s.rubg.zone = {
+          cx: W / 2, cy: H / 2, r: r0,
+          sx: W / 2, sy: H / 2, sr: r0,
+          tx: Math.max(0, Math.min(W, W / 2 + (Math.random() * 2 - 1) * off)),
+          ty: Math.max(0, Math.min(H, H / 2 + (Math.random() * 2 - 1) * off)),
+          tr,
+          phase: 'wait', phaseStart: now, phaseEnd: now + ph.wait * 1000,
+          idx: 0, dps: ph.dps, lastTick: now,
+        };
+        log(`🚀 ВЫСАДКА ЗАВЕРШЕНА — все на земле! Безопасная зона: сжатие через ${ph.wait} с. Ищите задания и лутбоксы!`);
+      }
+      break;
+    }
+    case 'rubgTick': {
+      const host = s.players.find((p) => p.isHost);
+      if (map.mode !== 'rubg' || !s.rubg || !host || a.id !== host.id) break;
+      const rg = s.rubg;
+      const now = Date.now();
+      const W = map.mw ?? map.cols * CELL_PX;
+      const H = map.mh ?? map.rows * CELL_PX;
+      /* фаза полёта: неспрыгнувших высаживаем в конце линии через 8 с после прилёта */
+      if (s.phase === 'rollOff' && rg.plane) {
+        const pl = rg.plane;
+        const flightMs = (Math.hypot(pl.x1 - pl.x0, pl.y1 - pl.y0) / pl.speed) * 1000;
+        if (now > pl.startAt + flightMs + 8000) {
+          const late = s.players.filter((q) => !q.spect && !pl.jumped.includes(q.id));
+          for (const q of late) {
+            pl.jumped.push(q.id);
+            s.journeyPos = s.journeyPos ?? {};
+            s.journeyPos[q.id] = { x: pl.x1, y: pl.y1, ts: now, mv: false };
+            log(`🪂 ${q.name} высажен принудительно (не прыгнул)`);
+          }
+        }
+        if (s.players.filter((q) => !q.spect).every((q) => pl.jumped.includes(q.id))) {
+          s.phase = 'playing';
+          log('🚀 ВЫСАДКА ЗАВЕРШЕНА — все на земле!');
+        } else break; // ещё летим — остальное не тикает
+      }
+      if (s.phase !== 'playing') break;
+      rg.jobs = rg.jobs ?? {}; rg.looted = rg.looted ?? []; rg.stealth = rg.stealth ?? [];
+      rg.steals = rg.steals ?? {}; rg.stopCd = rg.stopCd ?? {};
+      /* зависшие кражи: время давно вышло — закрываем как провал */
+      for (const [vid, st] of Object.entries(rg.steals)) {
+        if (now - st.startedAt > st.dur * 1000 + 2500) {
+          delete rg.steals[vid];
+          const th = s.players.find((q) => q.id === st.thief);
+          if (th) { th.stealth = false; rg.stealth = rg.stealth.filter((x) => x !== th.id); }
+          log(`💨 Кража у ${s.players.find((q) => q.id === vid)?.name ?? '?'} сорвалась — вор ушёл ни с чем`);
+        }
+      }
+      /* ЗОНА: фазы, сжатие, урон вне круга */
+      const z = rg.zone;
+      if (z) {
+        const ph = RUBG_ZONE_PHASES[Math.min(z.idx, RUBG_ZONE_PHASES.length - 1)];
+        if (z.phase === 'wait' && now >= z.phaseEnd && z.idx < RUBG_ZONE_PHASES.length) {
+          z.phase = 'shrink';
+          z.sx = z.cx; z.sy = z.cy; z.sr = z.r;
+          z.phaseStart = now;
+          z.phaseEnd = now + ph.shrink * 1000;
+          log('⚠ ЗОНА СЖИМАЕТСЯ! Беги в круг!');
+        } else if (z.phase === 'shrink') {
+          const t = Math.max(0, Math.min(1, (now - z.phaseStart) / Math.max(1, z.phaseEnd - z.phaseStart)));
+          z.cx = z.sx + (z.tx - z.sx) * t;
+          z.cy = z.sy + (z.ty - z.sy) * t;
+          z.r = z.sr + (z.tr - z.sr) * t;
+          if (now >= z.phaseEnd) {
+            z.cx = z.tx; z.cy = z.ty; z.r = z.tr;
+            z.idx = Math.min(z.idx + 1, RUBG_ZONE_PHASES.length - 1);
+            const np = RUBG_ZONE_PHASES[z.idx];
+            z.phase = 'wait';
+            z.phaseStart = now;
+            z.phaseEnd = now + np.wait * 1000;
+            z.dps = np.dps;
+            const ntr = z.r * np.mul;
+            const off = Math.max(0, z.r - ntr) * 0.7;
+            z.sx = z.cx; z.sy = z.cy; z.sr = z.r;
+            z.tx = Math.max(0, Math.min(W, z.cx + (Math.random() * 2 - 1) * off));
+            z.ty = Math.max(0, Math.min(H, z.cy + (Math.random() * 2 - 1) * off));
+            z.tr = ntr;
+            log(z.r <= 1 ? `☠ Зона закрыла ВСЮ карту — HP тает у всех по ${np.dps}%/с!` : `⭕ Зона сузилась — следующее сжатие через ${np.wait} с (вне зоны ${np.dps}%/с)`);
+          }
+        }
+        /* урон вне зоны (по интерполированному кругу) */
+        const dt = Math.min(6, Math.max(0, (now - z.lastTick) / 1000));
+        z.lastTick = now;
+        if (dt > 0.2) {
+          for (const p of s.players) {
+            if (!p.alive || p.spect) continue;
+            const px = playerPx(s, map, p.id);
+            if (!px) continue;
+            if (Math.hypot(px.x - z.cx, px.y - z.cy) > z.r) {
+              p.hp = Math.max(0, (p.hp ?? RUBG_HP_MAX) - z.dps * dt);
+            }
+          }
+        }
+      }
+      checkElim();
+      break;
+    }
+    case 'rubgJobDone': {
+      if (s.phase !== 'playing' || map.mode !== 'rubg' || !s.rubg) break;
+      const p = actor();
+      const rg = s.rubg;
+      rg.jobs = rg.jobs ?? {};
+      const job = p ? rg.jobs[p.id] : undefined;
+      if (!p || !job || job.cellIdx !== a.cellIdx) break;
+      delete rg.jobs[p.id];
+      if (a.win) {
+        p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? RUBG_HP_MAX) + RUBG_WIN_HP);
+        const kind = rubgRandomKind();
+        (p.items ?? (p.items = [])).push(rubgMkItem(kind));
+        s.captured[a.cellIdx] = p.id; // мгновенный хозяин ячейки (своё задание в RUBG не предлагается)
+        log(`🏆 ${p.name} ПРОШЁЛ задание №${a.cellIdx + 1}: +${RUBG_WIN_HP}% HP, трофей ${RUBG_ITEMS[kind].icon} ${RUBG_ITEMS[kind].name} — HP ${p.hp}%`);
+      } else {
+        p.hp = Math.max(0, (p.hp ?? RUBG_HP_MAX) - RUBG_LOSE_HP);
+        log(`💢 ${p.name} проиграл задание №${a.cellIdx + 1}: −${RUBG_LOSE_HP}% HP — HP ${p.hp}%`);
+      }
+      checkElim();
+      break;
+    }
+    case 'rubgJobLeave': {
+      if (map.mode !== 'rubg' || !s.rubg) break;
+      const rg = s.rubg;
+      rg.jobs = rg.jobs ?? {};
+      const p = actor();
+      const job = p ? rg.jobs[p.id] : undefined;
+      if (!p || !job || job.cellIdx !== a.cellIdx) break;
+      delete rg.jobs[p.id];
+      log(`🚶 ${p.name} отошёл от задания №${a.cellIdx + 1} — можно зайти снова`);
+      break;
+    }
+    case 'rubgUseItem': {
+      if (map.mode !== 'rubg' || !s.rubg) break;
+      const p = actor();
+      if (!p || !p.alive || p.spect) break;
+      const inv = p.items ?? (p.items = []);
+      const ii = inv.findIndex((x) => x.id === a.itemId);
+      if (ii < 0) break;
+      const meta = RUBG_ITEMS[inv[ii].kind];
+      if (meta.hp <= 0 || meta.radius > 0) break; // только хилки
+      if ((p.hp ?? 0) >= RUBG_HP_MAX) break; // полоска полна
+      inv.splice(ii, 1);
+      p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? 0) + meta.hp);
+      log(`${meta.icon} ${p.name} использует «${meta.name}»: +${meta.hp}% HP — HP ${p.hp}%`);
+      break;
+    }
+    case 'rubgShoot': {
+      if (s.phase !== 'playing' || map.mode !== 'rubg' || !s.rubg) break;
+      const p = actor();
+      if (!p || !p.alive || p.spect) break;
+      const rg = s.rubg;
+      const inv = p.items ?? (p.items = []);
+      const ii = inv.findIndex((x) => x.id === a.itemId);
+      if (ii < 0) break;
+      const kind = inv[ii].kind;
+      const meta = RUBG_ITEMS[kind];
+      if (meta.radius <= 0) break; // не оружие
+      const target = s.players.find((x) => x.id === a.targetId);
+      if (!target || !target.alive || target.spect || target.id === p.id) break;
+      if ((rg.stealth ?? []).includes(target.id)) break; // в стелсе не видно — стрелять нельзя
+      const tp = playerPx(s, map, target.id);
+      const mp = playerPx(s, map, p.id);
+      if (!tp || !mp) break;
+      const dist = Math.hypot(tp.x - mp.x, tp.y - mp.y);
+      const range = meta.radius * CELL_PX;
+      if (dist > range) break; // вне радиуса оружия
+      /* по цели в ЛИЧНОМ задании — 100% попадание; по ходячей — шанс от расстояния */
+      const busy = !!(rg.jobs ?? {})[target.id];
+      const hit = busy ? true : Math.random() < Math.max(0.15, 1 - dist / range);
+      inv.splice(ii, 1); // оружие одноразовое
+      p.stealth = false; // выстрел раскрывает
+      rg.stealth = (rg.stealth ?? []).filter((x) => x !== p.id);
+      if (hit) {
+        target.hp = Math.max(0, (target.hp ?? RUBG_HP_MAX) - meta.hp);
+        log(`${meta.icon} ${p.name} ПОПАЛ по ${target.name} (${meta.name}, ${Math.round(dist / CELL_PX)} кл): −${meta.hp}% HP — у цели ${target.hp}%${busy ? ' (играл в задание — 100%)' : ''}`);
+      } else {
+        log(`💨 ${p.name} промахнулся по ${target.name} (${meta.name}, ${Math.round(dist / CELL_PX)} кл)`);
+      }
+      checkElim();
+      break;
+    }
+    case 'rubgStealStart': {
+      if (s.phase !== 'playing' || map.mode !== 'rubg' || !s.rubg) break;
+      const p = actor();
+      if (!p || !p.alive || p.spect) break;
+      const rg = s.rubg;
+      rg.jobs = rg.jobs ?? {}; rg.steals = rg.steals ?? {};
+      const victim = s.players.find((x) => x.id === a.victimId);
+      if (!victim || !victim.alive || victim.id === p.id) break;
+      if (!rg.jobs[victim.id]) break; // красть можно только у играющего в задание
+      if (rg.steals[victim.id]) break; // у этой жертвы уже воруются
+      const vp = playerPx(s, map, victim.id);
+      const mp = playerPx(s, map, p.id);
+      if (!vp || !mp) break;
+      if (Math.hypot(vp.x - mp.x, vp.y - mp.y) > RUBG_STEAL_RANGE * CELL_PX) break; // нужно подойти ВПЛОТНУЮ
+      const card = (p.items ?? []).find((x) => x.kind === 'steal' && (x.uses ?? 0) > 0);
+      if (!card) break; // карты воровства нет
+      /* чем дольше держал кнопку — тем больше время в кармане (1..8 с) */
+      const dur = Math.min(8, Math.max(1, 1 + Math.max(0, a.holdMs) / 1000));
+      rg.steals[victim.id] = { thief: p.id, victim: victim.id, dur, startedAt: Date.now() };
+      log(`🤏 ${p.name} запускает руку в карман ${victim.name} (${dur.toFixed(1)} с)!`);
+      break;
+    }
+    case 'rubgStealPick': {
+      if (map.mode !== 'rubg' || !s.rubg) break;
+      const rg = s.rubg;
+      rg.steals = rg.steals ?? {};
+      const st = rg.steals[a.victimId];
+      if (!st || st.thief !== a.id) break;
+      if (Date.now() - st.startedAt > st.dur * 1000 + 700) break; // время вышло
+      const thief = s.players.find((x) => x.id === st.thief);
+      const victim = s.players.find((x) => x.id === st.victim);
+      if (!thief || !victim) break;
+      const vinv = victim.items ?? (victim.items = []);
+      const ii = vinv.findIndex((x) => x.id === a.itemId);
+      if (ii < 0) break;
+      const [stolen] = vinv.splice(ii, 1);
+      (thief.items ?? (thief.items = [])).push(stolen);
+      /* карта воровства: −1 использование (3 всего); в 0 — сгорела */
+      const card = (thief.items ?? []).find((x) => x.kind === 'steal' && (x.uses ?? 0) > 0);
+      if (card) {
+        card.uses = (card.uses ?? 1) - 1;
+        if ((card.uses ?? 0) <= 0) thief.items = (thief.items ?? []).filter((x) => x.id !== card.id);
+      }
+      delete rg.steals[a.victimId];
+      const meta = RUBG_ITEMS[stolen.kind];
+      log(`🤏 ${thief.name} ВЫТАЩИЛ из кармана ${victim.name}: ${meta.icon} ${meta.name}!`);
+      break;
+    }
+    case 'rubgStealFail': {
+      if (map.mode !== 'rubg' || !s.rubg) break;
+      const rg = s.rubg;
+      rg.steals = rg.steals ?? {}; rg.stealth = rg.stealth ?? [];
+      const st = rg.steals[a.victimId];
+      if (!st || st.thief !== a.id) break;
+      delete rg.steals[a.victimId];
+      const thief = s.players.find((x) => x.id === st.thief);
+      if (thief) {
+        thief.stealth = false; // неудачная попытка раскрывает
+        rg.stealth = rg.stealth.filter((x) => x !== thief.id);
+      }
+      log(`💨 Кража у ${s.players.find((x) => x.id === a.victimId)?.name ?? '?'} провалилась — вор раскрыт`);
+      break;
+    }
+    case 'rubgStopThief': {
+      if (map.mode !== 'rubg' || !s.rubg) break;
+      const p = actor();
+      if (!p || !p.alive) break;
+      const rg = s.rubg;
+      rg.steals = rg.steals ?? {}; rg.stopCd = rg.stopCd ?? {}; rg.stealth = rg.stealth ?? [];
+      const now = Date.now();
+      const last = rg.stopCd[p.id] ?? 0;
+      if (now - last < RUBG_STOP_CD * 1000) break; // анти-спам: 15 с между нажатиями
+      rg.stopCd[p.id] = now;
+      const st = rg.steals[p.id];
+      if (st) {
+        delete rg.steals[p.id];
+        const thief = s.players.find((x) => x.id === st.thief);
+        if (thief) {
+          thief.stealth = false;
+          rg.stealth = rg.stealth.filter((x) => x !== thief.id);
+        }
+        log(`🚨 ${p.name} ПОЙМАЛ вора за руку (${thief?.name ?? '?'}) — кража сорвана!`);
+      } else {
+        log(`✋ ${p.name} проверил карманы — вора не было`);
+      }
+      break;
+    }
+    case 'rubgStealth': {
+      if (map.mode !== 'rubg' || !s.rubg) break;
+      const p = actor();
+      if (!p || !p.alive || p.spect) break;
+      const rg = s.rubg;
+      rg.stealth = rg.stealth ?? [];
+      if (rg.stealth.includes(p.id)) break; // уже в стелсе
+      const inv = p.items ?? (p.items = []);
+      const ci = inv.findIndex((x) => x.kind === 'stealth');
+      if (ci < 0) break; // карты стелса нет
+      inv.splice(ci, 1);
+      p.stealth = true;
+      rg.stealth.push(p.id);
+      log(`👻 ${p.name} РАСТВОРИЛСЯ в стелсе — выйдет при входе в ячейку, подборе, выстреле или неудачной краже`);
       break;
     }
     case 'chooseMode': {

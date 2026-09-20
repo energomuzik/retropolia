@@ -308,6 +308,8 @@ const SKULL = ['.111.', '11111', '10101', '11111', '.1.1.'];
 const PAD = ['.111.', '11111', '11111', '.111.'];
 const QUIZ = ['.111.', '1..11', '..11.', '..1..', '.....', '..1..'];
 const REST = ['11111', '...1.', '..1..', '.1...', '11111']; // буква Z — «передышка»
+const BOX = ['11111', '1...1', '11111', '.1.1.', '11111']; // лутбокс RUBG
+const PLANE = ['...1...', '..111..', '1111111', '..111..', '..1.1..']; // схематичный самолёт (вид сверху)
 const FLAG = ['1....', '1111.', '11111', '1111.', '1....'];
 const flagIcon = (ctx: CanvasRenderingContext2D, s: number, color: string) => {
   px(ctx, -2 * s, -2.5 * s, s, FLAG, color);
@@ -666,9 +668,9 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     }
 
     const base = isStart ? '#12351f'
-      : cell.type === 'bonus' ? '#0d3f2e' : cell.type === 'trap' ? '#43101c' : cell.type === 'rest' ? '#1a2032' : '#232741';
+      : cell.type === 'bonus' ? '#0d3f2e' : cell.type === 'trap' ? '#43101c' : cell.type === 'rest' ? '#1a2032' : cell.type === 'loot' ? '#4a2a08' : '#232741';
     const edge = cell.color || (isStart ? '#ffcf3f'
-      : cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : cell.type === 'rest' ? '#7c86b8' : '#8f97c9');
+      : cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : cell.type === 'rest' ? '#7c86b8' : cell.type === 'loot' ? '#ff8b3f' : '#8f97c9');
     ctx.fillStyle = base;
     ctx.fillRect(-W / 2, -H / 2, W, H);
 
@@ -725,8 +727,8 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
           ctx.fillText('!', W / 2 - 9, -H / 2 + (cell.color ? 30 : 16));
         }
       } else {
-        const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : cell.type === 'rest' ? REST : QUIZ;
-        const iconColor = cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : cell.type === 'rest' ? '#7c86b8' : '#5aa9ff';
+        const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : cell.type === 'rest' ? REST : cell.type === 'loot' ? BOX : QUIZ;
+        const iconColor = cell.type === 'bonus' ? '#2ee6a8' : cell.type === 'trap' ? '#ff5d73' : cell.type === 'rest' ? '#7c86b8' : cell.type === 'loot' ? '#ff8b3f' : '#5aa9ff';
         const cimg = cell.imageId ? getImage(cell.imageId) : null;
         if (cimg) {
           // картинка на бонусе/ловушке/квизе — как на заданиях; иконка типа в углу, чтобы ячейка читалась
@@ -752,7 +754,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         ctx.fillStyle = '#e9ecff';
         ctx.font = '8px "Press Start 2P", monospace';
         ctx.textAlign = 'center';
-        const name = cell.label || (cell.type === 'bonus' ? 'БОНУС' : cell.type === 'trap' ? 'ЛОВУШКА' : cell.type === 'rest' ? 'ОТДЫХ' : 'КВИЗ');
+        const name = cell.label || (cell.type === 'bonus' ? 'БОНУС' : cell.type === 'trap' ? 'ЛОВУШКА' : cell.type === 'rest' ? 'ОТДЫХ' : cell.type === 'loot' ? 'ЛУТБОКС' : 'КВИЗ');
         ctx.fillText(name.slice(0, Math.floor((W - 10) / 8)).toUpperCase(), 0, H / 2 - 8);
       }
       if (o.showNumbers && cell.n > 0 && !cell.nonumber) {
@@ -783,8 +785,8 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(cellImg, -11, -13, 22, 22);
       } else {
-        const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : cell.type === 'quiz' ? QUIZ : cell.type === 'rest' ? REST : PAD;
-        const iconColor = cell.type === 'task' ? '#ffcf3f' : cell.type === 'quiz' ? '#5aa9ff' : cell.type === 'rest' ? '#7c86b8' : edge;
+        const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : cell.type === 'quiz' ? QUIZ : cell.type === 'rest' ? REST : cell.type === 'loot' ? BOX : PAD;
+        const iconColor = cell.type === 'task' ? '#ffcf3f' : cell.type === 'quiz' ? '#5aa9ff' : cell.type === 'rest' ? '#7c86b8' : cell.type === 'loot' ? '#ff8b3f' : edge;
         px(ctx, -icon[0].length * 2, -14, 4, icon, iconColor);
       }
       if (cell.label) {
@@ -1043,5 +1045,133 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     ctx.restore();
   }
 
+  ctx.restore();
+}
+
+/* ---------- RUBG: оверлей поверх поля (зона, самолёт, HP-бары) ----------
+   Вызывается из игрового экрана сразу после drawBoard — сама ставит ту же
+   трансформацию вида. Зона в фазе сжатия интерполируется клиентскими часами. */
+export function drawRubgOverlay(
+  ctx: CanvasRenderingContext2D,
+  opts: {
+    view: { x: number; y: number; zoom: number };
+    width: number; height: number;
+    time: number;
+    mapW: number; mapH: number;
+    zone: import('./types').RubgZone | null;
+    plane: import('./types').RubgPlane | null;
+    bars: { x: number; y: number; hp: number; playing: boolean; hidden: boolean }[];
+  },
+) {
+  const { view, width, height } = opts;
+  ctx.save();
+  ctx.translate(width / 2, height / 2);
+  ctx.scale(view.zoom, view.zoom);
+  ctx.translate(-view.x, -view.y);
+
+  /* ЗОНА: затемнение вне круга + белая граница текущего + пунктир цели */
+  const z = opts.zone;
+  if (z) {
+    let cx = z.cx, cy = z.cy, r = z.r;
+    if (z.phase === 'shrink') {
+      const t = Math.max(0, Math.min(1, (Date.now() - z.phaseStart) / Math.max(1, z.phaseEnd - z.phaseStart)));
+      cx = z.sx + (z.tx - z.sx) * t;
+      cy = z.sy + (z.ty - z.sy) * t;
+      r = z.sr + (z.tr - z.sr) * t;
+    }
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(-60, -60, opts.mapW + 120, opts.mapH + 120);
+    ctx.arc(cx, cy, Math.max(1, r), 0, Math.PI * 2, true); // вырез круга — краснеет всё ВОКРУГ
+    ctx.fillStyle = 'rgba(120,20,40,0.32)';
+    ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, Math.max(1, r), 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+    ctx.lineWidth = 4;
+    ctx.stroke();
+    if (z.phase === 'wait' && z.tr < z.r) {
+      ctx.beginPath();
+      ctx.arc(z.tx, z.ty, Math.max(1, z.tr), 0, Math.PI * 2);
+      ctx.setLineDash([14, 10]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
+
+  /* САМОЛЁТ (фаза высадки): линия маршрута + схематичный самолёт с тенью */
+  const pl = opts.plane;
+  if (pl) {
+    const now = Date.now();
+    const len = Math.hypot(pl.x1 - pl.x0, pl.y1 - pl.y0);
+    const d = Math.min(len, Math.max(0, ((now - pl.startAt) / 1000) * pl.speed));
+    const fx = pl.x0 + (pl.x1 - pl.x0) * (len ? d / len : 0);
+    const fy = pl.y0 + (pl.y1 - pl.y0) * (len ? d / len : 0);
+    const ang = Math.atan2(pl.y1 - pl.y0, pl.x1 - pl.x0);
+    ctx.save();
+    ctx.setLineDash([18, 12]);
+    ctx.strokeStyle = 'rgba(255,207,63,0.35)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(pl.x0, pl.y0);
+    ctx.lineTo(pl.x1, pl.y1);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.save();
+    ctx.translate(fx + 14, fy + 22);
+    ctx.rotate(ang);
+    ctx.fillStyle = 'rgba(0,0,0,0.22)';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 30, 9, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.translate(fx, fy);
+    ctx.rotate(ang);
+    ctx.fillStyle = '#e9ecff';
+    ctx.beginPath();
+    ctx.moveTo(34, 0); ctx.lineTo(-22, -8); ctx.lineTo(-28, 0); ctx.lineTo(-22, 8); ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(6, 0); ctx.lineTo(-14, -26); ctx.lineTo(-24, -26); ctx.lineTo(-10, 0); ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(6, 0); ctx.lineTo(-14, 26); ctx.lineTo(-24, 26); ctx.lineTo(-10, 0); ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-24, 0); ctx.lineTo(-32, -13); ctx.lineTo(-36, -13); ctx.lineTo(-30, 0); ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-24, 0); ctx.lineTo(-32, 13); ctx.lineTo(-36, 13); ctx.lineTo(-30, 0); ctx.closePath(); ctx.fill();
+    const blink = 0.5 + 0.5 * Math.sin(opts.time / 130);
+    ctx.fillStyle = `rgba(255,93,115,${(0.35 + 0.65 * blink).toFixed(2)})`;
+    ctx.beginPath();
+    ctx.arc(8, 0, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    ctx.restore();
+  }
+
+  /* HP-бары и маркер «играет задание» над фишками (стелс — бар не рисуем) */
+  for (const b of opts.bars) {
+    if (b.hidden) continue;
+    ctx.save();
+    ctx.translate(b.x, b.y - 32);
+    const W = 40, H = 7;
+    ctx.fillStyle = 'rgba(7,9,18,0.82)';
+    ctx.fillRect(-W / 2 - 1, -1, W + 2, H + 2);
+    const frac = Math.max(0, Math.min(1, b.hp / 100));
+    ctx.fillStyle = frac > 0.5 ? '#35d46f' : frac > 0.25 ? '#ffcf3f' : '#ff5d73';
+    ctx.fillRect(-W / 2, 0, W * frac, H);
+    if (b.playing) {
+      ctx.font = '12px monospace';
+      ctx.textAlign = 'center';
+      ctx.globalAlpha = 0.65 + 0.35 * Math.sin(opts.time / 220);
+      ctx.fillText('▶', 0, -7);
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+  }
   ctx.restore();
 }

@@ -130,6 +130,7 @@ const CELL_TYPES: { key: CellType; label: string; cls: string }[] = [
   { key: 'trap', label: 'Лов.', cls: 'border-coral text-coral bg-coral/10' },
   { key: 'quiz', label: 'Квиз', cls: 'border-sky text-sky bg-sky/10' },
 ];
+const LOOT_CELL_TYPE: { key: CellType; label: string; cls: string } = { key: 'loot', label: 'Лут.', cls: 'border-[#ff8b3f] text-[#ff8b3f] bg-[#ff8b3f]/10' }; // ЛУТБОКС — только в режиме RUBG
 
 export default function MapEditor() {
   const { maps, tiles, tokens, anims, bossAnims, challenges, setScreen, refresh, toast } = useApp();
@@ -2107,6 +2108,31 @@ export default function MapEditor() {
         return;
       }
     }
+    /* RUBG: задания + лутбоксы. Квизы/бонусы/ловушки/отдых запрещены (лутбоксы заменяют бонусы/ловушки),
+       монеты запрещены — в RUBG ресурс ОДИН: полоска HP */
+    if ((map.mode ?? 'classic') === 'rubg') {
+      const bad = map.cells.filter((c) => c.type === 'quiz' || c.type === 'bonus' || c.type === 'trap' || c.type === 'rest').length;
+      if (bad > 0) {
+        sfx.fail();
+        toast(`RUBG: ячейки квизов/бонусов/штрафов/отдыха недоступны (лутбоксы заменяют бонусы/ловушки) — на карте ${bad} таких. Уберите их или измените режим`, 'err');
+        return;
+      }
+      const lootCnt = map.cells.filter((c) => c.type === 'loot').length;
+      if (lootCnt === 0) {
+        sfx.fail();
+        toast('RUBG: на карте нет ни одного ЛУТБОКСА — игрокам нечем лечиться и нечем атаковать. Поставьте лутбоксы (тип ячейки «Лут.»)', 'err');
+        return;
+      }
+      if (map.startCoins !== undefined) {
+        sfx.fail();
+        toast('RUBG: ресурс может быть только ОДИН — полоска HP. Выключите монеты в панели «Ресурсы игроков»', 'err');
+        return;
+      }
+    } else if (map.cells.some((c) => c.type === 'loot')) {
+      sfx.fail();
+      toast('Ячейки-лутбоксы работают только в режиме RUBG — измените тип ячеек или включите режим RUBG', 'err');
+      return;
+    }
     /* НЕВИДИМЫЕ СТЕНЫ работают только в TRIATHLON/JOURNEY: карта со стенами в другом режиме не завершается.
      Удалить все стены разом — кнопка в левой панели «Невидимые стены» */
     const wallCnt = (map.walls ?? []).length;
@@ -2546,9 +2572,10 @@ export default function MapEditor() {
                         <span className="text-[11px] text-paper">Только монеты — без времени/попыток (0 монет = вылет)</span>
                       </label>
                       <p className="text-[9px] text-faint leading-tight">Пропуск 0 бр = бесплатный. В монетном режиме перезапуски задания бесплатны. Квизы при включённых монетах платят бронзой вместо минут/попыток.</p>
+                    <p className="text-[9px] text-faint leading-tight">Ресурс может быть ТОЛЬКО ОДИН: включённые монеты заменяют выбор «время/попытки» в окне задания. В режиме RUBG ресурс всегда полоска HP — монеты запрещены.</p>
                     </div>
                   ) : (
-                    <p className="text-[9px] text-faint leading-tight">Включите — и у игроков появится капитал: награды за победы и плату за пропуски можно настроить здесь или мастером «Создать челлендж».</p>
+                    <p className="text-[9px] text-faint leading-tight">Включите — и монеты станут ЕДИНСТВЕННЫМ ресурсом (вместо времени/попыток): награды за победы, плата за пропуски, квизы платят бронзой.</p>
                   )}
                 </div>
               </div>
@@ -2578,15 +2605,21 @@ export default function MapEditor() {
                       {challenges.map((cc: CustomChallenge) => {
                         const on = map.customId === cc.id;
                         return (
-                          <button
-                            key={cc.id}
-                            onClick={() => { applyChallenge(cc); sfx.coin(); }}
-                            title={`Применить к карте: ${challengeSummaryLines(cc.answers).join(' · ')}`}
-                            className={`w-full text-left border-2 px-2.5 py-2 cursor-pointer transition-colors ${on ? 'border-[#ff8b3f] bg-[#ff8b3f]/10' : 'border-edge bg-panel hover:border-edge2'}`}
-                          >
-                            <div className={`font-display text-[11px] uppercase ${on ? 'text-[#ff8b3f]' : 'text-paper'}`}>{on ? '✓ ' : ''}{cc.name}</div>
-                            <div className="text-[9px] text-faint mt-0.5">{cc.resolved.mapless ? 'без карты · играется из «Создания игры»' : `свой режим · ${MAP_MODES.find((x) => x.id === cc.resolved.baseMode)?.name ?? cc.resolved.baseMode}`}</div>
-                          </button>
+                          <div key={cc.id} className="flex items-stretch gap-1">
+                            <button
+                              onClick={() => { applyChallenge(cc); sfx.coin(); }}
+                              title={`Применить к карте: ${challengeSummaryLines(cc.answers).join(' · ')}`}
+                              className={`min-w-0 flex-1 text-left border-2 px-2.5 py-2 cursor-pointer transition-colors ${on ? 'border-[#ff8b3f] bg-[#ff8b3f]/10' : 'border-edge bg-panel hover:border-edge2'}`}
+                            >
+                              <div className={`font-display text-[11px] uppercase ${on ? 'text-[#ff8b3f]' : 'text-paper'}`}>{on ? '✓ ' : ''}{cc.name}</div>
+                              <div className="text-[9px] text-faint mt-0.5">{cc.resolved.mapless ? 'без карты (старый формат v0.36.0)' : `свой режим · ${MAP_MODES.find((x) => x.id === cc.resolved.baseMode)?.name ?? cc.resolved.baseMode}`}</div>
+                            </button>
+                            <HoldDeleteButton
+                              onFire={() => { void (async () => { await idbDel('challenges', cc.id); await refresh(); sfx.fail(); toast(`Челлендж «${cc.name}» удалён`, 'ok'); })(); }}
+                              label={`челлендж «${cc.name}»`}
+                              className="shrink-0 w-7 flex items-center justify-center border-2 border-edge text-faint hover:text-coral hover:border-coral/60 cursor-pointer"
+                            >{Ic.cross(10)}</HoldDeleteButton>
+                          </div>
                         );
                       })}
                     </div>
@@ -3036,8 +3069,8 @@ export default function MapEditor() {
 
                   <div>
                     <div className="tick-label mb-1.5">Тип</div>
-                    <div className="grid grid-cols-6 gap-1">
-                      {CELL_TYPES.map((t) => (
+                    <div className="grid grid-cols-7 gap-1">
+                      {[...CELL_TYPES, ...((map.mode ?? 'classic') === 'rubg' ? [LOOT_CELL_TYPE] : [])].map((t) => (
                         <button
                           key={t.key}
                           onClick={() => { updCell(selCell, { type: t.key }); renumber(); dirtyRef.current = true; }}
@@ -3052,6 +3085,9 @@ export default function MapEditor() {
                     )}
                     {selCellDef.type === 'rest' && (
                       <p className="text-[10px] text-sky mt-1 leading-tight">Пустая клетка-передышка: ничего не происходит, ход просто переходит дальше. Ром не нужен — «без рома» не считается.</p>
+                    )}
+                    {selCellDef.type === 'loot' && (
+                      <p className="text-[10px] text-[#ff8b3f] mt-1 leading-tight">ЛУТБОКС (только RUBG): одноразовый. Зашедший игрок вскрыает его и получает случайный предмет: фляжку/аптечку/ящик (лечение), пистолет/ПП/снайперку (атаки), карту воровства (3 исп.) или карту стелса.</p>
                     )}
                     <button
                       onClick={() => {
