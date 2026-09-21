@@ -1151,6 +1151,26 @@ export function drawRubgOverlay(
     ctx.arc(8, 0, 3.5, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
+    /* ТОЧКА ПРЫЖКА: пульсирующий крест-прицел под самолётом — прыжок приземлит
+       ИМЕННО сюда (точка под фюзеляжем в момент нажатия «ПРЫГНУТЬ») */
+    const pulseR = 15 + 4 * Math.sin(opts.time / 220);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,207,63,0.85)';
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([7, 6]);
+    ctx.beginPath();
+    ctx.arc(fx, fy, pulseR, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(fx - pulseR - 10, fy); ctx.lineTo(fx + pulseR + 10, fy);
+    ctx.moveTo(fx, fy - pulseR - 10); ctx.lineTo(fx, fy + pulseR + 10);
+    ctx.stroke();
+    ctx.font = 'bold 11px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(255,207,63,0.95)';
+    ctx.fillText('ПРЫЖОК ЗДЕСЬ', fx, fy + pulseR + 22);
+    ctx.restore();
     ctx.restore();
   }
 

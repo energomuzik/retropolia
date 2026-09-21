@@ -9,7 +9,7 @@ import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, GameMap, PlacedAnim, PlacedBoss, PlateBg, PortalZone, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
-import { bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, MAP_MODES, MAX_FIELD, PLATE_SIZES, tileRectOf } from '../types';
+import { bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, MAP_MODES, MAX_FIELD, PLATE_SIZES, tileRectOf, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, rubgFmtZone } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
 
@@ -2602,23 +2602,79 @@ export default function MapEditor() {
                 )}
               </div>
 
-              {/* RUBG: время БЕЗОПАСНОЙ ЗОНЫ — минуты и секунды (выбор создателя карты) */}
+              {/* RUBG: БЕЗОПАСНАЯ ЗОНА — ПОДРОБНАЯ настройка: полное время + КАЖДАЯ ФАЗА
+                  (своя пауза, длительность сжатия и сужение радиуса в КЛЕТКАХ) */}
               {(map.mode ?? 'classic') === 'rubg' && (() => {
-                const zs = Math.max(30, Math.floor(map.zoneSec ?? 600));
+                const CPX = 64; // px в клетке поля
+                const mwL = map.mw ?? map.cols * CPX, mhL = map.mh ?? map.rows * CPX;
+                const r0L = Math.hypot(mwL, mhL) / 2 * 0.75;
+                const scaleL = Math.max(30, Math.floor(map.zoneSec ?? 600)) / RUBG_ZONE_TOTAL;
+                /* эффективные фазы: авторские (zonePhases) или дефолт (масштаб zoneSec),
+                   пересчитанные в КЛЕТКИ для показа */
+                let rrL = r0L;
+                const eff: { wait: number; shrink: number; dist: number }[] = map.zonePhases?.length
+                  ? map.zonePhases.map((p) => ({ wait: Math.max(0, Math.floor(p.wait || 0)), shrink: Math.max(5, Math.floor(p.shrink || 0)), dist: Math.max(0, Math.floor(p.dist || 0)) }))
+                  : RUBG_ZONE_PHASES.map((p) => {
+                      const nr = rrL * p.mul;
+                      const d = Math.max(0, Math.round((rrL - nr) / CPX));
+                      rrL = nr;
+                      return { wait: Math.round(p.wait * scaleL), shrink: Math.round(p.shrink * scaleL), dist: d };
+                    });
+                const totalL = eff.reduce((a, p) => a + p.wait + p.shrink, 0);
+                const setPhases = (ph: { wait: number; shrink: number; dist: number }[]) => updMap({ zonePhases: ph });
+                const rescale = (nt: number) => {
+                  const k = Math.max(30, nt) / Math.max(1, totalL);
+                  setPhases(eff.map((p) => ({ wait: Math.max(0, Math.round(p.wait * k)), shrink: Math.max(5, Math.round(p.shrink * k)), dist: p.dist })));
+                };
                 return (
                   <div>
                     <div className="tick-label mb-2">⭕ Безопасная зона · RUBG</div>
                     <div className="space-y-2">
+                      {/* Полное время: пересчитывает ВСЕ фазы пропорционально */}
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-[11px] text-dim shrink-0">Полное время зоны</span>
                         <div className="flex items-center gap-1">
-                          <Stepper value={Math.min(180, Math.floor(zs / 60))} onChange={(m) => updMap({ zoneSec: Math.max(30, m * 60 + (zs % 60)) })} min={0} max={180} suffix=" мин" />
-                          <Stepper value={zs % 60} onChange={(s) => updMap({ zoneSec: Math.max(30, Math.floor(zs / 60) * 60 + s) })} min={0} max={55} step={5} suffix=" с" />
+                          <Stepper value={Math.min(180, Math.floor(totalL / 60))} onChange={(m) => rescale(m * 60 + (totalL % 60))} min={0} max={180} suffix=" мин" />
+                          <Stepper value={totalL % 60} onChange={(sc) => rescale(Math.floor(totalL / 60) * 60 + sc)} min={0} max={55} step={5} suffix=" с" />
                         </div>
                       </div>
                       <p className="text-[9px] text-faint leading-tight">
-                        Время от появления зоны до ПОЛНОГО закрытия карты: все ожидания и сжатия растягиваются пропорционально, урон вне зоны не меняется.
-                        Для долгих партий (30 мин и больше) ставьте 30–45 мин. Минимум — 30 с, по умолчанию — 10 мин.
+                        Меняет время сразу для всех фаз (пропорционально). Ниже — ПОДРОБНАЯ настройка: у каждой фазы СВОЯ пауза, длительность сжатия и сужение в клетках. Урон вне зоны нарастает по фазам сам: {RUBG_ZONE_PHASES.map((p) => p.dps).join(' → ')} %/с.
+                      </p>
+                      {/* ФАЗЫ: пауза / сжатие / сужение каждой */}
+                      <div className="space-y-1.5">
+                        {eff.map((p, i) => {
+                          const dps = RUBG_ZONE_PHASES[Math.min(i, RUBG_ZONE_PHASES.length - 1)].dps;
+                          const upd = (patch: Partial<{ wait: number; shrink: number; dist: number }>) => {
+                            setPhases(eff.map((q, j) => (j === i ? { ...q, ...patch } : q)));
+                          };
+                          return (
+                            <div key={i} className="border-2 border-edge px-2 py-1.5 space-y-1">
+                              <div className="flex items-center justify-between text-[10px]">
+                                <span className="font-display uppercase text-paper">Фаза {i + 1}</span>
+                                <span className="font-pixel text-[8px] text-coral" title="Урон вне зоны в эту фазу">вне зоны −{dps}%/с</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[10px] text-dim shrink-0">Пауза до сжатия</span>
+                                <div className="flex items-center gap-1">
+                                  <Stepper value={Math.min(180, Math.floor(p.wait / 60))} onChange={(m) => upd({ wait: m * 60 + (p.wait % 60) })} min={0} max={180} suffix=" мин" />
+                                  <Stepper value={p.wait % 60} onChange={(sc) => upd({ wait: Math.floor(p.wait / 60) * 60 + sc })} min={0} max={55} step={5} suffix=" с" />
+                                </div>
+                              </div>
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[10px] text-dim shrink-0">Длительность сжатия</span>
+                                <Stepper value={Math.min(180, p.shrink)} onChange={(v) => upd({ shrink: v })} min={5} max={180} step={5} suffix=" с" />
+                              </div>
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[10px] text-dim shrink-0">Сужение радиуса</span>
+                                <Stepper value={Math.min(60, p.dist)} onChange={(v) => upd({ dist: v })} min={0} max={60} suffix=" кл" />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <p className="text-[9px] text-faint leading-tight">
+                        Итог: {rubgFmtZone(totalL)}. «Сужение» — на сколько КЛЕТОК уменьшится радиус в этой фазе (для большой карты шаг в 3–6 кл заметен; фаза с сужением по всему радиусу закроет карту целиком). Минимум полного времени — 30 с.
                       </p>
                     </div>
                   </div>

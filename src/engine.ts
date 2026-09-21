@@ -1,4 +1,4 @@
-import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, PlayerState, RubgItemKind, TaskDef, TradeOffer, TokenDir } from './types';
+import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, PlayerState, RubgItemKind, RubgZonePhasePlan, TaskDef, TradeOffer, TokenDir } from './types';
 import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, tileAt, tileRectOf, coinsStr, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, RUBG_ZONE_DEFAULT_SEC, rubgFmtZone, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx } from './types';
 import type { RubgItem } from './types';
 import type { JoyId } from './types';
@@ -321,17 +321,41 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     return total / RUBG_ZONE_TOTAL;
   };
 
+  /* RUBG: РАБОЧИЙ ПЛАН ФАЗ зоны в px поля. Авторские фазы (map.zonePhases: пауза/сжатие
+     в секундах, сужение в КЛЕТКАХ) — приоритет; иначе дефолтные фазы (mul-цепочка от r0),
+     растянутые настройкой zoneSec. Вызывается ОДИН раз при появлении зоны — план
+     сохраняется в состоянии зоны, дальше тик работает только с ним. */
+  const rubgBuildPlan = (r0: number): RubgZonePhasePlan[] => {
+    const custom = map.zonePhases;
+    if (custom && custom.length) {
+      return custom.slice(0, 24).map((p, i) => ({
+        wait: Math.max(0, Math.floor(p.wait || 0)),
+        shrink: Math.max(5, Math.floor(p.shrink || 0)),
+        dps: RUBG_ZONE_PHASES[Math.min(i, RUBG_ZONE_PHASES.length - 1)].dps,
+        distPx: Math.max(0, Math.floor(p.dist || 0)) * CELL_PX,
+      }));
+    }
+    const scale = rubgZoneScale();
+    let rr = r0;
+    return RUBG_ZONE_PHASES.map((p) => {
+      const nr = rr * p.mul;
+      const distPx = Math.max(0, rr - nr);
+      rr = nr;
+      return { wait: p.wait * scale, shrink: p.shrink * scale, dps: p.dps, distPx };
+    });
+  };
+
   /* RUBG: создать безопасную зону (первая фаза — ожидание сжатия). Вызывается, когда
      все выпрыгнули из самолёта (или фолбэком в тике хоста / при старте без самолёта). */
   const rubgStartZone = () => {
     if (!s.rubg || s.rubg.zone) return;
     const W = map.mw ?? map.cols * CELL_PX;
     const H = map.mh ?? map.rows * CELL_PX;
-    const ph = RUBG_ZONE_PHASES[0];
-    const scale = rubgZoneScale();
-    const waitSec = Math.round(ph.wait * scale);
     const r0 = Math.hypot(W, H) / 2 * 0.75;
-    const tr = r0 * ph.mul;
+    const plan = rubgBuildPlan(r0); // фазы: авторские (пауза/сжатие/сужение в клетках) или дефолт
+    const ph = plan[0];
+    const waitSec = Math.round(ph.wait);
+    const tr = Math.max(0, r0 - ph.distPx);
     const off = Math.max(0, r0 - tr) * 0.7;
     const now = Date.now();
     s.rubg.zone = {
@@ -341,7 +365,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       ty: Math.max(0, Math.min(H, H / 2 + (Math.random() * 2 - 1) * off)),
       tr,
       phase: 'wait', phaseStart: now, phaseEnd: now + waitSec * 1000,
-      idx: 0, dps: ph.dps, lastTick: now,
+      idx: 0, dps: ph.dps, lastTick: now, plan,
     };
     log(`⭕ Безопасная зона появилась: первое сжатие через ${rubgFmtZone(waitSec)}. Ищите задания и лутбоксы!`);
   };
@@ -1542,18 +1566,25 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           log(`💨 Кража у ${s.players.find((q) => q.id === vid)?.name ?? '?'} сорвалась — вор ушёл ни с чем`);
         }
       }
-      /* ЗОНА: фазы, сжатие, урон вне круга. Время фаз масштабируется настройкой карты
-         (минуты и секунды в редакторе): scale = zoneSec / RUBG_ZONE_TOTAL */
-      const zScale = rubgZoneScale();
+      /* ЗОНА: фазы, сжатие, урон вне круга. Работает по ПЛАНУ фаз (создан при появлении зоны:
+         авторские пауза/сжатие/сужение в клетках или дефолт×масштаб zoneSec). Старая сессия без
+         плана — достраиваем на первом тике (фолбэк, чтобы партия не сломалась на лету). */
       const z = rg.zone;
+      if (z && !z.plan) {
+        const r00 = Math.hypot(W, H) / 2 * 0.75;
+        z.plan = rubgBuildPlan(z.r <= r00 ? z.r : r00); // старая зона: цепочку строим от её текущего радиуса
+      }
       if (z) {
-        const ph = RUBG_ZONE_PHASES[Math.min(z.idx, RUBG_ZONE_PHASES.length - 1)];
-        if (z.phase === 'wait' && now >= z.phaseEnd && z.idx < RUBG_ZONE_PHASES.length) {
+        const PLAN = z.plan ?? RUBG_ZONE_PHASES.map((p) => ({ wait: 0, shrink: 1, dps: p.dps, distPx: 0 }));
+        const ph = PLAN[Math.min(z.idx, PLAN.length - 1)];
+        if (z.phase === 'wait' && now >= z.phaseEnd && z.idx < PLAN.length) {
+          /* цель (tx/ty/tr) УЖЕ посчитана при завершении прошлого сжатия (или при создании зоны) —
+             пунктир-превью показывал её всё время ожидания; здесь только запускаем сжатие */
           z.phase = 'shrink';
           z.sx = z.cx; z.sy = z.cy; z.sr = z.r;
           z.phaseStart = now;
-          z.phaseEnd = now + Math.round(ph.shrink * 1000 * zScale);
-          log(`⚠ ЗОНА СЖИМАЕТСЯ! Беги в круг! (${rubgFmtZone(ph.shrink * zScale)})`);
+          z.phaseEnd = now + Math.max(1000, Math.round(ph.shrink * 1000));
+          log(`⚠ ЗОНА СЖИМАЕТСЯ! Беги в круг! (${rubgFmtZone(ph.shrink)})`);
         } else if (z.phase === 'shrink') {
           const t = Math.max(0, Math.min(1, (now - z.phaseStart) / Math.max(1, z.phaseEnd - z.phaseStart)));
           z.cx = z.sx + (z.tx - z.sx) * t;
@@ -1561,19 +1592,20 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           z.r = z.sr + (z.tr - z.sr) * t;
           if (now >= z.phaseEnd) {
             z.cx = z.tx; z.cy = z.ty; z.r = z.tr;
-            z.idx = Math.min(z.idx + 1, RUBG_ZONE_PHASES.length - 1);
-            const np = RUBG_ZONE_PHASES[z.idx];
+            z.idx = Math.min(z.idx + 1, PLAN.length - 1);
+            const np = PLAN[z.idx];
             z.phase = 'wait';
             z.phaseStart = now;
-            z.phaseEnd = now + Math.round(np.wait * 1000 * zScale);
+            z.phaseEnd = now + Math.round(np.wait * 1000);
             z.dps = np.dps;
-            const ntr = z.r * np.mul;
+            /* цель СЛЕДУЮЩЕГО сжатия: сужение в КЛЕТКАХ (np.distPx) — сразу, чтобы
+               во время ожидания пунктир-превью показывал, куда сожмётся */
+            const ntr = Math.max(0, z.r - np.distPx);
             const off = Math.max(0, z.r - ntr) * 0.7;
-            z.sx = z.cx; z.sy = z.cy; z.sr = z.r;
             z.tx = Math.max(0, Math.min(W, z.cx + (Math.random() * 2 - 1) * off));
             z.ty = Math.max(0, Math.min(H, z.cy + (Math.random() * 2 - 1) * off));
             z.tr = ntr;
-            log(z.r <= 1 ? `☠ Зона закрыла ВСЮ карту — HP тает у всех по ${np.dps}%/с!` : `⭕ Зона сузилась — следующее сжатие через ${rubgFmtZone(np.wait * zScale)} (вне зоны ${np.dps}%/с)`);
+            log(z.r <= 1 ? `☠ Зона закрыла ВСЮ карту — HP тает у всех по ${np.dps}%/с!` : `⭕ Зона сузилась — следующее сжатие через ${rubgFmtZone(np.wait)} (вне зоны ${np.dps}%/с)`);
           }
         }
         /* урон вне зоны (по интерполированному кругу) */
@@ -1693,10 +1725,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (Math.hypot(vp.x - mp.x, vp.y - mp.y) > RUBG_STEAL_RANGE * CELL_PX) break; // нужно подойти ВПЛОТНУЮ
       const card = (p.items ?? []).find((x) => x.kind === 'steal' && (x.uses ?? 0) > 0);
       if (!card) break; // карты воровства нет
-      /* чем дольше держал кнопку — тем больше время в кармане (1..8 с) */
-      const dur = Math.min(8, Math.max(1, 1 + Math.max(0, a.holdMs) / 1000));
+      /* чем дольше держал кнопку — тем больше время в кармане. БЕЗ ВЕРХНЕГО ЛИМИТА:
+         сколько удержал — столько и получил (окантовка-часы крутится дальше каждый круг) */
+      const dur = Math.max(1, Math.max(0, a.holdMs) / 1000);
       rg.steals[victim.id] = { thief: p.id, victim: victim.id, dur, startedAt: Date.now() };
-      log(`🤏 ${p.name} запускает руку в карман ${victim.name} (${dur.toFixed(1)} с)!`);
+      log(`🤏 ${p.name} запускает руку в карман ${victim.name} (${dur >= 90 ? `${Math.round(dur / 60)} мин` : `${dur.toFixed(1)} с`})!`);
       break;
     }
     case 'rubgStealPick': {
