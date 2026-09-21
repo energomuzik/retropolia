@@ -1,5 +1,5 @@
 import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, PlayerState, RubgItemKind, TaskDef, TradeOffer, TokenDir } from './types';
-import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, tileAt, tileRectOf, coinsStr, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx } from './types';
+import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, tileAt, tileRectOf, coinsStr, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, RUBG_ZONE_DEFAULT_SEC, rubgFmtZone, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx } from './types';
 import type { RubgItem } from './types';
 import type { JoyId } from './types';
 import { CELL, cellAtPoint, cellCenter, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
@@ -313,14 +313,23 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     if (!current().alive && s.phase === 'playing') nextTurn();
   };
 
+  /* RUBG: масштаб времени ЗОНЫ из настройки карты (минуты и секунды в редакторе).
+     Все фазы (ожидания и сжатия) растягиваются/сжимаются пропорционально, DPS не меняется.
+     Минимум — 30 с, по умолчанию (карта без настройки) — 10 минут (RUBG_ZONE_DEFAULT_SEC). */
+  const rubgZoneScale = (): number => {
+    const total = Math.max(30, Math.floor(map.zoneSec ?? RUBG_ZONE_DEFAULT_SEC));
+    return total / RUBG_ZONE_TOTAL;
+  };
+
   /* RUBG: создать безопасную зону (первая фаза — ожидание сжатия). Вызывается, когда
-     все готовы и партия стартует (все стоят на стартовой ячейке), при прыжках и
-     фолбэком в тике хоста для старых сессий. */
+     все выпрыгнули из самолёта (или фолбэком в тике хоста / при старте без самолёта). */
   const rubgStartZone = () => {
     if (!s.rubg || s.rubg.zone) return;
     const W = map.mw ?? map.cols * CELL_PX;
     const H = map.mh ?? map.rows * CELL_PX;
     const ph = RUBG_ZONE_PHASES[0];
+    const scale = rubgZoneScale();
+    const waitSec = Math.round(ph.wait * scale);
     const r0 = Math.hypot(W, H) / 2 * 0.75;
     const tr = r0 * ph.mul;
     const off = Math.max(0, r0 - tr) * 0.7;
@@ -331,10 +340,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       tx: Math.max(0, Math.min(W, W / 2 + (Math.random() * 2 - 1) * off)),
       ty: Math.max(0, Math.min(H, H / 2 + (Math.random() * 2 - 1) * off)),
       tr,
-      phase: 'wait', phaseStart: now, phaseEnd: now + ph.wait * 1000,
+      phase: 'wait', phaseStart: now, phaseEnd: now + waitSec * 1000,
       idx: 0, dps: ph.dps, lastTick: now,
     };
-    log(`⭕ Безопасная зона появилась: сжатие через ${ph.wait} с. Ищите задания и лутбоксы!`);
+    log(`⭕ Безопасная зона появилась: первое сжатие через ${rubgFmtZone(waitSec)}. Ищите задания и лутбоксы!`);
   };
 
   /* RUBG: выдать предмет — на ПОЯС, если есть свободный слот (макс. 3), иначе в общий инвентарь */
@@ -344,6 +353,75 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     if (inv.filter((x) => x.belt).length < RUBG_BELT_SLOTS) it.belt = true;
     inv.push(it);
     return it;
+  };
+
+  /* RUBG: выдать ЛИЧНОЕ задание на ячейке i, если это возможно.
+     ОДНА ЯЧЕЙКА — ОДИН ИГРОК: если кто-то УЖЕ играет задание на этой ячейке — отказ
+     (announce: однократное пояснение в лог — вызывается при входе в ячейку;
+     тик хоста вызывает без announce, чтобы не спамить).
+     Возвращает true, если задание выдано. */
+  const rubgTryJob = (p: PlayerState, i: number, announce: boolean): boolean => {
+    const rg = s.rubg;
+    if (!rg) return false;
+    rg.jobs = rg.jobs ?? {};
+    rg.stealth = rg.stealth ?? [];
+    const c = map.cells[i];
+    if (!c || c.type !== 'task') return false;
+    if (rg.jobs[p.id]) return false; // уже играешь личное задание
+    if (s.captured[i] === p.id) return false; // своя ячейка — отдых
+    if (s.broken?.[i]) return false; // разбитая пуста
+    const tk = cellTaskOf(s, map, i);
+    if (!tk) return false; // задания нет
+    const busyId = Object.entries(rg.jobs).find(([, j]) => j.cellIdx === i)?.[0];
+    if (busyId) {
+      if (announce) {
+        const busyP = s.players.find((q) => q.id === busyId);
+        log(`⏳ Ячейка №${i + 1} занята: ${busyP?.name ?? 'игрок'} уже играет это задание — ищите другое!`);
+      }
+      return false; // ОДНУ ячейку нельзя проходить вдвоём
+    }
+    rg.jobs[p.id] = { cellIdx: i, startedAt: Date.now() };
+    rg.stealth = rg.stealth.filter((xid) => xid !== p.id); // вход в задание снимает стелс
+    p.stealth = false;
+    log(`🎮 ${p.name} играет задание «${tk.title.slice(0, 30)}» — ЛИЧНО, остальные не ждут`);
+    return true;
+  };
+
+  /* RUBG: ПОСЛЕ ВЫСАДКИ — кто приземлился ПРЯМО в ячейку лутбокса/задания, получает
+     её содержимое сразу (как при входе ходьбой). Один раз при старте партии.
+     ОДНА ячейка задания — ОДИН игрок (rubgTryJob). */
+  const rubgLandingJobs = () => {
+    const rg = s.rubg;
+    if (!rg) return;
+    rg.looted = rg.looted ?? [];
+    for (const pl of s.players) {
+      if (!pl.alive || pl.spect) continue;
+      if ((rg.jobs ?? {})[pl.id]) continue;
+      const pp = playerPx(s, map, pl.id);
+      if (!pp) continue;
+      for (let i = 0; i < map.cells.length; i++) {
+        const c = map.cells[i];
+        if (!c || (c.type !== 'task' && c.type !== 'loot')) continue;
+        const r = cellRectOf(map, i);
+        if (!r) continue;
+        if (!(pp.x >= r.x && pp.x < r.x + r.w && pp.y >= r.y && pp.y < r.y + r.h)) continue;
+        pl.pos = i;
+        if (!s.revealed.includes(i)) s.revealed.push(i);
+        if (c.type === 'loot') {
+          if (rg.looted.includes(i)) break; // вскрыт раньше
+          rg.looted.push(i);
+          const kind = rubgRandomKind();
+          rubgGiveItem(pl, kind);
+          const meta = RUBG_ITEMS[kind];
+          rg.stealth = (rg.stealth ?? []).filter((xid) => xid !== pl.id);
+          pl.stealth = false;
+          log(`📦 ${pl.name} вскрыл ЛУТБОКС №${i + 1}: ${meta.icon} ${meta.name}${kind === 'steal' ? ' (3 исп.)' : ''}`);
+        } else {
+          rubgTryJob(pl, i, true);
+        }
+        break;
+      }
+    }
   };
 
   const endTurnNow = () => {
@@ -1010,10 +1088,23 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         if (soloMode) p.spect = !p.isHost; // играет только хост — остальные смотрят
         if (map.mode === 'rubg') { p.hp = RUBG_HP_MAX; p.items = []; p.stealth = false; }
       }
-      /* RUBG: все стартуют СО СТАРТОВОЙ ЯЧЕЙКИ (самолёт-обязаловка убрана).
-         Безопасная зона появится, когда все нажмут «Старт игры» (rollOffReady). */
+      /* RUBG: САМОЛЁТ через карту — бойцы выпрыгивают, ГДЕ ХОЧУТ (стартовая ячейка НЕ нужна:
+         в редакторе RUBG-карту можно завершить без неё). Зона — когда все выпрыгнут. */
       if (map.mode === 'rubg') {
-        s.rubg = { zone: null, jobs: {}, looted: [], stealth: [], steals: {}, stopCd: {} };
+        const W = map.mw ?? map.cols * CELL_PX;
+        const H = map.mh ?? map.rows * CELL_PX;
+        const ang = Math.random() * Math.PI * 2;
+        const half = Math.hypot(W, H) / 2 + CELL_PX;
+        const cx0 = W / 2, cy0 = H / 2;
+        s.rubg = {
+          plane: {
+            x0: cx0 - Math.cos(ang) * half, y0: cy0 - Math.sin(ang) * half,
+            x1: cx0 + Math.cos(ang) * half, y1: cy0 + Math.sin(ang) * half,
+            startAt: Date.now(), speed: Math.max(W, H) / 22, jumped: [],
+          },
+          zone: null, // зона появится, когда все выпрыгнут (rubgJump / тик хоста)
+          jobs: {}, looted: [], stealth: [], steals: {}, stopCd: {},
+        };
       }
       /* БЕЗКАРТОВАЯ ИГРА (СТАРЫЕ карты v0.36.0): счётчик матчей.
          SKILL CHALLENGE снова играется НА КАРТЕ — счётчик ему не нужен. */
@@ -1038,7 +1129,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
          сразу панель готовности хоста (без кубиков). SKILL CHALLENGE — на карте, с жеребьёвкой. */
       if (map.mapless) s.rollOffWinner = s.players.find((p) => p.isHost)?.id ?? null;
       log(map.mode === 'rubg'
-        ? `🪂 RUBG! ${s.players.length} бойцов стартуют СО СТАРТОВОЙ ЯЧЕЙКИ. Ресурс — полоска HP. Побеждает последний живой!`
+        ? `🪂 RUBG! ${s.players.length} бойцов на борту. Самолёт летит — ПРЫГАЙТЕ, где хотите! Ресурс — полоска HP. Побеждает последний живой!`
         : soloMode && map.mode === 'skill'
           ? `🧨 SKILL CHALLENGE! Играет только хост — ${SKILL_TURNS} заданий на карте. Остальные — зрители.`
           : map.mapless
@@ -1158,10 +1249,13 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         log(`✔ ${p.name}: готов начать`);
       }
       if (s.players.filter((pl) => !pl.spect).every((pl) => (s.rollOffReady ?? []).includes(pl.id))) {
+        /* RUBG с САМОЛЁТОМ: панель готовности не используется — переход в игру делает
+           ПРЫЖОК последнего бойца (rubgJump) или форс-высадка в тике хоста */
+        if (map.mode === 'rubg' && s.rubg?.plane) break;
         s.phase = 'playing';
         if (map.mode === 'rubg') {
-          rubgStartZone(); // все на стартовой ячейке — запускаем безопасную зону
-          log('🚀 Все готовы! RUBG начался — все стартуют со стартовой ячейки. Побеждает последний живой!');
+          rubgStartZone(); // старая сессия без самолёта — запускаем безопасную зону
+          log('🚀 Все готовы! RUBG начался. Побеждает последний живой!');
         } else if (isJourneyLike(map.mode)) {
           log(map.mode === 'journey1p'
             ? '🚀 Все готовы! Игра началась — фишка хоста пошла'
@@ -1248,15 +1342,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
             continue;
           }
           if (c.type === 'task') {
-            if (rg.jobs[p.id]) continue; // уже играешь личное задание
-            if (s.captured[i] === p.id) continue; // своя ячейка — отдых
-            if (s.broken?.[i]) continue; // разбитая пуста
-            const tk = cellTaskOf(s, map, i);
-            if (!tk) continue; // задания нет
-            rg.jobs[p.id] = { cellIdx: i, startedAt: Date.now() };
-            rg.stealth = rg.stealth.filter((xid) => xid !== p.id); // вход в ячейку снимает стелс
-            p.stealth = false;
-            log(`🎮 ${p.name} играет задание «${tk.title.slice(0, 30)}» — ЛИЧНО, остальные не ждут`);
+            rubgTryJob(p, i, true); // ОДНА ячейка — ОДИН игрок: занятая другим — отказ с пояснением
           }
         }
         break;
@@ -1390,6 +1476,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (s.phase !== 'rollOff' || map.mode !== 'rubg' || !s.rubg?.plane) break;
       const p = actor();
       if (!p || p.spect || !p.alive) break;
+      /* фишки партии: без выбранной фишки прыгать нельзя (как и «Старт игры» без неё) */
+      if ((map.mapTokens?.length ?? 0) > 0 && !p.tokenKey) break;
       const pl = s.rubg.plane;
       if (pl.jumped.includes(a.id)) break;
       const W = map.mw ?? map.cols * CELL_PX;
@@ -1409,6 +1497,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const roster = s.players.filter((q) => !q.spect);
       if (roster.every((q) => pl.jumped.includes(q.id))) {
         s.phase = 'playing';
+        log('🚀 ВЫСАДКА ЗАВЕРШЕНА — все на земле! RUBG начался. Побеждает последний живой!');
+        rubgLandingJobs(); // кто приземлился прямо в ячейку лутбокса/задания — сразу получает её
         rubgStartZone();
       }
       break;
@@ -1436,6 +1526,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         if (s.players.filter((q) => !q.spect).every((q) => pl.jumped.includes(q.id))) {
           s.phase = 'playing';
           log('🚀 ВЫСАДКА ЗАВЕРШЕНА — все на земле!');
+          rubgLandingJobs(); // кто приземлился прямо в ячейку лутбокса/задания — сразу получает её
         } else break; // ещё летим — остальное не тикает
       }
       if (s.phase !== 'playing') break;
@@ -1451,7 +1542,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           log(`💨 Кража у ${s.players.find((q) => q.id === vid)?.name ?? '?'} сорвалась — вор ушёл ни с чем`);
         }
       }
-      /* ЗОНА: фазы, сжатие, урон вне круга */
+      /* ЗОНА: фазы, сжатие, урон вне круга. Время фаз масштабируется настройкой карты
+         (минуты и секунды в редакторе): scale = zoneSec / RUBG_ZONE_TOTAL */
+      const zScale = rubgZoneScale();
       const z = rg.zone;
       if (z) {
         const ph = RUBG_ZONE_PHASES[Math.min(z.idx, RUBG_ZONE_PHASES.length - 1)];
@@ -1459,8 +1552,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           z.phase = 'shrink';
           z.sx = z.cx; z.sy = z.cy; z.sr = z.r;
           z.phaseStart = now;
-          z.phaseEnd = now + ph.shrink * 1000;
-          log('⚠ ЗОНА СЖИМАЕТСЯ! Беги в круг!');
+          z.phaseEnd = now + Math.round(ph.shrink * 1000 * zScale);
+          log(`⚠ ЗОНА СЖИМАЕТСЯ! Беги в круг! (${rubgFmtZone(ph.shrink * zScale)})`);
         } else if (z.phase === 'shrink') {
           const t = Math.max(0, Math.min(1, (now - z.phaseStart) / Math.max(1, z.phaseEnd - z.phaseStart)));
           z.cx = z.sx + (z.tx - z.sx) * t;
@@ -1472,7 +1565,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
             const np = RUBG_ZONE_PHASES[z.idx];
             z.phase = 'wait';
             z.phaseStart = now;
-            z.phaseEnd = now + np.wait * 1000;
+            z.phaseEnd = now + Math.round(np.wait * 1000 * zScale);
             z.dps = np.dps;
             const ntr = z.r * np.mul;
             const off = Math.max(0, z.r - ntr) * 0.7;
@@ -1480,7 +1573,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
             z.tx = Math.max(0, Math.min(W, z.cx + (Math.random() * 2 - 1) * off));
             z.ty = Math.max(0, Math.min(H, z.cy + (Math.random() * 2 - 1) * off));
             z.tr = ntr;
-            log(z.r <= 1 ? `☠ Зона закрыла ВСЮ карту — HP тает у всех по ${np.dps}%/с!` : `⭕ Зона сузилась — следующее сжатие через ${np.wait} с (вне зоны ${np.dps}%/с)`);
+            log(z.r <= 1 ? `☠ Зона закрыла ВСЮ карту — HP тает у всех по ${np.dps}%/с!` : `⭕ Зона сузилась — следующее сжатие через ${rubgFmtZone(np.wait * zScale)} (вне зоны ${np.dps}%/с)`);
           }
         }
         /* урон вне зоны (по интерполированному кругу) */
@@ -2051,6 +2144,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const cellIdx = (a as { cellIdx?: number }).cellIdx;
       if (cellIdx !== undefined && cellIdx !== null) {
         // продажа ячейки: только своя, не на ней задания сейчас, не в сделке
+        if (map.mode === 'rubg') { log('✖ В RUBG побеждённые ячейки НЕ ПРОДАЮТСЯ — они остаются за победителем до конца партии'); break; }
         const idx = Math.floor(cellIdx);
         if (s.captured[idx] !== p.id) { log('✖ Продаётся только своя ячейка'); break; }
         if (s.challenge?.cellIdx === idx) { log('✖ На этой ячейке сейчас идёт задание'); break; }

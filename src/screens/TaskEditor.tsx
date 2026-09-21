@@ -583,7 +583,7 @@ export default function TaskEditor() {
                     <p className="text-[10px] text-[#ff8b3f] leading-tight">ЛУТБОКС (только RUBG): одноразовый. Зашедший игрок получает случайный предмет: лечение, оружие или карты воровства/стелса.</p>
                   )}
                   {cell.type === 'start' && (
-                    <p className="text-[10px] text-teal leading-tight">Стартовая ячейка: игроки начнут партию с неё, задание не нужно.</p>
+                    <p className="text-[10px] text-teal leading-tight">Стартовая ячейка: игроки начнут партию с неё, задание не нужно. В RUBG НЕ обязательна — бойцы выпрыгивают из самолёта, где хотят.</p>
                   )}
                   {cell.type === 'rest' && (
                     <p className="text-[10px] text-dim leading-tight">Пустая клетка-передышка: ничего не происходит. Ром и карточки не нужны — в «без заданий» она не считается.</p>

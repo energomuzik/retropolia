@@ -2089,7 +2089,8 @@ export default function MapEditor() {
       toast(`Нужно минимум 10 ячеек (сейчас ${map.cells.length})`, 'err');
       return;
     }
-    if (starts === 0) {
+    /* RUBG: стартовая ячейка НЕ ОБЯЗАТЕЛЬНА — бойцы выпрыгивают из самолёта, где хотят */
+    if (starts === 0 && (map.mode ?? 'classic') !== 'rubg') {
       sfx.fail();
       toast('Поставьте стартовую ячейку: выберите ячейку и задайте тип «Старт» — с неё начнут все игроки', 'err');
       return;
@@ -2601,6 +2602,29 @@ export default function MapEditor() {
                 )}
               </div>
 
+              {/* RUBG: время БЕЗОПАСНОЙ ЗОНЫ — минуты и секунды (выбор создателя карты) */}
+              {(map.mode ?? 'classic') === 'rubg' && (() => {
+                const zs = Math.max(30, Math.floor(map.zoneSec ?? 600));
+                return (
+                  <div>
+                    <div className="tick-label mb-2">⭕ Безопасная зона · RUBG</div>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] text-dim shrink-0">Полное время зоны</span>
+                        <div className="flex items-center gap-1">
+                          <Stepper value={Math.min(180, Math.floor(zs / 60))} onChange={(m) => updMap({ zoneSec: Math.max(30, m * 60 + (zs % 60)) })} min={0} max={180} suffix=" мин" />
+                          <Stepper value={zs % 60} onChange={(s) => updMap({ zoneSec: Math.max(30, Math.floor(zs / 60) * 60 + s) })} min={0} max={55} step={5} suffix=" с" />
+                        </div>
+                      </div>
+                      <p className="text-[9px] text-faint leading-tight">
+                        Время от появления зоны до ПОЛНОГО закрытия карты: все ожидания и сжатия растягиваются пропорционально, урон вне зоны не меняется.
+                        Для долгих партий (30 мин и больше) ставьте 30–45 мин. Минимум — 30 с, по умолчанию — 10 мин.
+                      </p>
+                    </div>
+                  </div>
+                );
+              })()}
+
               <div>
                 <div className="tick-label mb-2">Режим игры</div>
                 <div className="space-y-1.5">
@@ -3070,7 +3094,7 @@ export default function MapEditor() {
               {/* статус */}
               <div className="absolute bottom-3 left-3 hud-chip pixel-corners px-3 py-2 text-[11px] space-y-0.5 pointer-events-none">
                 <div className={`font-display uppercase ${map.cells.length >= 10 ? 'text-teal' : 'text-gold'}`}>
-                  Ячейки: {map.cells.length} / мин. 10 · стартовых: {startsCount} / нужна 1
+                  Ячейки: {map.cells.length} / мин. 10 · стартовых: {startsCount}{(map.mode ?? 'classic') === 'rubg' ? ' / не нужна (самолёт)' : ' / нужна 1'}
                 </div>
                 <div className="text-dim">
                   Задания: {taskCells}{noTask > 0 ? <span className="text-magma"> (без рома: {noTask})</span> : ''}{restCells > 0 ? <span className="text-sky"> · передышек: {restCells}</span> : ''} · Тайлов: {(map.stamps ?? []).length} · {msz.w}×{msz.h}

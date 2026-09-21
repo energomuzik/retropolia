@@ -300,6 +300,12 @@ export default function GameScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [myJob?.cellIdx, romReadyTick]);
 
+  /* ---------- RUBG: «СТАРТ ИГРЫ» в личном задании — эмулятор на паузе до нажатия,
+     чтобы игрок мог подготовиться (прочитать задание, настроить управление).
+     Сброс при входе в новую ячейку задания. ---------- */
+  const [rubgJobArmed, setRubgJobArmed] = useState(false);
+  useEffect(() => { setRubgJobArmed(false); }, [myJob?.cellIdx]);
+
   /* ---------- RUBG: локальный тик перерисовки (позиция самолёта, таймер кармана) ---------- */
   useEffect(() => {
     if (!isRubg) return;
@@ -1930,8 +1936,79 @@ export default function GameScreen() {
           </div>
         )}
 
-        {/* ---------- RUBG: самолёта больше нет — все стартуют СО СТАРТОВОЙ ЯЧЕЙКИ
-             (панель готовности ниже, как в TRIATHLON) ---------- */}
+        {/* ---------- RUBG: самолёт — каждый выпрыгивает, ГДЕ ХОЧЕТ ----------
+            Стартовая ячейка НЕ нужна: карта RUBG в редакторе может быть без неё.
+            Пока самолёт летит — панель готовности не показывается: прыжок = готовность. */}
+        {isRubg && s.phase === 'rollOff' && rubg?.plane && (() => {
+          const pl = rubg.plane;
+          const now = Date.now();
+          const len = Math.hypot(pl.x1 - pl.x0, pl.y1 - pl.y0) || 1;
+          const dd = Math.min(len, Math.max(0, ((now - pl.startAt) / 1000) * pl.speed));
+          const pxx = pl.x0 + (pl.x1 - pl.x0) * (dd / len);
+          const pyy = pl.y0 + (pl.y1 - pl.y0) * (dd / len);
+          const jumped = pl.jumped ?? [];
+          const iJumped = jumped.includes(me);
+          const rosterR = s.players.filter((q) => !q.spect);
+          const inside = pxx >= 0 && pxx <= (map.mw ?? 0) && pyy >= 0 && pyy <= (map.mh ?? 0);
+          const mapToksP = map.mapTokens ?? [];
+          const needTokP = mapToksP.length > 0 && !mePlayer?.spect; // фишки заданы картой — выбор обязателен
+          const myTokKey = s.players.find((p) => p.id === me)?.tokenKey;
+          const takenByP = (tid: string) => s.players.find((p) => p.id !== me && p.tokenKey === tid);
+          return (
+            <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.5)] z-10">
+              <div className="pixel-panel pixel-corners pop-in p-6 max-w-md w-full mx-4 text-center max-h-[92vh] overflow-y-auto">
+                <div className="font-display uppercase tracking-wider text-gold text-lg">🪂 САМОЛЁТ НА ЛИНИИ</div>
+                <p className="text-[11px] text-dim mt-1">Выпрыгивай, ГДЕ ХОЧЕШЬ — прыжок приземлит тебя под самолётом. Ищи задания и лутбоксы, следи за зоной!</p>
+                <div className="font-pixel text-[10px] text-paper my-3">Пройдено маршрута: {Math.round((dd / len) * 100)}%{inside ? '' : ' · самолёт ВНЕ карты'}</div>
+                {iJumped ? (
+                  <div className="font-pixel text-[9px] text-teal blink-hard">ПРЫЖОК СОВЕРШЁН — ждём остальных ({jumped.length}/{rosterR.length})</div>
+                ) : needTokP && !myTokKey ? (
+                  <div className="font-pixel text-[9px] text-gold blink-hard py-2">СНАЧАЛА ФИШКА — ПОТОМ ПРЫЖОК ↓</div>
+                ) : (
+                  <PxBtn big color="gold" disabled={!inside} onClick={() => { sfx.start(); dispatch({ t: 'rubgJump', id: me, x: Math.round(pxx), y: Math.round(pyy) }); }}>
+                    🪂 ПРЫГНУТЬ
+                  </PxBtn>
+                )}
+                {needTokP && !iJumped && (
+                  <div className="mt-4 text-left">
+                    <div className="font-display uppercase text-[11px] tracking-wider text-sky mb-2 flex items-center gap-1.5">
+                      <span>{Ic.pawn(13)}</span> Выберите свою фишку
+                    </div>
+                    <div className="flex gap-2 flex-wrap justify-center">
+                      {mapToksP.map((t) => {
+                        const takenBy = takenByP(t.id);
+                        const mine = myTokKey === t.id;
+                        const off = !!takenBy;
+                        return (
+                          <button
+                            key={t.id}
+                            disabled={off}
+                            onClick={() => { sfx.click(); dispatch({ t: 'token', id: me, tokenImg: t.dataUrl, tokenId: t.id }); }}
+                            title={takenBy ? `${t.name} — уже у ${takenBy.name}` : t.name}
+                            className={`relative w-14 h-14 border-[3px] p-1 transition-all ${off ? 'border-edge opacity-35 cursor-not-allowed' : mine ? 'border-gold shadow-[0_0_14px_rgba(255,207,63,0.35)] cursor-pointer' : 'border-edge hover:border-edge2 cursor-pointer'}`}
+                            style={{ background: 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 12px 12px' }}
+                          >
+                            {t.anim?.idle?.frames?.length
+                              ? <AnimPreview frames={t.anim.idle.frames} fps={t.anim.idle.fps} size={44} className="w-full h-full" style={{ width: '100%', height: '100%' }} />
+                              : <img src={t.dataUrl} alt={t.name} className="w-full h-full object-contain" style={{ imageRendering: 'pixelated' }} />}
+                            {takenBy && <span className="absolute inset-x-0 bottom-0 bg-coral text-abyss font-pixel text-[6px] truncate px-0.5">{takenBy.name}</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                <div className="mt-3 flex justify-center gap-1.5 flex-wrap">
+                  {rosterR.map((p) => (
+                    <span key={p.id} className={`font-pixel text-[8px] px-1.5 py-0.5 border-2 ${jumped.includes(p.id) ? 'border-teal text-teal' : 'border-edge text-dim'}`}>
+                      {p.name}{jumped.includes(p.id) ? ' ✔' : ''}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* ---------- жеребьёвка: все кубики видны сразу, бросают по очереди (зрители — в стороне) ---------- */}
         {s.phase === 'rollOff' && !s.rollOffWinner && !isRubg && (() => {
@@ -1992,8 +2069,10 @@ export default function GameScreen() {
           );
         })()}
 
-        {/* ---------- победитель жеребьёвки: каждый подтверждает старт (и берёт фишку) ---------- */}
-        {s.phase === 'rollOff' && s.rollOffWinner && (() => {
+        {/* ---------- победитель жеребьёвки: каждый подтверждает старт (и берёт фишку) ----------
+            В RUBG с САМОЛЁТОМ эта панель не нужна: прыжок = готовность (панель самолёта выше).
+            Показывается только как фолбэк для старой сессии без самолёта. */}
+        {s.phase === 'rollOff' && s.rollOffWinner && (!isRubg || !rubg?.plane) && (() => {
           const readyList = s.rollOffReady ?? [];
           const roster = s.players.filter((p) => !p.spect);
           const winnerP = s.players.find((p) => p.id === s.rollOffWinner);
@@ -2006,9 +2085,9 @@ export default function GameScreen() {
             <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.6)] z-10">
               <div className="pixel-panel pixel-corners pop-in p-7 max-w-lg w-full mx-4 text-center">
                 <span className="text-gold inline-block floaty">{isRubg ? '🪂' : isJourney ? Ic.pawn(40) : Ic.dice(40)}</span>
-                <div className="font-pixel text-gold text-[11px] mt-3">{isRubg ? 'ВСЕ СТАРТУЮТ СО СТАРТОВОЙ ЯЧЕЙКИ' : isJourney ? (isSoloJourney ? 'ОДИНОКОЕ ПРИКЛЮЧЕНИЕ' : 'ВСЕ СТАРТУЮТ ОДНОВРЕМЕННО') : 'ПЕРВЫМ ХОДИТ'}</div>
+                <div className="font-pixel text-gold text-[11px] mt-3">{isRubg ? 'RUBG БЕЗ САМОЛЁТА — СТАРТ СО СТАРТОВОЙ ЯЧЕЙКИ' : isJourney ? (isSoloJourney ? 'ОДИНОКОЕ ПРИКЛЮЧЕНИЕ' : 'ВСЕ СТАРТУЮТ ОДНОВРЕМЕННО') : 'ПЕРВЫМ ХОДИТ'}</div>
                 {isRubg ? (
-                  <p className="text-[11px] text-dim mt-2">Жеребьёвки нет — все бойцы стартуют СО СТАРТОВОЙ ЯЧЕЙКИ. Ищите личные задания и лутбоксы, следите за сжимающейся зоной. Побеждает ПОСЛЕДНИЙ ЖИВОЙ!</p>
+                  <p className="text-[11px] text-dim mt-2">Фолбэк: сессия без самолёта. Ищите личные задания и лутбоксы, следите за сжимающейся зоной. Побеждает ПОСЛЕДНИЙ ЖИВОЙ!</p>
                 ) : isJourney ? (
                   <p className="text-[11px] text-dim mt-2">{isSoloJourney ? 'Играет ТОЛЬКО ХОСТ — все подключившиеся смотрят трансляцию. Жеребьёвки нет: фишка хоста идёт свободно от старта.' : 'Жеребьёвки нет — каждый ведёт СВОЮ фишку со старта. Кто ПЕРВЫМ пересечёт ячейку задания — у того оно и откроется, остальные будут смотреть.'}</p>
                 ) : (
@@ -2674,7 +2753,8 @@ export default function GameScreen() {
                       remapSpec={remapSpec}
                       chaos={[]}
                       initialState={(rSaveState as string | null) ?? null}
-                      paused={false}
+                      paused={!rubgJobArmed}
+                      pausedHint={rubgJobArmed ? undefined : 'Нажмите «Старт игры»'}
                       onApi={(a) => { ejsApiRef.current = a; }}
                     />
                   ) : (
@@ -2685,15 +2765,24 @@ export default function GameScreen() {
                       </div>
                     </div>
                     <p className="text-[10px] text-faint">Никаких подтверждений — режим доверия. Победа: +{RUBG_WIN_HP}% HP + трофей, ячейка твоя. Поражение: −{RUBG_LOSE_HP}% HP. Остальные игроки продолжают бегать — на тебя никто не ждёт.</p>
-                    <div className="grid grid-cols-3 gap-2">
-                      <PxBtn color="teal" onClick={() => { sfx.success(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: true }); }}>
-                        🏆 ПОБЕДА +{RUBG_WIN_HP}%
-                      </PxBtn>
-                      <PxBtn color="coral" onClick={() => { sfx.fail(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: false }); }}>
-                        💀 ПОРАЖЕНИЕ −{RUBG_LOSE_HP}%
-                      </PxBtn>
-                      <GhostBtn onClick={() => { dispatch({ t: 'rubgJobLeave', id: me, cellIdx: myJob.cellIdx }); }}>🚶 Уйти</GhostBtn>
-                    </div>
+                    {!rubgJobArmed ? (
+                      <>
+                        <PxBtn big color="gold" className="w-full pulse-ring" onClick={() => { sfx.start(); setRubgJobArmed(true); }}>
+                          {Ic.play(16)} Старт игры
+                        </PxBtn>
+                        <p className="text-[10px] text-dim leading-tight">Эмулятор загружен и стоит НА ПАУЗЕ — прочитайте задание, подготовьтесь и настройте управление. Игра начнётся по кнопке «Старт игры».</p>
+                      </>
+                    ) : (
+                      <div className="grid grid-cols-3 gap-2">
+                        <PxBtn color="teal" onClick={() => { sfx.success(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: true }); }}>
+                          🏆 ПОБЕДА +{RUBG_WIN_HP}%
+                        </PxBtn>
+                        <PxBtn color="coral" onClick={() => { sfx.fail(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: false }); }}>
+                          💀 ПОРАЖЕНИЕ −{RUBG_LOSE_HP}%
+                        </PxBtn>
+                        <GhostBtn onClick={() => { dispatch({ t: 'rubgJobLeave', id: me, cellIdx: myJob.cellIdx }); setRubgJobArmed(false); }}>🚶 Уйти</GhostBtn>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -2920,10 +3009,7 @@ export default function GameScreen() {
                   );
                 });
               })()}
-              <button
-                onClick={() => { setInvOpen(true); sfx.click(); }}
-                className="w-full py-1.5 border-2 border-edge font-pixel text-[8px] text-sky hover:border-sky cursor-pointer"
-              >🎒 ИНВЕНТАРЬ (надеть на пояс / остановить вора)</button>
+              {/* Кнопка «Инвентарь» здесь НЕ нужна: она есть вверху, рядом с «Карта мира» */}
               <p className="text-[8px] text-faint leading-tight">На поясе макс. {RUBG_BELT_SLOTS} предмета — только они действуют (лечиться/стрелять/воровать/стелс). Пояс НЕ воруется. Своё задание на побеждённой ячейке создать нельзя — только лут и HP.</p>
             </div>
           )}
@@ -3455,9 +3541,17 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
           )}
         </div>
 
-        {/* мои ячейки — можно продать/обменять */}
+        {/* мои ячейки — можно продать/обменять. В RUBG ячейки НЕ ПРОДАЮТСЯ */}
         <div className="space-y-2 mt-5">
           <div className="tick-label text-faint">Мои ячейки · {myCells.length}</div>
+          {rubgMap ? (
+            <div className="text-center py-4 text-dim text-[12px]">
+              {myCells.length === 0
+                ? 'Захваченных ячеек пока нет. Пройдите задание на чужой или свободной ячейке — она станет вашей до конца партии.'
+                : 'В RUBG побеждённые ячейки НЕ ПРОДАЮТСЯ и не обмениваются — они остаются за вами до конца партии.'}
+            </div>
+          ) : (
+          <>
           {myCells.length === 0 ? (
             <div className="text-center py-4 text-dim text-[12px]">
               Захваченных ячеек пока нет. Пройдите задание на чужой или свободной ячейке — и сможете продавать её соперникам.
@@ -3496,6 +3590,8 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
           <p className="text-[10px] text-faint leading-tight">
             Торговать могут только игроки, которые сейчас НЕ играют: играющий видит трансляцию, но купить/продать не может.
           </p>
+          </>
+          )}
         </div>
       </div>
     </div>
