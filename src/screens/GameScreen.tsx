@@ -15,7 +15,7 @@ import {
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
-import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, tileAt, tileRectOf, tileNumOf, coinsShort, coinsStr, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP } from '../types';
+import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, tileAt, tileRectOf, tileNumOf, coinsShort, coinsStr, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS } from '../types';
 import type { AnimClip, CardDef, ChaosKind, GameMap, PortalZone, TaskDef, TokenDir, RubgItem } from '../types';
 import Randomizer from './Randomizer';
 import { idbGet } from '../db';
@@ -175,6 +175,10 @@ export default function GameScreen() {
   const inStealth = !!mePlayer?.stealth;
   const coinsActive = map?.startCoins !== undefined; // монеты включены на карте
   const coinsOnly = coinsActive && !!map?.coinsOnly; // только монеты — время/попытки не предлагаются
+  /* РЕСУРС ПАРТИИ (выбор ОДНОГО в редакторе): hp — «полоска HP» (RUBG и карты с выбором «HP»),
+     coinsOnly — «монеты», иначе — «время и попытки». В HUD показывается только выбранный ресурс. */
+  const hpRes = isRubg || map?.resMode === 'hp';
+  const coinsRes = !hpRes && coinsOnly;
   const skipCoinsNeed = Math.max(0, Math.floor(map?.skipCoins ?? SKIP_COINS_DEFAULT)); // цена пропуска в бронзе
   const task = s && map && ch ? cellTaskOf(s, map, ch.cellIdx) : null;
   const activeChaos = task?.chaos ? [task.chaos] : [];
@@ -218,6 +222,7 @@ export default function GameScreen() {
   const romName = taskRom?.name ?? 'ROM';
   const taskImg = useBlobImage(task?.imageId);
   const cardImg = useBlobImage(s?.pendingCard?.card.imageId);
+  const rTaskImg = useBlobImage(myRubgTask?.imageId); // картинка ЛИЧНОГО задания RUBG
 
   /* ---------- загрузка рома и сохранения под челлендж ----------
      Гость сначала смотрит in-memory кэш (полученный по сети от хоста), затем свою
@@ -545,6 +550,15 @@ export default function GameScreen() {
     }, 2000);
     return () => clearInterval(t);
   }, [room?.isHost]);
+
+  /* ---------- RUBG: РАДИУС АТАКИ для оверлея (реф — рендер-цикл читает без перезапуска) ---------- */
+  const aimRadiusRef = useRef<{ x: number; y: number; r: number } | null>(null);
+  useEffect(() => {
+    const it = aimItemId ? (mePlayer?.items ?? []).find((x) => x.id === aimItemId) : undefined;
+    const meta = it ? RUBG_ITEMS[it.kind] : null;
+    const mp = s?.journeyPos?.[me];
+    aimRadiusRef.current = meta && meta.radius > 0 && mp ? { x: mp.x, y: mp.y, r: meta.radius * CELL } : null;
+  }, [aimItemId, mePlayer?.items, s?.journeyPos?.[me], me]);
 
   /* ---------- главный цикл отрисовки ---------- */
   useEffect(() => {
@@ -977,7 +991,7 @@ export default function GameScreen() {
           bossFx,
         });
 
-        /* RUBG: оверлей поверх поля — безопасная зона, самолёт, HP-бары */
+        /* RUBG: оверлей поверх поля — безопасная зона, самолёт, маркеры игры, радиус атаки */
         if (isRubg) {
           drawRubgOverlay(ctx, {
             view: v, width: w, height: h, time: t,
@@ -985,6 +999,7 @@ export default function GameScreen() {
             zone: sess.rubg?.zone ?? null,
             plane: sess.rubg?.plane ?? null,
             bars: rubgBars,
+            aim: aimRadiusRef.current,
           });
         }
       }
@@ -1039,63 +1054,123 @@ export default function GameScreen() {
     return () => clearTimeout(t);
   }, [myStealing?.victim, myStealing?.startedAt, myStealing?.dur, myStealing, me]);
 
-  /* ---------- RUBG: движение руки в кармане (WASD/стрелки) ---------- */
+  /* ---------- RUBG: мини-игра «карман» — сетка клеток (WASD/стрелки/джойстик/тап) ---------- */
+  const POCKET_COLS = 4;
+  const POCKET_CELLS = 8; // 4×2 клетки — «карман» жертвы; пустые клетки = пусто
   const [pocketCur, setPocketCur] = useState(0);
-  const pocketLen = (() => {
-    if (!myStealing || !s) return 0;
+  /* предметы в кармане жертвы: только ОБЩИЙ инвентарь (пояс НЕ воруется) */
+  const pocketItems = (() => {
+    if (!myStealing || !s) return [] as RubgItem[];
     const v = s.players.find((x) => x.id === myStealing.victim);
-    return v?.items?.length ?? 0;
+    return (v?.items ?? []).filter((x) => !x.belt);
   })();
   useEffect(() => {
     if (!myStealing) return;
     setPocketCur(0);
     const onKey = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
-      if (['arrowup', 'w'].includes(k)) setPocketCur((c) => Math.max(0, c - 1));
-      else if (['arrowdown', 's'].includes(k)) setPocketCur((c) => Math.min(Math.max(0, pocketLen - 1), c + 1));
+      const last = POCKET_CELLS - 1;
+      if (['arrowup', 'w'].includes(k)) { e.preventDefault(); setPocketCur((c) => Math.max(0, c - POCKET_COLS)); }
+      else if (['arrowdown', 's'].includes(k)) { e.preventDefault(); setPocketCur((c) => Math.min(last, c + POCKET_COLS)); }
+      else if (['arrowleft', 'a'].includes(k)) { e.preventDefault(); setPocketCur((c) => Math.max(0, c - 1)); }
+      else if (['arrowright', 'd'].includes(k)) { e.preventDefault(); setPocketCur((c) => Math.min(last, c + 1)); }
       else if (['enter', ' ', 'e'].includes(k)) {
         e.preventDefault();
-        const v = useApp.getState().session?.players.find((x) => x.id === myStealing.victim);
-        const item = v?.items?.[pocketCurRef.current];
+        const item = pocketItemsRef.current[pocketCurRef.current];
         if (item) dispatch({ t: 'rubgStealPick', id: me, victimId: myStealing.victim, itemId: item.id });
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [!!myStealing, myStealing?.victim, pocketLen, me]);
+  }, [!!myStealing, myStealing?.victim, me]);
   const pocketCurRef = useRef(0);
   useEffect(() => { pocketCurRef.current = pocketCur; }, [pocketCur]);
+  const pocketItemsRef = useRef<RubgItem[]>([]);
+  useEffect(() => { pocketItemsRef.current = pocketItems; });
 
-  /* ---------- RUBG: зажатие кнопки кражи (чем дольше держишь — тем больше время) ---------- */
+  /* ---------- RUBG: воровство — КЛИК по карте воровства открывает «карман», ----------
+     удержание «НАЧАТЬ ВОРОВСТВО» заряжает время (окантовка-часы), отпускание —
+     запускает таймер и раскрывает предметы в клетках. */
+  const [stealOpen, setStealOpen] = useState(false);      // открыт «карман» (фаза заряда)
+  const [stealVictim, setStealVictim] = useState<string | null>(null);
+  const [stealSent, setStealSent] = useState(false);      // отпустил кнопку — ждём подтверждение хоста
+  const [stealCharging, setStealCharging] = useState(false); // держим кнопку
+  const [stealHoldMs, setStealHoldMs] = useState(0);      // сколько держим (для часов-окантовки)
   const stealHoldRef = useRef(0);
-  const stealHoldOn = () => {
-    if (stealHoldRef.current) return;
-    stealHoldRef.current = Date.now();
-  };
-  const stealHoldOff = () => {
-    if (!stealHoldRef.current) return;
-    const holdMs = Date.now() - stealHoldRef.current;
-    stealHoldRef.current = 0;
-    // ближайший играющий в радиусе кражи
+  /* ближайший играющий в радиусе кражи */
+  const nearestStealTarget = (): string | null => {
     const sNow = useApp.getState().session;
-    const mNow = useApp.getState().sessionMap;
-    if (!sNow || !mNow || !me) return;
+    if (!sNow || !me) return null;
     const mp = sNow.journeyPos?.[me];
-    if (!mp) return;
+    if (!mp) return null;
     const range = RUBG_STEAL_RANGE * CELL;
     let best: string | null = null; let bestD = range;
-    for (const [pid, job] of Object.entries(sNow.rubg?.jobs ?? {})) {
+    for (const [pid] of Object.entries(sNow.rubg?.jobs ?? {})) {
       if (pid === me) continue;
       const jp = sNow.journeyPos?.[pid];
       if (!jp) continue;
       const d2 = Math.hypot(jp.x - mp.x, jp.y - mp.y);
       if (d2 <= range && d2 < bestD) { bestD = d2; best = pid; }
     }
+    return best;
+  };
+  const stealOpenFlow = () => {
+    const best = nearestStealTarget();
     if (!best) {
       useApp.getState().toast('Подойдите ВПЛОТНУЮ к игроку, который играет задание', 'err');
       return;
     }
-    dispatch({ t: 'rubgStealStart', id: me, victimId: best, holdMs });
+    setStealVictim(best);
+    setStealSent(false);
+    setStealHoldMs(0);
+    setStealCharging(false);
+    setStealOpen(true);
+  };
+  const stealHoldOn = () => {
+    if (stealHoldRef.current) return;
+    stealHoldRef.current = Date.now();
+    setStealCharging(true);
+    setStealHoldMs(0);
+  };
+  const stealHoldOff = () => {
+    if (!stealHoldRef.current) return;
+    const holdMs = Date.now() - stealHoldRef.current;
+    stealHoldRef.current = 0;
+    setStealCharging(false);
+    setStealHoldMs(holdMs);
+    if (!stealVictim) return;
+    setStealSent(true);
+    dispatch({ t: 'rubgStealStart', id: me, victimId: stealVictim, holdMs });
+  };
+  /* тик заряда: окантовка-часы наполняется, пока держим кнопку (кап 8 с — как в движке) */
+  useEffect(() => {
+    if (!stealCharging) return;
+    const iv = setInterval(() => setStealHoldMs(stealHoldRef.current ? Date.now() - stealHoldRef.current : 0), 80);
+    return () => clearInterval(iv);
+  }, [stealCharging]);
+  /* отпустили кнопку, но хост не подтвердил старт (жертва ушла/у неё уже воруют) — закрываем */
+  useEffect(() => {
+    if (!stealSent || myStealing) return;
+    const t = setTimeout(() => {
+      setStealOpen(false);
+      setStealSent(false);
+      useApp.getState().toast('Кража не началась — жертва ушла или у неё уже воруют', 'err');
+    }, 900);
+    return () => clearTimeout(t);
+  }, [stealSent, myStealing]);
+  /* кража завершилась (успех/провал) — окно закрывается само */
+  useEffect(() => {
+    if (!myStealing && !stealSent) setStealOpen(false);
+  }, [myStealing, stealSent]);
+
+  /* ---------- RUBG: «во весь экран» для ЛИЧНОГО задания (отдельный враппер эмулятора) ---------- */
+  const rubgEmuWrapRef = useRef<HTMLDivElement>(null);
+  const rubgToggleFs = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => undefined);
+    } else {
+      rubgEmuWrapRef.current?.requestFullscreen().catch(() => useApp.getState().toast('Браузер запретил полный экран', 'err'));
+    }
   };
 
   if (!s || !map || !room) {
@@ -1122,7 +1197,8 @@ export default function GameScreen() {
   // Когда потрачено 5+ — игрок обязан пользоваться кнопкой «Пропустить» (спишет фактическую цену).
   const instantSkipAllowed = !!ch && !!info && (ch.lowStart ? remainingNow <= 0 : info.units < skipNeed);
   // перезапуск требует ресурс: на нуле задание непроходимо — остаётся только «Пропустить»
-  const canReload = !!ch && !!info && remainingNow > 0;
+  // (в HP/монетном режиме перезапуски бесплатны — перезапускать можно всегда)
+  const canReload = !!ch && !!info && (ch.mode === 'hp' || ch.mode === 'coins' ? true : remainingNow > 0);
   const owner = ch ? s.captured[ch.cellIdx] : undefined;
   // свой ход, фишка стоит, кубики не брошены — можно осматривать карту перетаскиванием
   const canLookAround = !!s && !!mePlayer && myTurn && s.phase === 'playing' && !s.moving && !ch && !s.pendingCard && !s.quiz && !s.awaitPost && viewMode === 'follow' && !peekMap;
@@ -1348,8 +1424,8 @@ export default function GameScreen() {
         </button>
         {isSkill && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-magma">SKILL CHALLENGE</span>}
         {map?.mapless && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-[#ff8b3f]">БЕЗ КАРТЫ</span>}
-        {/* RUBG: HP-полоска, стелс и зона */}
-        {isRubg && mePlayer && mePlayer.alive && !mePlayer.spect && (
+        {/* RUBG/HP-ресурс: полоска HP, стелс и зона */}
+        {hpRes && mePlayer && mePlayer.alive && !mePlayer.spect && (
           <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] flex items-center gap-1.5">
             <span className="relative inline-block w-16 h-2.5 bg-[rgba(7,9,18,0.85)] border border-[#313c72] align-middle">
               <span className="absolute inset-y-0 left-0" style={{ width: `${Math.max(0, Math.min(100, mePlayer.hp ?? 100))}%`, background: (mePlayer.hp ?? 100) > 50 ? '#35d46f' : (mePlayer.hp ?? 100) > 25 ? '#ffcf3f' : '#ff5d73' }} />
@@ -1412,6 +1488,16 @@ export default function GameScreen() {
                 <div className="tick-label text-faint mt-1 flex items-center gap-1.5">
                   {p.spect ? (
                     <span className="text-sky">смотрит трансляцию</span>
+                  ) : hpRes ? (
+                    <>
+                      <span className="text-coral" title="Ресурс — полоска HP">❤ {Math.round(p.hp ?? 100)}%</span>
+                      <span>№{p.pos + 1}</span>
+                    </>
+                  ) : coinsRes ? (
+                    <>
+                      <span className="text-teal" title={`Монеты: ${coinsStr(p.coinsLeft ?? 0)}`}>🪙 {coinsShort(p.coinsLeft ?? 0)}</span>
+                      <span>№{p.pos + 1}</span>
+                    </>
                   ) : (
                     <>
                       <span className="text-sky">{fmtClock(p.secLeft)}</span>
@@ -1539,13 +1625,21 @@ export default function GameScreen() {
                     ))}
                   </div>
                 )}
-                {/* ресурсы хоста */}
+                {/* ресурсы хоста — только выбранный на карте ресурс */}
                 {hostP && !hostP.spect && (
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-sky">⏱ {fmtClock(hostP.secLeft)}</span>
-                    <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-gold">🎯 {hostP.triesLeft} ПОП.</span>
-                    {coinsActive && <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-teal">🪙 {coinsStr(hostP.coinsLeft ?? 0)}</span>}
-                    {!hostP.alive && <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-coral">РЕСУРСЫ ИСЧЕРПАНЫ</span>}
+                    {hpRes ? (
+                      <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-coral">❤ HP {Math.round(hostP.hp ?? 100)}%</span>
+                    ) : coinsRes ? (
+                      <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-teal">🪙 {coinsStr(hostP.coinsLeft ?? 0)}</span>
+                    ) : (
+                      <>
+                        <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-sky">⏱ {fmtClock(hostP.secLeft)}</span>
+                        <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-gold">🎯 {hostP.triesLeft} ПОП.</span>
+                        {coinsActive && <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-teal">🪙 {coinsStr(hostP.coinsLeft ?? 0)}</span>}
+                      </>
+                    )}
+                    {!hostP.alive && <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-coral">{hpRes ? 'ПОЛОСКА HP НА НУЛЕ' : 'РЕСУРСЫ ИСЧЕРПАНЫ'}</span>}
                   </div>
                 )}
 
@@ -1836,42 +1930,8 @@ export default function GameScreen() {
           </div>
         )}
 
-        {/* ---------- RUBG: самолёт — каждый выпрыгивает, где хочет ---------- */}
-        {isRubg && s.phase === 'rollOff' && rubg?.plane && (() => {
-          const pl = rubg.plane;
-          const now = Date.now();
-          const len = Math.hypot(pl.x1 - pl.x0, pl.y1 - pl.y0) || 1;
-          const dd = Math.min(len, Math.max(0, ((now - pl.startAt) / 1000) * pl.speed));
-          const pxx = pl.x0 + (pl.x1 - pl.x0) * (dd / len);
-          const pyy = pl.y0 + (pl.y1 - pl.y0) * (dd / len);
-          const jumped = pl.jumped ?? [];
-          const iJumped = jumped.includes(me);
-          const rosterR = s.players.filter((q) => !q.spect);
-          const inside = pxx >= 0 && pxx <= (map.mw ?? 0) && pyy >= 0 && pyy <= (map.mh ?? 0);
-          return (
-            <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.5)] z-10">
-              <div className="pixel-panel pixel-corners pop-in p-6 max-w-md w-full mx-4 text-center">
-                <div className="font-display uppercase tracking-wider text-gold text-lg">🪂 САМОЛЁТ НА ЛИНИИ</div>
-                <p className="text-[11px] text-dim mt-1">Выпрыгивай, ГДЕ ХОЧЕШЬ — прыжок приземлит тебя под самолётом. Ищи задания и лутбоксы, следи за зоной!</p>
-                <div className="font-pixel text-[10px] text-paper my-3">Пройдено маршрута: {Math.round((dd / len) * 100)}%{inside ? '' : ' · самолёт ВНЕ карты'}</div>
-                {iJumped ? (
-                  <div className="font-pixel text-[9px] text-teal blink-hard">ПРЫЖОК СОВЕРШЁН — ждём остальных ({jumped.length}/{rosterR.length})</div>
-                ) : (
-                  <PxBtn big color="gold" disabled={!inside} onClick={() => { sfx.start(); dispatch({ t: 'rubgJump', id: me, x: Math.round(pxx), y: Math.round(pyy) }); }}>
-                    🪂 ПРЫГНУТЬ
-                  </PxBtn>
-                )}
-                <div className="mt-3 flex justify-center gap-1.5 flex-wrap">
-                  {rosterR.map((p) => (
-                    <span key={p.id} className={`font-pixel text-[8px] px-1.5 py-0.5 border-2 ${jumped.includes(p.id) ? 'border-teal text-teal' : 'border-edge text-dim'}`}>
-                      {p.name}{jumped.includes(p.id) ? ' ✔' : ''}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </div>
-          );
-        })()}
+        {/* ---------- RUBG: самолёта больше нет — все стартуют СО СТАРТОВОЙ ЯЧЕЙКИ
+             (панель готовности ниже, как в TRIATHLON) ---------- */}
 
         {/* ---------- жеребьёвка: все кубики видны сразу, бросают по очереди (зрители — в стороне) ---------- */}
         {s.phase === 'rollOff' && !s.rollOffWinner && !isRubg && (() => {
@@ -1945,9 +2005,11 @@ export default function GameScreen() {
           return (
             <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.6)] z-10">
               <div className="pixel-panel pixel-corners pop-in p-7 max-w-lg w-full mx-4 text-center">
-                <span className="text-gold inline-block floaty">{isJourney ? Ic.pawn(40) : Ic.dice(40)}</span>
-                <div className="font-pixel text-gold text-[11px] mt-3">{isJourney ? (isSoloJourney ? 'ОДИНОКОЕ ПРИКЛЮЧЕНИЕ' : 'ВСЕ СТАРТУЮТ ОДНОВРЕМЕННО') : 'ПЕРВЫМ ХОДИТ'}</div>
-                {isJourney ? (
+                <span className="text-gold inline-block floaty">{isRubg ? '🪂' : isJourney ? Ic.pawn(40) : Ic.dice(40)}</span>
+                <div className="font-pixel text-gold text-[11px] mt-3">{isRubg ? 'ВСЕ СТАРТУЮТ СО СТАРТОВОЙ ЯЧЕЙКИ' : isJourney ? (isSoloJourney ? 'ОДИНОКОЕ ПРИКЛЮЧЕНИЕ' : 'ВСЕ СТАРТУЮТ ОДНОВРЕМЕННО') : 'ПЕРВЫМ ХОДИТ'}</div>
+                {isRubg ? (
+                  <p className="text-[11px] text-dim mt-2">Жеребьёвки нет — все бойцы стартуют СО СТАРТОВОЙ ЯЧЕЙКИ. Ищите личные задания и лутбоксы, следите за сжимающейся зоной. Побеждает ПОСЛЕДНИЙ ЖИВОЙ!</p>
+                ) : isJourney ? (
                   <p className="text-[11px] text-dim mt-2">{isSoloJourney ? 'Играет ТОЛЬКО ХОСТ — все подключившиеся смотрят трансляцию. Жеребьёвки нет: фишка хоста идёт свободно от старта.' : 'Жеребьёвки нет — каждый ведёт СВОЮ фишку со старта. Кто ПЕРВЫМ пересечёт ячейку задания — у того оно и откроется, остальные будут смотреть.'}</p>
                 ) : (
                   <div
@@ -2138,9 +2200,8 @@ export default function GameScreen() {
                 alt={task.title}
                 className="w-full border-[3px] border-edge object-cover"
               />
-              <div className="text-[12px] text-dim leading-relaxed">
-                <div className="tick-label text-gold mb-1">Задание</div>
-                {task.desc}
+              <div className="min-w-0">
+                <TaskDesc text={task.desc} label="Задание" />
               </div>
               <div className="tick-label text-faint">Ром: {romName} · {taskRom?.ext === 'nes' ? 'NES' : 'SEGA'}</div>
               {ownerName && owner !== active?.id && (
@@ -2236,9 +2297,14 @@ export default function GameScreen() {
               {ch.status !== 'choose' && (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className={`hud-chip pixel-corners px-3 py-1.5 font-display text-[11px] uppercase flex items-center gap-1.5 ${ch.mode === 'time' ? 'text-sky' : ch.mode === 'coins' ? 'text-teal' : 'text-gold'}`}>
-                      {ch.mode === 'time' ? Ic.clock(13) : ch.mode === 'coins' ? <span>🪙</span> : Ic.target(13)} {ch.mode === 'time' ? 'Режим времени' : ch.mode === 'coins' ? 'Монетная игра' : 'Режим попыток'}
+                    <span className={`hud-chip pixel-corners px-3 py-1.5 font-display text-[11px] uppercase flex items-center gap-1.5 ${ch.mode === 'time' ? 'text-sky' : ch.mode === 'coins' ? 'text-teal' : ch.mode === 'hp' ? 'text-coral' : 'text-gold'}`}>
+                      {ch.mode === 'time' ? Ic.clock(13) : ch.mode === 'coins' ? <span>🪙</span> : ch.mode === 'hp' ? <span>❤</span> : Ic.target(13)} {ch.mode === 'time' ? 'Режим времени' : ch.mode === 'coins' ? 'Монетная игра' : ch.mode === 'hp' ? 'Ресурс: полоска HP' : 'Режим попыток'}
                     </span>
+                    {ch.mode === 'hp' && (
+                      <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-coral" title="HP-режим: плата по итогам — перезапуски бесплатны">
+                        ❤ HP {Math.round(mePlayer?.hp ?? 100)}% · победа +{RUBG_WIN_HP}% · поражение/пропуск −{RUBG_LOSE_HP}%
+                      </span>
+                    )}
                     {ch.mode === 'coins' && (
                       <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-teal" title="Монеты платятся по итогам: победа — награда, пропуск — цена">
                         🪙 {coinsShort(mePlayer?.coinsLeft ?? 0)} · победа +{map.taskWinCoins ?? 0} бр · пропуск {map.skipCoins ?? 5} бр · перезапуски бесплатны
@@ -2352,6 +2418,10 @@ export default function GameScreen() {
                             <p className="text-[10px] text-dim leading-tight">
                               Эмулятор загружен и ждёт. Монетная игра: во время задания ничего не списывается — победа принесёт {map.taskWinCoins ?? 0} бр, пропуск обойдётся в {map.skipCoins ?? 5} бр. Перезапуски бесплатны и бесконечны.
                             </p>
+                          ) : ch.mode === 'hp' ? (
+                            <p className="text-[10px] text-dim leading-tight">
+                              Эмулятор загружен и ждёт. HP-режим: во время задания ничего не списывается — победа +{RUBG_WIN_HP}% HP, поражение/пропуск −{RUBG_LOSE_HP}% HP. Перезапуски бесплатны.
+                            </p>
                           ) : (
                             <p className="text-[10px] text-dim leading-tight">
                               Эмулятор загружен и ждёт. {ch.mode === 'time' ? 'Таймер пойдёт' : 'Попытка спишется'} только после запуска — можно спокойно подготовиться.
@@ -2365,6 +2435,13 @@ export default function GameScreen() {
                               onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'coins', spentMs: 0, loads: 0 })}
                             >
                               {Ic.bolt(13)} Пропустить · {skipCoinsNeed} бр
+                            </GhostBtn>
+                          ) : ch.mode === 'hp' ? (
+                            <GhostBtn
+                              className="w-full"
+                              onClick={() => dispatch({ t: 'skip', id: me, instant: true, spentMs: 0, loads: 0 })}
+                            >
+                              {Ic.bolt(13)} Пропустить · −{RUBG_LOSE_HP}% HP
                             </GhostBtn>
                           ) : (
                             <GhostBtn
@@ -2410,6 +2487,14 @@ export default function GameScreen() {
                               onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'coins', spentMs: 0, loads: 0 })}
                             >
                               {Ic.bolt(13)} Пропустить · {skipCoinsNeed} бр
+                            </GhostBtn>
+                          ) : ch.mode === 'hp' ? (
+                            <GhostBtn
+                              className="w-full"
+                              disabled={ch.status === 'voting'}
+                              onClick={() => dispatch({ t: 'skip', id: me, instant: true, spentMs: 0, loads: 0 })}
+                            >
+                              {Ic.bolt(13)} Пропустить · −{RUBG_LOSE_HP}% HP
                             </GhostBtn>
                           ) : (
                             <>
@@ -2550,17 +2635,36 @@ export default function GameScreen() {
       {/* ==================== RUBG: интерфейс режима ==================== */}
       {isRubg && s.phase === 'playing' && mePlayer && mePlayer.alive && !mePlayer.spect && (
         <>
-          {/* ---------- ЛИЧНОЕ ЗАДАНИЕ: играешь только ты, другие не ждут ---------- */}
-          {myJob !== undefined && myRubgTask && !peekMap && (
+          {/* ---------- ЛИЧНОЕ ЗАДАНИЕ: как в других режимах — картинка, название, задание,
+              кнопки «карта мира / управление / звук / во весь экран» ---------- */}
+          {myJob !== undefined && myRubgTask && !peekMap && (() => {
+            const rName = rRomDef?.name ?? myRubgTask.romId;
+            return (
             <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(4,6,14,0.78)] p-3">
               <div className="pixel-panel pixel-corners p-4 max-w-3xl w-full max-h-[93vh] overflow-y-auto">
-                <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <div className="font-display uppercase text-lg text-gold">🎮 ЛИЧНОЕ ЗАДАНИЕ · {myRubgTask.title}</div>
-                  <span className="font-pixel text-[8px] text-faint">Задание №{myJob.cellIdx + 1} · играешь ТОЛЬКО ты</span>
+                <div className="flex items-center justify-between gap-3 flex-wrap min-w-0">
+                  <div className="font-display uppercase text-lg text-gold break-words min-w-0">🎮 ЛИЧНОЕ ЗАДАНИЕ · {myRubgTask.title}</div>
+                  <span className="font-pixel text-[8px] text-faint shrink-0">Задание №{myJob.cellIdx + 1} · играешь ТОЛЬКО ты</span>
                 </div>
-                <p className="text-[12px] text-dim mt-1 leading-relaxed">{myRubgTask.desc}</p>
-                <p className="text-[10px] text-faint mt-1">Никаких подтверждений — режим доверия. Победа: +{RUBG_WIN_HP}% HP + трофей, ячейка твоя. Поражение: −{RUBG_LOSE_HP}% HP. Остальные игроки продолжают бегать — на тебя никто не ждёт.</p>
-                <div className="mt-3">
+                <div className="grid md:grid-cols-[220px_1fr] gap-4 mt-2">
+                  {/* левая колонка: картинка, задание, кнопки */}
+                  <div className="space-y-3 min-w-0">
+                    <img
+                      src={rTaskImg ?? cartridgeArt(myRubgTask.title, rName, myJob.cellIdx)}
+                      alt={myRubgTask.title}
+                      className="w-full border-[3px] border-edge object-cover"
+                    />
+                    {myRubgTask.desc && <TaskDesc text={myRubgTask.desc} label="Задание" />}
+                    <div className="tick-label text-faint">Ром: {rName} · {rRomDef?.ext === 'nes' ? 'NES' : 'SEGA'}</div>
+                    <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
+                    <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
+                    <EmuVolumeChip />
+                    <GhostBtn small onClick={rubgToggleFs}>{isFs ? Ic.cross(12) : Ic.map(12)} {isFs ? 'Свернуть' : 'Во весь экран'}</GhostBtn>
+                  </div>
+                  {/* правая колонка: эмулятор + итоги */}
+                  <div className="min-w-0 space-y-3">
+                    <div ref={rubgEmuWrapRef} className={isFs ? 'bg-[#05070f] h-full w-full flex items-center justify-center p-4' : ''}>
+                      <div style={isFs ? { width: rRomDef?.ext === 'nes' ? 'min(92vw, calc(88vh * 1.0667))' : 'min(92vw, calc(88vh * 1.3333))' } : undefined}>
                   {rRomBuf ? (
                     <SegaBox
                       key={rEmuKey}
@@ -2578,175 +2682,249 @@ export default function GameScreen() {
                       <span className="font-pixel text-[8px] text-faint blink-hard">ЗАГРУЗКА РОМА…</span>
                     </div>
                   )}
-                </div>
-                <div className="grid grid-cols-3 gap-2 mt-3">
-                  <PxBtn color="teal" onClick={() => { sfx.success(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: true }); }}>
-                    🏆 ПОБЕДА +{RUBG_WIN_HP}%
-                  </PxBtn>
-                  <PxBtn color="coral" onClick={() => { sfx.fail(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: false }); }}>
-                    💀 ПОРАЖЕНИЕ −{RUBG_LOSE_HP}%
-                  </PxBtn>
-                  <GhostBtn onClick={() => { dispatch({ t: 'rubgJobLeave', id: me, cellIdx: myJob.cellIdx }); }}>🚶 Уйти</GhostBtn>
-                </div>
-                <div className="mt-2 text-center">
-                  <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
+                      </div>
+                    </div>
+                    <p className="text-[10px] text-faint">Никаких подтверждений — режим доверия. Победа: +{RUBG_WIN_HP}% HP + трофей, ячейка твоя. Поражение: −{RUBG_LOSE_HP}% HP. Остальные игроки продолжают бегать — на тебя никто не ждёт.</p>
+                    <div className="grid grid-cols-3 gap-2">
+                      <PxBtn color="teal" onClick={() => { sfx.success(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: true }); }}>
+                        🏆 ПОБЕДА +{RUBG_WIN_HP}%
+                      </PxBtn>
+                      <PxBtn color="coral" onClick={() => { sfx.fail(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: false }); }}>
+                        💀 ПОРАЖЕНИЕ −{RUBG_LOSE_HP}%
+                      </PxBtn>
+                      <GhostBtn onClick={() => { dispatch({ t: 'rubgJobLeave', id: me, cellIdx: myJob.cellIdx }); }}>🚶 Уйти</GhostBtn>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
-          )}
-
-          {/* ---------- КАРМАН: мини-игра вора ---------- */}
-          {myStealing && (() => {
-            const victim = s.players.find((x) => x.id === myStealing.victim);
-            const items = victim?.items ?? [];
-            const leftS = Math.max(0, (myStealing.startedAt + myStealing.dur * 1000 - Date.now()) / 1000);
-            return (
-              <div className="fixed inset-0 z-[62] flex items-center justify-center bg-[rgba(4,6,14,0.82)] p-4">
-                <div className="pixel-panel pixel-corners p-5 max-w-sm w-full">
-                  <div className="tick-label text-coral">🤏 РУКА В КАРМАНЕ · {victim?.name ?? '?'}</div>
-                  <p className="text-[10px] text-faint mt-1">WASD/стрелки — двигай руку, ENTER/клик — укради. У хозяина уже рябит в глазах — торопись!</p>
-                  <div className={`font-display text-3xl my-2 ${leftS < 2 ? 'text-coral blink-hard' : 'text-paper'}`}>{leftS.toFixed(1)} с</div>
-                  <div className="space-y-1.5">
-                    {items.length === 0 && <div className="text-[11px] text-dim">Карман пуст…</div>}
-                    {items.map((it: RubgItem, i: number) => (
-                      <button
-                        key={it.id}
-                        onClick={() => { setPocketCur(i); dispatch({ t: 'rubgStealPick', id: me, victimId: myStealing.victim, itemId: it.id }); }}
-                        className={`w-full text-left px-3 py-2 border-2 cursor-pointer font-display text-[11px] ${i === pocketCur ? 'border-coral bg-coral/10 text-paper' : 'border-edge text-dim hover:border-edge2'}`}
-                      >
-                        {RUBG_ITEMS[it.kind].icon} {RUBG_ITEMS[it.kind].name}{it.kind === 'steal' && it.uses !== undefined ? ` (${it.uses} исп.)` : ''}
-                      </button>
-                    ))}
-                  </div>
-                  <button onClick={() => dispatch({ t: 'rubgStealFail', id: me, victimId: myStealing.victim })} className="mt-3 text-[10px] text-faint underline cursor-pointer">Убрать руку (раскроешь себя)</button>
-                </div>
-              </div>
-            );
-})()}
-
-          {/* ---------- ЖЕРТВА: помехи + кнопка «Остановить вора» ---------- */}
-          {mySteal && !myStealing && (() => {
-            const elapsed = Math.min(1, (Date.now() - mySteal.startedAt) / (mySteal.dur * 1000));
-            const thiefP = s.players.find((x) => x.id === mySteal.thief);
-            const cdLeft = Math.max(0, RUBG_STOP_CD * 1000 - (Date.now() - (rubg?.stopCd?.[me] ?? 0)));
-            return (
-              <>
-                <div
-                  className="fixed inset-0 z-[55] pointer-events-none"
-                  style={{
-                    opacity: 0.2 + elapsed * 0.65,
-                    background: 'repeating-linear-gradient(0deg, rgba(255,255,255,0.10) 0 2px, transparent 2px 5px), repeating-linear-gradient(90deg, rgba(255,93,115,0.12) 0 3px, transparent 3px 7px)',
-                    mixBlendMode: 'screen',
-                  }}
-                />
-                <div className="fixed bottom-28 left-1/2 -translate-x-1/2 z-[56] text-center">
-                  <div className="font-pixel text-[9px] text-coral blink-hard mb-1.5">🤏 {thiefP?.name ?? 'КТО-ТО'} РЫЕТСЯ В ТВОЁМ КАРМАНЕ!</div>
-                  <PxBtn
-                    color="coral"
-                    disabled={cdLeft > 0}
-                    onClick={() => dispatch({ t: 'rubgStopThief', id: me })}
-                  >
-                    {cdLeft > 0 ? `🚨 ОСТАНОВИТЬ ВОРа (${Math.ceil(cdLeft / 1000)}с)` : '🚨 ОСТАНОВИТЬ ВОРа!'}
-                  </PxBtn>
-                  <div className="text-[9px] text-faint mt-1">Кулдаун {RUBG_STOP_CD} с — не спамь зря</div>
-                </div>
-              </>
             );
           })()}
 
-          {/* ---------- ИНВЕНТАРЬ RUBG ---------- */}
-          {mySteal === undefined && (
-            <div className="fixed bottom-3 right-3 z-30 w-60 pixel-panel pixel-corners p-2.5 space-y-1.5 max-h-[52vh] overflow-y-auto">
-              <div className="tick-label">🎒 ИНВЕНТАРЬ · HP {Math.round(mePlayer.hp ?? 100)}%</div>
-              {(mePlayer.items ?? []).length === 0 && <div className="text-[10px] text-faint">Пусто — ищи ЛУТБОКСЫ 📦</div>}
-              {(mePlayer.items ?? []).map((it: RubgItem) => {
-                const meta = RUBG_ITEMS[it.kind];
-                const heal = meta.hp > 0 && meta.radius === 0;
-                const weapon = meta.radius > 0;
-                const isStealCard = it.kind === 'steal';
-                const isStealthCard = it.kind === 'stealth';
-                /* рядом есть играющий в радиусе кражи? */
-                const mp = s.journeyPos?.[me];
-                const stealTarget = isStealCard && mp
-                  ? Object.entries(rubg?.jobs ?? {}).find(([pid]) => {
-                      if (pid === me) return false;
-                      const jp = s.journeyPos?.[pid];
-                      return !!jp && Math.hypot(jp.x - mp.x, jp.y - mp.y) <= RUBG_STEAL_RANGE * CELL;
-                    })
-                  : undefined;
-                return (
-                  <div key={it.id} className="border-2 border-edge px-2 py-1.5">
-                    <div className="font-display text-[11px] text-paper flex items-center gap-1.5">
-                      <span>{meta.icon}</span>
-                      <span className="min-w-0 truncate">{meta.name}</span>
-                      {isStealCard && it.uses !== undefined && <span className="ml-auto font-pixel text-[8px] text-teal">×{it.uses}</span>}
-                      {heal && <span className="ml-auto font-pixel text-[8px] text-teal">+{meta.hp}%</span>}
-                      {weapon && <span className="ml-auto font-pixel text-[8px] text-coral">−{meta.hp}% · {meta.radius} кл</span>}
-                    </div>
-                    {heal && (
-                      <button
-                        onClick={() => dispatch({ t: 'rubgUseItem', id: me, itemId: it.id })}
-                        disabled={(mePlayer.hp ?? 100) >= RUBG_HP_MAX}
-                        className="mt-1 w-full py-1 border-2 border-teal text-teal font-pixel text-[8px] cursor-pointer hover:bg-teal/10 disabled:opacity-35 disabled:cursor-not-allowed"
-                      >{(mePlayer.hp ?? 100) >= RUBG_HP_MAX ? 'HP ПОЛНОЕ' : 'ИСПОЛЬЗОВАТЬ'}</button>
+          {/* ---------- КАРМАН: клик → пустые клетки → ЗАЖАТЬ «НАЧАТЬ ВОРОВСТВО» (окантовка-часы) ----------
+              → ОТПУСТИТЬ: таймер пойдёт и клетки раскроются → WASD/стрелки/тап → «СВОРОВАТЬ» ---------- */}
+          {(myStealing || (stealOpen && stealVictim)) && (() => {
+            const vid = myStealing ? myStealing.victim : stealVictim!;
+            const victim = s.players.find((x) => x.id === vid);
+            const active = !!myStealing; // фаза таймера (хост подтвердил старт)
+            const holdFrac = Math.max(0, Math.min(1, (1 + stealHoldMs / 1000) / 8)); // заряд: до 8 с (как в движке)
+            const leftMs = active ? Math.max(0, myStealing.startedAt + myStealing.dur * 1000 - Date.now()) : 0;
+            const leftFrac = active ? Math.max(0, Math.min(1, leftMs / (myStealing.dur * 1000))) : 0;
+            const frac = active ? leftFrac : holdFrac;
+            const ringColor = active
+              ? (frac > 0.5 ? '#2ee6a8' : frac > 0.25 ? '#ffcf3f' : '#ff5d73')
+              : '#ff8b3f';
+            const cur = active ? pocketItems[pocketCur] : undefined;
+            return (
+              <div className="fixed inset-0 z-[62] flex items-center justify-center bg-[rgba(4,6,14,0.85)] p-4">
+                <div className="pixel-panel pixel-corners p-5 max-w-sm w-full">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="tick-label text-coral">🤏 КАРМАН · {victim?.name ?? '?'}</div>
+                    {!active && (
+                      <button onClick={() => { setStealOpen(false); setStealSent(false); }} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
                     )}
-                    {isStealCard && (
+                  </div>
+                  <p className="text-[10px] text-faint mt-1">
+                    {active
+                      ? 'WASD/стрелки/тап — двигай выделение, ENTER или «СВОРОВАТЬ» — укради. Пояс не воруется!'
+                      : 'ЗАЖМИ «НАЧАТЬ ВОРОВСТВО» — окантовка покажет, сколько будет времени. ОТПУСТИ — таймер пойдёт, клетки раскроются.'}
+                  </p>
+                  {/* СЕТКА КЛЕТОК с окантовкой-часами */}
+                  <div
+                    className="mt-3 p-[4px]"
+                    style={{ background: `conic-gradient(${ringColor} 0 ${(frac * 360).toFixed(1)}deg, rgba(49,60,114,0.55) ${(frac * 360).toFixed(1)}deg 360deg)` }}
+                  >
+                    <div className="bg-[#0d1226] p-1.5 grid grid-cols-4 gap-1.5">
+                      {Array.from({ length: POCKET_CELLS }).map((_, i) => {
+                        const it = pocketItems[i];
+                        const sel = active && i === pocketCur;
+                        return (
+                          <button
+                            key={i}
+                            onClick={() => { if (active) setPocketCur(i); }}
+                            className={`aspect-square min-h-[52px] border-2 flex items-center justify-center text-center leading-tight px-0.5 cursor-pointer ${sel ? 'border-coral bg-coral/10' : 'border-edge hover:border-edge2'}`}
+                            title={it ? RUBG_ITEMS[it.kind].name : 'пусто'}
+                          >
+                            {active && it ? (
+                              <span className="font-pixel text-[7px] text-paper">{RUBG_ITEMS[it.kind].icon}<br />{RUBG_ITEMS[it.kind].name.split(' ')[0]}</span>
+                            ) : active ? (
+                              <span className="font-pixel text-[7px] text-faint">·</span>
+                            ) : (
+                              <span className="font-pixel text-[7px] text-faint">?</span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {active ? (
+                    <>
+                      <div className={`font-display text-2xl text-center my-2 ${(leftMs < 2000) ? 'text-coral blink-hard' : 'text-paper'}`}>{(leftMs / 1000).toFixed(1)} с</div>
+                      <div className="grid grid-cols-4 gap-1.5">
+                        <button onClick={() => setPocketCur((c) => Math.max(0, c - POCKET_COLS))} className="py-2 border-2 border-edge text-paper font-pixel text-[9px] cursor-pointer hover:border-edge2 active:bg-edge/40">▲</button>
+                        <button onClick={() => setPocketCur((c) => Math.max(0, c - 1))} className="py-2 border-2 border-edge text-paper font-pixel text-[9px] cursor-pointer hover:border-edge2 active:bg-edge/40">◀</button>
+                        <button onClick={() => setPocketCur((c) => Math.min(POCKET_CELLS - 1, c + 1))} className="py-2 border-2 border-edge text-paper font-pixel text-[9px] cursor-pointer hover:border-edge2 active:bg-edge/40">▶</button>
+                        <button onClick={() => setPocketCur((c) => Math.min(POCKET_CELLS - 1, c + POCKET_COLS))} className="py-2 border-2 border-edge text-paper font-pixel text-[9px] cursor-pointer hover:border-edge2 active:bg-edge/40">▼</button>
+                      </div>
+                      <PxBtn
+                        color="coral"
+                        className="w-full mt-2"
+                        disabled={!cur}
+                        onClick={() => cur && dispatch({ t: 'rubgStealPick', id: me, victimId: myStealing.victim, itemId: cur.id })}
+                      >
+                        {cur ? `🤏 СВОРОВАТЬ: ${RUBG_ITEMS[cur.kind].name}` : 'выбери предмет'}
+                      </PxBtn>
+                      <button onClick={() => dispatch({ t: 'rubgStealFail', id: me, victimId: myStealing.victim })} className="mt-2 w-full text-[10px] text-faint underline cursor-pointer">Убрать руку (раскроешь себя)</button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="font-display text-sm text-center my-2 text-magma">
+                        Держишь {(stealHoldMs / 1000).toFixed(1)} с → будет {Math.min(8, 1 + stealHoldMs / 1000).toFixed(1)} с воровства
+                      </div>
                       <button
                         onPointerDown={stealHoldOn}
                         onPointerUp={stealHoldOff}
                         onPointerLeave={() => { if (stealHoldRef.current) stealHoldOff(); }}
-                        disabled={!stealTarget}
-                        className={`mt-1 w-full py-1.5 border-2 font-pixel text-[8px] select-none touch-none ${stealTarget ? 'border-coral text-coral cursor-pointer hover:bg-coral/10' : 'border-edge text-faint cursor-not-allowed'}`}
-                      >{stealTarget ? '🤏 ДЕРЖИ — УКРАСТЬ' : 'подойди к играющему'}</button>
-                    )}
-                    {isStealthCard && (
+                        disabled={stealSent}
+                        className="w-full py-3 btn-px pixel-corners btn-coral text-sm select-none touch-none"
+                      >
+                        🤏 НАЧАТЬ ВОРОВСТВО (держи)
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ---------- ЖЕРТВА: ТОЛЬКО слабовидные ПОМЕХИ (без надписей) — чем дольше роются, тем сильнее.
+              «Остановить воровство» — в обычном инвентаре (кнопка «Инвентарь») ---------- */}
+          {mySteal && !myStealing && (() => {
+            const elapsed = Math.min(1, (Date.now() - mySteal.startedAt) / (mySteal.dur * 1000));
+            return (
+              <div
+                className="fixed inset-0 z-[55] pointer-events-none"
+                style={{
+                  opacity: 0.07 + elapsed * 0.6,
+                  background: 'repeating-linear-gradient(0deg, rgba(255,255,255,0.10) 0 2px, transparent 2px 5px), repeating-linear-gradient(90deg, rgba(255,93,115,0.12) 0 3px, transparent 3px 7px)',
+                  mixBlendMode: 'screen',
+                }}
+              />
+            );
+          })()}
+
+          {/* ---------- ПОЯС RUBG: 3 слота на экране (только они действуют); ----------
+              остальное — в ОБЩЕМ инвентаре (кнопка «Инвентарь» внизу). Пояс НЕ воруется ---------- */}
+          {mySteal === undefined && (
+            <div className="fixed bottom-3 right-3 z-30 w-64 pixel-panel pixel-corners p-2.5 space-y-1.5 max-h-[62vh] overflow-y-auto">
+              <div className="tick-label">🧰 ПОЯС · HP {Math.round(mePlayer.hp ?? 100)}% · слотов {RUBG_BELT_SLOTS}</div>
+              {(() => {
+                const inv = mePlayer.items ?? [];
+                const belted = inv.filter((x: RubgItem) => x.belt);
+                const slots = Array.from({ length: RUBG_BELT_SLOTS }, (_, i) => belted[i] as RubgItem | undefined);
+                return slots.map((it: RubgItem | undefined, slot: number) => {
+                  if (!it) {
+                    return (
+                      <div key={`beltEmpty${slot}`} className="border-2 border-dashed border-edge px-2 py-2.5 text-center font-pixel text-[8px] text-faint">
+                        слот {slot + 1} пуст{inv.length > belted.length ? ' — надень предмет из ИНВЕНТАРЯ' : ''}
+                      </div>
+                    );
+                  }
+                  const meta = RUBG_ITEMS[it.kind];
+                  const heal = meta.hp > 0 && meta.radius === 0;
+                  const weapon = meta.radius > 0;
+                  const isStealCard = it.kind === 'steal';
+                  const isStealthCard = it.kind === 'stealth';
+                  /* рядом есть играющий в радиусе кражи? */
+                  const mp = s.journeyPos?.[me];
+                  const stealNear = isStealCard && mp
+                    ? Object.entries(rubg?.jobs ?? {}).some(([pid]) => {
+                        if (pid === me) return false;
+                        const jp = s.journeyPos?.[pid];
+                        return !!jp && Math.hypot(jp.x - mp.x, jp.y - mp.y) <= RUBG_STEAL_RANGE * CELL;
+                      })
+                    : false;
+                  return (
+                    <div key={it.id} className="border-2 border-[#ff8b3f]/60 bg-[#ff8b3f]/5 px-2 py-1.5">
+                      <div className="font-display text-[11px] text-paper flex items-center gap-1.5">
+                        <span>{meta.icon}</span>
+                        <span className="min-w-0 truncate">{meta.name}</span>
+                        {isStealCard && it.uses !== undefined && <span className="ml-auto font-pixel text-[8px] text-teal">×{it.uses}</span>}
+                        {heal && <span className="ml-auto font-pixel text-[8px] text-teal">+{meta.hp}%</span>}
+                        {weapon && <span className="ml-auto font-pixel text-[8px] text-coral">−{meta.hp}% · {meta.radius} кл</span>}
+                      </div>
+                      {heal && (
+                        <button
+                          onClick={() => dispatch({ t: 'rubgUseItem', id: me, itemId: it.id })}
+                          disabled={(mePlayer.hp ?? 100) >= RUBG_HP_MAX}
+                          className="mt-1 w-full py-1 border-2 border-teal text-teal font-pixel text-[8px] cursor-pointer hover:bg-teal/10 disabled:opacity-35 disabled:cursor-not-allowed"
+                        >{(mePlayer.hp ?? 100) >= RUBG_HP_MAX ? 'HP ПОЛНОЕ' : 'ИСПОЛЬЗОВАТЬ'}</button>
+                      )}
+                      {isStealCard && (
+                        <button
+                          onClick={stealOpenFlow}
+                          disabled={!stealNear}
+                          className={`mt-1 w-full py-1.5 border-2 font-pixel text-[8px] select-none touch-none ${stealNear ? 'border-coral text-coral cursor-pointer hover:bg-coral/10' : 'border-edge text-faint cursor-not-allowed'}`}
+                        >{stealNear ? '🤏 УКРАСТЬ' : 'подойди к играющему'}</button>
+                      )}
+                      {isStealthCard && (
+                        <button
+                          onClick={() => dispatch({ t: 'rubgStealth', id: me })}
+                          className="mt-1 w-full py-1 border-2 border-[#c07aff] text-[#c07aff] font-pixel text-[8px] cursor-pointer hover:bg-[#c07aff]/10"
+                        >👻 АКТИВИРОВАТЬ СТЕЛС</button>
+                      )}
+                      {weapon && (
+                        <button
+                          onClick={() => setAimItemId(aimItemId === it.id ? null : it.id)}
+                          className="mt-1 w-full py-1 border-2 border-magma text-magma font-pixel text-[8px] cursor-pointer hover:bg-magma/10"
+                        >{aimItemId === it.id ? 'ВЫБЕРИ ЦЕЛЬ ↓' : 'АТАКА →'}</button>
+                      )}
+                      {weapon && aimItemId === it.id && (() => {
+                        const mp2 = s.journeyPos?.[me];
+                        const range = meta.radius * CELL;
+                        const targets = mp2
+                          ? s.players.filter((q) => {
+                              if (q.id === me || !q.alive || q.spect) return false;
+                              if ((rubg?.stealth ?? []).includes(q.id)) return false; // в стелсе не видно
+                              const jp = s.journeyPos?.[q.id];
+                              return !!jp && Math.hypot(jp.x - mp2.x, jp.y - mp2.y) <= range;
+                            })
+                          : [];
+                        return (
+                          <div className="mt-1 space-y-1">
+                            {targets.length === 0 && <div className="text-[9px] text-faint">Никого в радиусе {meta.radius} кл</div>}
+                            {targets.map((q) => {
+                              const jp = s.journeyPos?.[q.id]!;
+                              const d2 = Math.hypot(jp.x - mp2!.x, jp.y - mp2!.y);
+                              const busy = !!(rubg?.jobs ?? {})[q.id];
+                              const chance = busy ? 100 : Math.round(Math.max(15, 1 - d2 / range) * 100);
+                              return (
+                                <button
+                                  key={q.id}
+                                  onClick={() => { dispatch({ t: 'rubgShoot', id: me, itemId: it.id, targetId: q.id }); setAimItemId(null); }}
+                                  className="w-full text-left px-2 py-1 border-2 border-edge font-pixel text-[8px] text-paper cursor-pointer hover:border-magma"
+                                >
+                                  {busy ? '🎯' : '👟'} {q.name} · {Math.round(d2 / CELL)}кл · {chance}%{busy ? ' (играет)' : ''}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
                       <button
-                        onClick={() => dispatch({ t: 'rubgStealth', id: me })}
-                        className="mt-1 w-full py-1 border-2 border-[#c07aff] text-[#c07aff] font-pixel text-[8px] cursor-pointer hover:bg-[#c07aff]/10"
-                      >👻 АКТИВИРОВАТЬ СТЕЛС</button>
-                    )}
-                    {weapon && (
-                      <button
-                        onClick={() => setAimItemId(aimItemId === it.id ? null : it.id)}
-                        className="mt-1 w-full py-1 border-2 border-magma text-magma font-pixel text-[8px] cursor-pointer hover:bg-magma/10"
-                      >{aimItemId === it.id ? 'ВЫБЕРИ ЦЕЛЬ ↓' : 'АТАКА →'}</button>
-                    )}
-                    {weapon && aimItemId === it.id && (() => {
-                      const mp2 = s.journeyPos?.[me];
-                      const range = meta.radius * CELL;
-                      const targets = mp2
-                        ? s.players.filter((q) => {
-                            if (q.id === me || !q.alive || q.spect) return false;
-                            if ((rubg?.stealth ?? []).includes(q.id)) return false; // в стелсе не видно
-                            const jp = s.journeyPos?.[q.id];
-                            return !!jp && Math.hypot(jp.x - mp2.x, jp.y - mp2.y) <= range;
-                          })
-                        : [];
-                      return (
-                        <div className="mt-1 space-y-1">
-                          {targets.length === 0 && <div className="text-[9px] text-faint">Никого в радиусе {meta.radius} кл</div>}
-                          {targets.map((q) => {
-                            const jp = s.journeyPos?.[q.id]!;
-                            const d2 = Math.hypot(jp.x - mp2!.x, jp.y - mp2!.y);
-                            const busy = !!(rubg?.jobs ?? {})[q.id];
-                            const chance = busy ? 100 : Math.round(Math.max(15, 1 - d2 / range) * 100);
-                            return (
-                              <button
-                                key={q.id}
-                                onClick={() => { dispatch({ t: 'rubgShoot', id: me, itemId: it.id, targetId: q.id }); setAimItemId(null); }}
-                                className="w-full text-left px-2 py-1 border-2 border-edge font-pixel text-[8px] text-paper cursor-pointer hover:border-magma"
-                              >
-                                {busy ? '🎯' : '👟'} {q.name} · {Math.round(d2 / CELL)}кл · {chance}%{busy ? ' (играет)' : ''}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      );
-                    })()}
-                  </div>
-                );
-              })}
-              <p className="text-[8px] text-faint leading-tight">Своё задание на побеждённой ячейке создать нельзя — только лут и HP.</p>
+                        onClick={() => dispatch({ t: 'rubgBelt', id: me, itemId: it.id, on: false })}
+                        className="mt-1 w-full py-0.5 font-pixel text-[7px] text-faint hover:text-dim cursor-pointer"
+                        title="Убрать в общий инвентарь"
+                      >⬇ в инвентарь</button>
+                    </div>
+                  );
+                });
+              })()}
+              <button
+                onClick={() => { setInvOpen(true); sfx.click(); }}
+                className="w-full py-1.5 border-2 border-edge font-pixel text-[8px] text-sky hover:border-sky cursor-pointer"
+              >🎒 ИНВЕНТАРЬ (надеть на пояс / остановить вора)</button>
+              <p className="text-[8px] text-faint leading-tight">На поясе макс. {RUBG_BELT_SLOTS} предмета — только они действуют (лечиться/стрелять/воровать/стелс). Пояс НЕ воруется. Своё задание на побеждённой ячейке создать нельзя — только лут и HP.</p>
             </div>
           )}
         </>
@@ -2994,6 +3172,12 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
   const canSell = !myTurn || !busy; // текущий игрок тоже может торговать — пока не бросил кубики
   const joyAppliable = (c: CardDef) =>
     !c.chaos && c.effect.type !== 'immuneSega' && c.effect.type !== 'immuneNes';
+  /* RUBG: пояс/инвентарь и «Остановить воровство» */
+  const rubgMap = map?.mode === 'rubg';
+  const rubgInv = mePlayer?.items ?? [];
+  const rubgBelted = rubgInv.filter((x) => x.belt);
+  const stopCdLeft = rubgMap ? Math.max(0, RUBG_STOP_CD * 1000 - (Date.now() - (s.rubg?.stopCd?.[me!] ?? 0))) : 0;
+  const invHpRes = map?.mode === 'rubg' || map?.resMode === 'hp';
 
   return (
     <div className="fixed inset-0 z-[96] flex items-center justify-center p-4">
@@ -3002,12 +3186,60 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
         <div className="flex items-center gap-2 mb-3 flex-wrap">
           <span className="text-teal">{Ic.grid(18)}</span>
           <span className="font-display uppercase tracking-wider text-paper text-sm">Инвентарь</span>
-          <span className="tick-label text-gold">{fmtClock(mePlayer?.secLeft ?? 0)} · {mePlayer?.triesLeft ?? 0} поп.</span>
+          {invHpRes ? (
+            <span className="tick-label text-coral">❤ HP {Math.round(mePlayer?.hp ?? 100)}%</span>
+          ) : (
+            <span className="tick-label text-gold">{fmtClock(mePlayer?.secLeft ?? 0)} · {mePlayer?.triesLeft ?? 0} поп.</span>
+          )}
           {myTurn && (busy
             ? <span className="tick-label text-magma">ваш ход — торги недоступны</span>
             : <span className="tick-label text-teal">ваш ход — торги открыты до броска кубиков</span>)}
           <GhostBtn small className="ml-auto" onClick={onClose}>{Ic.cross(12)} Закрыть</GhostBtn>
         </div>
+
+        {/* ---------- RUBG: предметы (пояс/инвентарь) + «Остановить воровство» ---------- */}
+        {rubgMap && (
+          <div className="border-2 border-[#ff8b3f]/60 px-3 py-2.5 mb-4 space-y-2">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="tick-label text-[#ff8b3f]">🧰 РУБГ · на поясе {rubgBelted.length}/{RUBG_BELT_SLOTS} · всего предметов {rubgInv.length}</span>
+              <span className="tick-label text-faint">с пояса — действуют; пояс не воруется</span>
+            </div>
+            {/* «Остановить воровство»: доступен всегда (кулдаун 15 с), без надписей — о краже говорят только помехи */}
+            <PxBtn
+              color="coral"
+              className="w-full"
+              disabled={stopCdLeft > 0}
+              onClick={() => dispatch({ t: 'rubgStopThief', id: me! })}
+            >
+              {stopCdLeft > 0 ? `🚨 ОСТАНОВИТЬ ВОРОВСТВО (${Math.ceil(stopCdLeft / 1000)}с)` : '🚨 ОСТАНОВИТЬ ВОРОВСТВО'}
+            </PxBtn>
+            {rubgInv.length === 0 && <div className="text-[11px] text-dim">Пусто — ищи ЛУТБОКСЫ 📦 на карте</div>}
+            {rubgInv.map((it: RubgItem) => {
+              const meta = RUBG_ITEMS[it.kind];
+              return (
+                <div key={it.id} className={`flex items-center gap-2 px-2 py-1.5 border-2 ${it.belt ? 'border-[#ff8b3f]/60 bg-[#ff8b3f]/5' : 'border-edge'}`}>
+                  <span>{meta.icon}</span>
+                  <span className="font-display text-[11px] text-paper min-w-0 truncate">{meta.name}{it.kind === 'steal' && it.uses !== undefined ? ` (${it.uses} исп.)` : ''}</span>
+                  <span className={`ml-auto font-pixel text-[7px] shrink-0 ${it.belt ? 'text-[#ff8b3f]' : 'text-faint'}`}>{it.belt ? 'НА ПОЯСЕ' : 'в инвентаре'}</span>
+                  {it.belt ? (
+                    <GhostBtn small onClick={() => dispatch({ t: 'rubgBelt', id: me!, itemId: it.id, on: false })}>С пояса</GhostBtn>
+                  ) : (
+                    <GhostBtn
+                      small
+                      onClick={() => {
+                        if (rubgBelted.length >= RUBG_BELT_SLOTS) {
+                          useApp.getState().toast(`Пояс полон (${RUBG_BELT_SLOTS} слота) — снимите что-нибудь с пояса`, 'err');
+                          return;
+                        }
+                        dispatch({ t: 'rubgBelt', id: me!, itemId: it.id, on: true });
+                      }}
+                    >На пояс</GhostBtn>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* входящие предложения */}
         {incoming.length > 0 && (
@@ -3272,6 +3504,38 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
 
 /* ---------- осмотр ячейки на карте (для всех, включая зрителей) ---------- */
 
+/* ---------- текст задания: читаемо всегда (переносы длинных строк) + СПОЙЛЕР для длинного ----------
+   Длинный текст не растягивается одной строкой через экран: переносим слова/любые символы,
+   а если текст длинный — прячем под спойлер с кнопкой «показать целиком». */
+function TaskDesc({ text, label, max = 180 }: { text: string; label?: string; max?: number }) {
+  const [open, setOpen] = useState(false);
+  const long = text.length > max;
+  return (
+    <div className="min-w-0 text-[12px] text-dim leading-relaxed break-words [overflow-wrap:anywhere]">
+      {label && <div className="tick-label text-gold mb-1">{label}</div>}
+      {long && !open ? (
+        <>
+          <span>{text.slice(0, max)}…</span>
+          <button
+            onClick={() => { setOpen(true); sfx.click(); }}
+            className="block mt-1 font-pixel text-[8px] text-sky hover:text-paper underline cursor-pointer"
+          >▼ СПОЙЛЕР: показать задание целиком</button>
+        </>
+      ) : (
+        <>
+          <span>{text}</span>
+          {long && (
+            <button
+              onClick={() => { setOpen(false); sfx.click(); }}
+              className="block mt-1 font-pixel text-[8px] text-sky hover:text-paper underline cursor-pointer"
+            >▲ Свернуть задание</button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function CellInspectModal({ idx, onClose }: { idx: number; onClose: () => void }) {
   const st = useApp();
   const s = st.session;
@@ -3286,8 +3550,8 @@ function CellInspectModal({ idx, onClose }: { idx: number; onClose: () => void }
   const revealed = (s.revealed ?? []).includes(idx) || !!ownerId;
   const hidden = !!st.options.hideUnrevealed && !revealed;
   const rom = task ? st.roms.find((r) => r.id === task.romId) : undefined;
-  const typeLabel = cell.type === 'task' ? 'Задание' : cell.type === 'rest' ? 'Передышка' : cell.type === 'bonus' ? 'Бонус (шанс)' : cell.type === 'trap' ? 'Ловушка' : 'Квиз';
-  const typeColor = cell.type === 'task' ? 'text-gold' : cell.type === 'rest' ? 'text-dim' : cell.type === 'bonus' ? 'text-teal' : cell.type === 'trap' ? 'text-coral' : 'text-sky';
+  const typeLabel = cell.type === 'task' ? 'Задание' : cell.type === 'rest' ? 'Передышка' : cell.type === 'bonus' ? 'Бонус (шанс)' : cell.type === 'trap' ? 'Ловушка' : cell.type === 'loot' ? 'ЛУТБОКС' : 'Квиз';
+  const typeColor = cell.type === 'task' ? 'text-gold' : cell.type === 'rest' ? 'text-dim' : cell.type === 'bonus' ? 'text-teal' : cell.type === 'trap' ? 'text-coral' : cell.type === 'loot' ? 'text-[#ff8b3f]' : 'text-sky';
   const joyMeta = task?.joy ? JOY_LIST.find((j) => j.id === task.joy) : null;
   return (
     <Modal title={`${cell.nonumber || cell.n === 0 ? 'Ячейка без номера' : `Ячейка №${cell.n}`}${cell.label ? ` · ${cell.label}` : ''}`} icon={Ic.target(16)} w="max-w-md" onClose={onClose}>
@@ -3315,8 +3579,8 @@ function CellInspectModal({ idx, onClose }: { idx: number; onClose: () => void }
             <>
               <div>
                 <div className="tick-label text-gold mb-1">Задание</div>
-                <div className="font-display uppercase text-[13px] text-paper">{task.title}</div>
-                <p className="text-[12px] text-dim leading-relaxed mt-1">{task.desc}</p>
+                <div className="font-display uppercase text-[13px] text-paper break-words">{task.title}</div>
+                {task.desc && <div className="mt-1"><TaskDesc text={task.desc} /></div>}
               </div>
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[9px] text-faint">
@@ -3349,6 +3613,9 @@ function CellInspectModal({ idx, onClose }: { idx: number; onClose: () => void }
           )}
           {cell.type === 'quiz' && (
             <p className="text-[12px] text-dim">Ячейка-квиз: прозвучит случайный вопрос из колоды ({(map.quizzes ?? []).length} шт.).</p>
+          )}
+          {cell.type === 'loot' && (
+            <p className="text-[12px] text-dim">Ячейка-ЛУТБОКС (режим RUBG): одноразовый ящик со случайным предметом — фляжки/аптечки/ящик медбрата лечат, пистолет/ПП/снайперка бьют, карты воровства и стелса дают особые действия.</p>
           )}
         </div>
       )}

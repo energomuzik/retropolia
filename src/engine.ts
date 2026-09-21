@@ -1,5 +1,5 @@
 import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, PlayerState, RubgItemKind, TaskDef, TradeOffer, TokenDir } from './types';
-import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, tileAt, tileRectOf, coinsStr, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_STEAL_RANGE, RUBG_STOP_CD, rubgMkItem, rubgRandomKind, playerPx } from './types';
+import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, tileAt, tileRectOf, coinsStr, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx } from './types';
 import type { RubgItem } from './types';
 import type { JoyId } from './types';
 import { CELL, cellAtPoint, cellCenter, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
@@ -70,6 +70,7 @@ export type Action =
   | { t: 'rubgStealFail'; id: string; victimId: string } // RUBG: время вышло — кража провалена (стелс слетает)
   | { t: 'rubgStopThief'; id: string } // RUBG: жертва нажала «Остановить вора» (кулаул 15 с)
   | { t: 'rubgStealth'; id: string } // RUBG: активировать стелс (сгорает карта стелса)
+  | { t: 'rubgBelt'; id: string; itemId: string; on: boolean } // RUBG: надеть/снять предмет с ПОЯСА (на поясе макс. 3 — только они имеют кнопки действий; пояс не воруется)
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const rnd6 = () => 1 + Math.floor(Math.random() * 6);
@@ -280,9 +281,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
        в смешанном режиме монеты не убивают — вылет по времени+попыткам как раньше */
     const coinsFatal = map.coinsOnly === true && map.startCoins !== undefined;
     const isRubg = map.mode === 'rubg';
+    const hpRes = isRubg || map.resMode === 'hp'; // ресурс «полоска HP» — вылет по нулю HP (RUBG и карты с выбором «HP»)
     for (const p of s.players) {
-      const out = isRubg
-        ? (p.hp ?? RUBG_HP_MAX) <= 0 // RUBG: единственный ресурс — полоска HP
+      const out = hpRes
+        ? (p.hp ?? RUBG_HP_MAX) <= 0 // HP-ресурс: единственный ресурс — полоска HP
         : coinsFatal ? (p.coinsLeft ?? 0) <= 0 : (p.secLeft <= 0 && p.triesLeft <= 0 && (!coinsFatal || (p.coinsLeft ?? 0) <= 0));
       if (p.alive && !p.spect && out) {
         p.alive = false;
@@ -291,7 +293,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         if (s.rubg?.jobs) delete s.rubg.jobs[p.id]; // личное задание мёртвого закрывается
         s.awaitPost = false;
         s.moving = null;
-        log(isRubg ? `💀 ${p.name} ВЫБЫВАЕТ — полоска HP на нуле!` : `💀 ${p.name} выбывает — ${coinsFatal ? 'монеты исчерпаны' : 'ресурсы исчерпаны'}`);
+        log(hpRes ? `💀 ${p.name} ВЫБЫВАЕТ — полоска HP на нуле!` : `💀 ${p.name} выбывает — ${coinsFatal ? 'монеты исчерпаны' : 'ресурсы исчерпаны'}`);
         if (map.mode === 'skill' && p.isHost) log(`❌ SKILL CHALLENGE ПРОВАЛЕН: ресурсы исчерпаны до ${SKILL_TURNS} ходов`);
         if (map.mapless && p.isHost) log(`❌ ЧЕЛЛЕНДЖ ПРОВАЛЕН: ресурсы исчерпаны на матче ${(s.mapless?.done ?? 0) + 1} из ${s.mapless?.total ?? '?'}`);
       }
@@ -309,6 +311,39 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       return;
     }
     if (!current().alive && s.phase === 'playing') nextTurn();
+  };
+
+  /* RUBG: создать безопасную зону (первая фаза — ожидание сжатия). Вызывается, когда
+     все готовы и партия стартует (все стоят на стартовой ячейке), при прыжках и
+     фолбэком в тике хоста для старых сессий. */
+  const rubgStartZone = () => {
+    if (!s.rubg || s.rubg.zone) return;
+    const W = map.mw ?? map.cols * CELL_PX;
+    const H = map.mh ?? map.rows * CELL_PX;
+    const ph = RUBG_ZONE_PHASES[0];
+    const r0 = Math.hypot(W, H) / 2 * 0.75;
+    const tr = r0 * ph.mul;
+    const off = Math.max(0, r0 - tr) * 0.7;
+    const now = Date.now();
+    s.rubg.zone = {
+      cx: W / 2, cy: H / 2, r: r0,
+      sx: W / 2, sy: H / 2, sr: r0,
+      tx: Math.max(0, Math.min(W, W / 2 + (Math.random() * 2 - 1) * off)),
+      ty: Math.max(0, Math.min(H, H / 2 + (Math.random() * 2 - 1) * off)),
+      tr,
+      phase: 'wait', phaseStart: now, phaseEnd: now + ph.wait * 1000,
+      idx: 0, dps: ph.dps, lastTick: now,
+    };
+    log(`⭕ Безопасная зона появилась: сжатие через ${ph.wait} с. Ищите задания и лутбоксы!`);
+  };
+
+  /* RUBG: выдать предмет — на ПОЯС, если есть свободный слот (макс. 3), иначе в общий инвентарь */
+  const rubgGiveItem = (p: PlayerState, kind: RubgItemKind): RubgItem => {
+    const it = rubgMkItem(kind);
+    const inv = p.items ?? (p.items = []);
+    if (inv.filter((x) => x.belt).length < RUBG_BELT_SLOTS) it.belt = true;
+    inv.push(it);
+    return it;
   };
 
   const endTurnNow = () => {
@@ -476,6 +511,17 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (!success && skipC > 0) {
         p.coinsLeft = Math.max(0, (p.coinsLeft ?? 0) - skipC);
         log(`🪙 Плата за пропуск: −${skipC} бронзы — капитал ${coinsStr(p.coinsLeft)}`);
+      }
+    }
+    /* РЕСУРС «ПОЛОСКА HP» (карты с выбором «HP»; RUBG не попадает — у него личные задания):
+       победа +10% HP, поражение/пропуск −5% HP (плата по итогам, как в RUBG) */
+    if (map.resMode === 'hp' && map.mode !== 'rubg') {
+      if (success) {
+        p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? RUBG_HP_MAX) + RUBG_WIN_HP);
+        log(`❤️ +${RUBG_WIN_HP}% HP — полоска ${Math.round(p.hp)}%`);
+      } else {
+        p.hp = Math.max(0, (p.hp ?? RUBG_HP_MAX) - RUBG_LOSE_HP);
+        log(`💔 −${RUBG_LOSE_HP}% HP — полоска ${Math.round(p.hp)}%`);
       }
     }
     /* СВОЙ ЧЕЛЛЕНДЖ — штраф за проигрыш и награда за победу (задаётся мастером
@@ -712,6 +758,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     /* ТОЛЬКО МОНЕТЫ: выбора ресурса нет — задание сразу готово к запуску (платёж по итогам) */
     if (map.coinsOnly && map.startCoins !== undefined) {
       s.challenge.mode = 'coins';
+      s.challenge.status = 'ready';
+    } else if (map.resMode === 'hp') {
+      /* РЕСУРС «ПОЛОСКА HP»: выбора нет — задание сразу готово (плата по итогам: +10% победа / −5% поражение) */
+      s.challenge.mode = 'hp';
       s.challenge.status = 'ready';
     }
     const owner = s.captured[p.pos] ? s.players.find((x) => x.id === s.captured[p.pos]) : null;
@@ -960,22 +1010,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         if (soloMode) p.spect = !p.isHost; // играет только хост — остальные смотрят
         if (map.mode === 'rubg') { p.hp = RUBG_HP_MAX; p.items = []; p.stealth = false; }
       }
-      /* RUBG: самолёт через карту + начальная зона на всё поле +Personal jobs/lut */
+      /* RUBG: все стартуют СО СТАРТОВОЙ ЯЧЕЙКИ (самолёт-обязаловка убрана).
+         Безопасная зона появится, когда все нажмут «Старт игры» (rollOffReady). */
       if (map.mode === 'rubg') {
-        const W = map.mw ?? map.cols * CELL_PX;
-        const H = map.mh ?? map.rows * CELL_PX;
-        const ang = Math.random() * Math.PI * 2;
-        const half = Math.hypot(W, H) / 2 + CELL_PX;
-        const cx0 = W / 2, cy0 = H / 2;
-        s.rubg = {
-          plane: {
-            x0: cx0 - Math.cos(ang) * half, y0: cy0 - Math.sin(ang) * half,
-            x1: cx0 + Math.cos(ang) * half, y1: cy0 + Math.sin(ang) * half,
-            startAt: Date.now(), speed: Math.max(W, H) / 22, jumped: [],
-          },
-          zone: null, // зона появится на rubgTick №1 — строится от центра карты
-          jobs: {}, looted: [], stealth: [], steals: {}, stopCd: {},
-        };
+        s.rubg = { zone: null, jobs: {}, looted: [], stealth: [], steals: {}, stopCd: {} };
       }
       /* БЕЗКАРТОВАЯ ИГРА (СТАРЫЕ карты v0.36.0): счётчик матчей.
          SKILL CHALLENGE снова играется НА КАРТЕ — счётчик ему не нужен. */
@@ -1000,7 +1038,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
          сразу панель готовности хоста (без кубиков). SKILL CHALLENGE — на карте, с жеребьёвкой. */
       if (map.mapless) s.rollOffWinner = s.players.find((p) => p.isHost)?.id ?? null;
       log(map.mode === 'rubg'
-        ? `🪂 RUBG! ${s.players.length} бойцов на борту. Самолёт летит — ПРЫГАЙТЕ, где хотите. Ресурс — полоска HP. Побеждает последний живой!`
+        ? `🪂 RUBG! ${s.players.length} бойцов стартуют СО СТАРТОВОЙ ЯЧЕЙКИ. Ресурс — полоска HP. Побеждает последний живой!`
         : soloMode && map.mode === 'skill'
           ? `🧨 SKILL CHALLENGE! Играет только хост — ${SKILL_TURNS} заданий на карте. Остальные — зрители.`
           : map.mapless
@@ -1121,7 +1159,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       }
       if (s.players.filter((pl) => !pl.spect).every((pl) => (s.rollOffReady ?? []).includes(pl.id))) {
         s.phase = 'playing';
-        if (isJourneyLike(map.mode)) {
+        if (map.mode === 'rubg') {
+          rubgStartZone(); // все на стартовой ячейке — запускаем безопасную зону
+          log('🚀 Все готовы! RUBG начался — все стартуют со стартовой ячейки. Побеждает последний живой!');
+        } else if (isJourneyLike(map.mode)) {
           log(map.mode === 'journey1p'
             ? '🚀 Все готовы! Игра началась — фишка хоста пошла'
             : '🚀 Все готовы! Фишки пошли ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, у того и откроется задание');
@@ -1199,7 +1240,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
             if (rg.looted.includes(i)) continue; // лутбокс одноразовый — вскрыт раньше
             rg.looted.push(i);
             const kind = rubgRandomKind();
-            (p.items ?? (p.items = [])).push(rubgMkItem(kind));
+            rubgGiveItem(p, kind); // на пояс, если есть слот (макс. 3), иначе в общий инвентарь
             const meta = RUBG_ITEMS[kind];
             rg.stealth = rg.stealth.filter((xid) => xid !== p.id); // подбор снимает стелс
             p.stealth = false;
@@ -1246,6 +1287,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           /* ТОЛЬКО МОНЕТЫ: без окна выбора — задание сразу готово (платёж по итогам) */
           if (map.coinsOnly && map.startCoins !== undefined) {
             s.challenge.mode = 'coins';
+            s.challenge.status = 'ready';
+          } else if (map.resMode === 'hp') {
+            s.challenge.mode = 'hp'; // ресурс «полоска HP» — плата по итогам
             s.challenge.status = 'ready';
           }
           const owner = s.captured[i] ? s.players.find((pl) => pl.id === s.captured[i]) : null;
@@ -1322,6 +1366,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (map.coinsOnly && map.startCoins !== undefined) {
         s.challenge.mode = 'coins';
         s.challenge.status = 'ready';
+      } else if (map.resMode === 'hp') {
+        s.challenge.mode = 'hp'; // ресурс «полоска HP» — плата по итогам
+        s.challenge.status = 'ready';
       }
       log(`🎯 ${p.name} открывает матч ${(s.mapless?.done ?? 0) + 1} из ${s.mapless?.total ?? '?'}`);
       break;
@@ -1362,21 +1409,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const roster = s.players.filter((q) => !q.spect);
       if (roster.every((q) => pl.jumped.includes(q.id))) {
         s.phase = 'playing';
-        const ph = RUBG_ZONE_PHASES[0];
-        const r0 = Math.hypot(W, H) / 2 * 0.75;
-        const tr = r0 * ph.mul;
-        const off = Math.max(0, r0 - tr) * 0.7;
-        const now = Date.now();
-        s.rubg.zone = {
-          cx: W / 2, cy: H / 2, r: r0,
-          sx: W / 2, sy: H / 2, sr: r0,
-          tx: Math.max(0, Math.min(W, W / 2 + (Math.random() * 2 - 1) * off)),
-          ty: Math.max(0, Math.min(H, H / 2 + (Math.random() * 2 - 1) * off)),
-          tr,
-          phase: 'wait', phaseStart: now, phaseEnd: now + ph.wait * 1000,
-          idx: 0, dps: ph.dps, lastTick: now,
-        };
-        log(`🚀 ВЫСАДКА ЗАВЕРШЕНА — все на земле! Безопасная зона: сжатие через ${ph.wait} с. Ищите задания и лутбоксы!`);
+        rubgStartZone();
       }
       break;
     }
@@ -1408,6 +1441,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (s.phase !== 'playing') break;
       rg.jobs = rg.jobs ?? {}; rg.looted = rg.looted ?? []; rg.stealth = rg.stealth ?? [];
       rg.steals = rg.steals ?? {}; rg.stopCd = rg.stopCd ?? {};
+      rubgStartZone(); // фолбэк: старая сессия без зоны — создаём при первом тике игры
       /* зависшие кражи: время давно вышло — закрываем как провал */
       for (const [vid, st] of Object.entries(rg.steals)) {
         if (now - st.startedAt > st.dur * 1000 + 2500) {
@@ -1477,7 +1511,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (a.win) {
         p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? RUBG_HP_MAX) + RUBG_WIN_HP);
         const kind = rubgRandomKind();
-        (p.items ?? (p.items = [])).push(rubgMkItem(kind));
+        rubgGiveItem(p, kind); // на пояс, если есть слот (макс. 3), иначе в общий инвентарь
         s.captured[a.cellIdx] = p.id; // мгновенный хозяин ячейки (своё задание в RUBG не предлагается)
         log(`🏆 ${p.name} ПРОШЁЛ задание №${a.cellIdx + 1}: +${RUBG_WIN_HP}% HP, трофей ${RUBG_ITEMS[kind].icon} ${RUBG_ITEMS[kind].name} — HP ${p.hp}%`);
       } else {
@@ -1507,6 +1541,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (ii < 0) break;
       const meta = RUBG_ITEMS[inv[ii].kind];
       if (meta.hp <= 0 || meta.radius > 0) break; // только хилки
+      if (!inv[ii].belt) break; // использовать можно только с ПОЯСА (общий инвентарь — склад: наденьте на пояс)
       if ((p.hp ?? 0) >= RUBG_HP_MAX) break; // полоска полна
       inv.splice(ii, 1);
       p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? 0) + meta.hp);
@@ -1524,6 +1559,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const kind = inv[ii].kind;
       const meta = RUBG_ITEMS[kind];
       if (meta.radius <= 0) break; // не оружие
+      if (!inv[ii].belt) break; // стрелять можно только с ПОЯСА (общий инвентарь — склад: наденьте на пояс)
       const target = s.players.find((x) => x.id === a.targetId);
       if (!target || !target.alive || target.spect || target.id === p.id) break;
       if ((rg.stealth ?? []).includes(target.id)) break; // в стелсе не видно — стрелять нельзя
@@ -1583,7 +1619,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const vinv = victim.items ?? (victim.items = []);
       const ii = vinv.findIndex((x) => x.id === a.itemId);
       if (ii < 0) break;
+      if (vinv[ii].belt) break; // предметы на ПОЯСЕ не воруются — только из общего инвентаря
       const [stolen] = vinv.splice(ii, 1);
+      /* крадёное: на пояс вора, если есть свободный слот (макс. 3), иначе в общий инвентарь */
+      stolen.belt = (thief.items ?? []).filter((x) => x.belt).length < RUBG_BELT_SLOTS;
       (thief.items ?? (thief.items = [])).push(stolen);
       /* карта воровства: −1 использование (3 всего); в 0 — сгорела */
       const card = (thief.items ?? []).find((x) => x.kind === 'steal' && (x.uses ?? 0) > 0);
@@ -1645,10 +1684,33 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const inv = p.items ?? (p.items = []);
       const ci = inv.findIndex((x) => x.kind === 'stealth');
       if (ci < 0) break; // карты стелса нет
+      if (!inv[ci].belt) break; // активировать можно только с ПОЯСА (общий инвентарь — склад)
       inv.splice(ci, 1);
       p.stealth = true;
       rg.stealth.push(p.id);
       log(`👻 ${p.name} РАСТВОРИЛСЯ в стелсе — выйдет при входе в ячейку, подборе, выстреле или неудачной краже`);
+      break;
+    }
+    case 'rubgBelt': {
+      /* ПОЯС: надеть/снять предмет. На поясе максимум RUBG_BELT_SLOTS (3) предмета —
+         только они показаны на экране и имеют кнопки действий (лечиться/стрелять/
+         воровать/стелс — только с пояса); остальное лежит в общем инвентаре
+         (кнопка «Инвентарь»). Предметы на поясе НЕ воруются. */
+      if (map.mode !== 'rubg' || !s.rubg) break;
+      const p = actor();
+      if (!p || !p.alive || p.spect) break;
+      const inv = p.items ?? (p.items = []);
+      const it = inv.find((x) => x.id === a.itemId);
+      if (!it) break;
+      if (a.on) {
+        if (it.belt) break; // уже на поясе
+        if (inv.filter((x) => x.belt).length >= RUBG_BELT_SLOTS) break; // пояс полон — снимите что-нибудь
+        it.belt = true;
+        log(`🧰 ${p.name} надевает «${RUBG_ITEMS[it.kind].name}» на пояс`);
+      } else {
+        it.belt = false;
+        log(`🎒 ${p.name} убирает «${RUBG_ITEMS[it.kind].name}» в инвентарь`);
+      }
       break;
     }
     case 'chooseMode': {
@@ -1682,8 +1744,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       } else if (ch.mode === 'time') {
         ch.startedAt = Date.now();
         ch.accMs = 0;
-      } // монеты: во время игры ничего не тратится — платёж только по итогам
-      log(`▶ ${p.name} запускает задание${ch.mode === 'tries' ? ' — попытка №1' : ch.mode === 'time' ? ' — таймер пошёл' : ' — монетная игра'}`);
+      } // монеты/HP: во время игры ничего не тратится — платёж только по итогам
+      log(`▶ ${p.name} запускает задание${ch.mode === 'tries' ? ' — попытка №1' : ch.mode === 'time' ? ' — таймер пошёл' : ch.mode === 'hp' ? ' — HP-режим: +10% за победу / −5% за поражение' : ' — монетная игра'}`);
       break;
     }
     case 'togglePause': {
@@ -1725,11 +1787,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const ch = s.challenge;
       const p = current();
       if (!ch || ch.status !== 'playing' || p.id !== a.id) break;
-      // МОНЕТЫ: перезапуски бесплатны и не ограничены — платёж только по итогам
-      if (ch.mode === 'coins') {
+      // МОНЕТЫ/HP: перезапуски бесплатны и не ограничены — платёж только по итогам
+      if (ch.mode === 'coins' || ch.mode === 'hp') {
         ch.reloadId++;
         if (ch.paused) ch.paused = false;
-        log(`↻ ${p.name}: перезапуск задания (монеты — без списаний)`);
+        log(`↻ ${p.name}: перезапуск задания (${ch.mode === 'hp' ? 'HP — без списаний' : 'монеты — без списаний'})`);
         break;
       }
       // при нуле ресурса перезапускать нечего: в попытках каждая загрузка стоит попытку,
@@ -1803,6 +1865,13 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         const needC = Math.max(0, Math.floor(map.skipCoins ?? SKIP_COINS_DEFAULT));
         const have = p.coinsLeft ?? 0;
         if (have > 0 && have < needC) break; // монет не хватает на плату — играйте, побеждайте и зарабатывайте
+        finishChallenge(false, 0, 0);
+        checkElim();
+        break;
+      }
+
+      /* HP-РЕЖИМ: пропуск = поражение — стоит −5% полоски HP, доступен всегда */
+      if (ch.mode === 'hp') {
         finishChallenge(false, 0, 0);
         checkElim();
         break;

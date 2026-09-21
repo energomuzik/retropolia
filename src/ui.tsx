@@ -491,8 +491,8 @@ export function Modal({ title, icon, onClose, children, w = 'max-w-2xl', locked 
       <div className="absolute inset-0 bg-[rgba(4,6,14,0.82)]" onClick={locked ? undefined : onClose} />
       <div className={`relative pixel-panel pixel-corners pop-in w-full ${w} max-h-[92vh] flex flex-col`}>
         <div className="flex items-center gap-3 px-4 py-3 border-b-[3px] border-edge bg-[rgba(0,0,0,0.3)] shrink-0">
-          <span className="text-gold">{icon}</span>
-          <div className="font-display uppercase tracking-wider text-sm text-paper">{title}</div>
+          <span className="text-gold shrink-0">{icon}</span>
+          <div className="font-display uppercase tracking-wider text-sm text-paper break-words min-w-0">{title}</div>
           {!locked && onClose && (
             <button onClick={() => { sfx.click(); onClose(); }} className="ml-auto text-dim hover:text-coral transition-colors cursor-pointer" aria-label="Закрыть">
               {Ic.cross(16)}

@@ -232,6 +232,12 @@ export function CreateScreen() {
             </div>
           </div>
         )}
+        {/* «ОТКРЫТЬ КОМНАТУ» — ВВЕРХУ списка и ЛИПКАЯ: при длинном списке не надо скроллить вниз */}
+        {ready.length > 0 && (
+          <div className="sticky top-0 z-20 -mx-2 px-2 py-2 bg-[rgba(7,9,18,0.92)] backdrop-blur-sm flex justify-end">
+            <PxBtn big color="gold" disabled={!sel} onClick={create}>{Ic.dice(18)} Открыть комнату</PxBtn>
+          </div>
+        )}
         <div className="grid gap-4"> {/* ОДНА игра на всю ширину строки (без деления на две плитки) */}
           {shown.map((m: GameMap) => (
             <button
@@ -267,9 +273,18 @@ export function CreateScreen() {
                 })()}
               </div>
               <div className="mt-2.5 pt-2 border-t-2 border-edge flex items-center gap-2 flex-wrap">
-                <span className="font-display text-[11px] uppercase text-gold">{m.startMin ?? 60} мин</span>
-                <span className="font-pixel text-[8px] text-faint">·</span>
-                <span className="font-display text-[11px] uppercase text-sky">{m.startTries ?? 60} попыток</span>
+                {(m.resMode === 'hp' || m.mode === 'rubg') ? (
+                  <span className="font-display text-[11px] uppercase text-coral">ресурс: полоска HP</span>
+                ) : m.coinsOnly && m.startCoins !== undefined ? (
+                  <span className="font-display text-[11px] uppercase text-teal">ресурс: монеты ({coinsStr(m.startCoins)})</span>
+                ) : (
+                  <>
+                    <span className="font-display text-[11px] uppercase text-gold">{m.startMin ?? 60} мин</span>
+                    <span className="font-pixel text-[8px] text-faint">·</span>
+                    <span className="font-display text-[11px] uppercase text-sky">{m.startTries ?? 60} попыток</span>
+                    {m.startCoins !== undefined && <span className="font-display text-[11px] uppercase text-teal">· 🪙 {coinsStr(m.startCoins)}</span>}
+                  </>
+                )}
                 <span className="text-[10px] text-faint">у каждого игрока</span>
                 <span
                   role="button"
@@ -300,11 +315,6 @@ export function CreateScreen() {
             </div>
           )}
         </div>
-        {ready.length > 0 && (
-          <div className="mt-6 flex justify-end">
-            <PxBtn big color="gold" disabled={!sel} onClick={create}>{Ic.dice(18)} Открыть комнату</PxBtn>
-          </div>
-        )}
       </div>
     </div>
   );

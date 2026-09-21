@@ -472,7 +472,7 @@ export default function TaskEditor() {
           <option value="">Ячейка: выберите…</option>
           {map.cells.map((c, i) => (
             <option key={i} value={i}>
-              {`${c.nonumber || c.n === 0 ? 'БЕЗ №' : '№' + c.n} · ${c.type === 'start' ? 'Старт' : c.type === 'task' ? 'Задание' : c.type === 'rest' ? 'Отдых' : c.type === 'bonus' ? 'Бонус' : c.type === 'trap' ? 'Ловушка' : 'Квиз'}${c.label ? ' · ' + c.label : ''}${c.task ? ' ✓' : ''}`}
+              {`${c.nonumber || c.n === 0 ? 'БЕЗ №' : '№' + c.n} · ${c.type === 'start' ? 'Старт' : c.type === 'task' ? 'Задание' : c.type === 'rest' ? 'Отдых' : c.type === 'bonus' ? 'Бонус' : c.type === 'trap' ? 'Ловушка' : c.type === 'loot' ? 'ЛУТБОКС' : 'Квиз'}${c.label ? ' · ' + c.label : ''}${c.task ? ' ✓' : ''}`}
             </option>
           ))}
         </select>
@@ -569,16 +569,19 @@ export default function TaskEditor() {
               <Panel title={!(cell.nonumber || cell.n === 0) ? `Ячейка №${cell.n}` : 'Ячейка без номера (на круге)'} icon={Ic.target(16)} accent={cell.type === 'bonus' ? 'var(--color-teal)' : cell.type === 'trap' ? 'var(--color-coral)' : 'var(--color-gold)'}>
                 <div className="p-3 space-y-3">
                   <div className="flex gap-1 flex-wrap">
-                    {(['start', 'task', 'rest', 'bonus', 'trap', 'quiz'] as const).map((t) => (
+                    {((['start', 'task', 'rest', 'bonus', 'trap', 'quiz', ...(map.mode === 'rubg' ? (['loot'] as const) : [])]) as CellType[]).map((t) => (
                       <button
                         key={t}
                         onClick={() => void setCellType(t)}
-                        className={`flex-1 py-1.5 font-display text-[9px] uppercase tracking-wide border-2 transition-colors cursor-pointer ${cell.type === t ? (t === 'bonus' ? 'border-teal text-teal bg-teal/10' : t === 'trap' ? 'border-coral text-coral bg-coral/10' : t === 'quiz' ? 'border-sky text-sky bg-sky/10' : t === 'rest' ? 'border-dim text-dim bg-dim/10' : 'border-gold text-gold bg-gold/10') : 'border-edge text-faint hover:text-dim'}`}
+                        className={`flex-1 py-1.5 font-display text-[9px] uppercase tracking-wide border-2 transition-colors cursor-pointer ${cell.type === t ? (t === 'bonus' ? 'border-teal text-teal bg-teal/10' : t === 'trap' ? 'border-coral text-coral bg-coral/10' : t === 'quiz' ? 'border-sky text-sky bg-sky/10' : t === 'rest' ? 'border-dim text-dim bg-dim/10' : t === 'loot' ? 'border-[#ff8b3f] text-[#ff8b3f] bg-[#ff8b3f]/10' : 'border-gold text-gold bg-gold/10') : 'border-edge text-faint hover:text-dim'}`}
                       >
-                        {t === 'start' ? 'Старт' : t === 'task' ? 'Задание' : t === 'rest' ? 'Отдых' : t === 'bonus' ? 'Бонус' : t === 'trap' ? 'Ловушка' : 'Квиз'}
+                        {t === 'start' ? 'Старт' : t === 'task' ? 'Задание' : t === 'rest' ? 'Отдых' : t === 'bonus' ? 'Бонус' : t === 'trap' ? 'Ловушка' : t === 'loot' ? 'Лут.' : 'Квиз'}
                       </button>
                     ))}
                   </div>
+                  {cell.type === 'loot' && (
+                    <p className="text-[10px] text-[#ff8b3f] leading-tight">ЛУТБОКС (только RUBG): одноразовый. Зашедший игрок получает случайный предмет: лечение, оружие или карты воровства/стелса.</p>
+                  )}
                   {cell.type === 'start' && (
                     <p className="text-[10px] text-teal leading-tight">Стартовая ячейка: игроки начнут партию с неё, задание не нужно.</p>
                   )}

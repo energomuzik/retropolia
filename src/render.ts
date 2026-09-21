@@ -1061,6 +1061,7 @@ export function drawRubgOverlay(
     zone: import('./types').RubgZone | null;
     plane: import('./types').RubgPlane | null;
     bars: { x: number; y: number; hp: number; playing: boolean; hidden: boolean }[];
+    aim?: { x: number; y: number; r: number } | null; // РАДИУС АТАКИ: круг вокруг моей фишки при выбранном оружии (r — px поля)
   },
 ) {
   const { view, width, height } = opts;
@@ -1153,24 +1154,37 @@ export function drawRubgOverlay(
     ctx.restore();
   }
 
-  /* HP-бары и маркер «играет задание» над фишками (стелс — бар не рисуем) */
+  /* РАДИУС АТАКИ: при выбранном оружии — пунктирный круг вокруг моей фишки
+     (магмовый, с лёгкой заливкой) — видно, кого достанет выстрел */
+  const aim = opts.aim;
+  if (aim && aim.r > 0) {
+    const pulse = 0.55 + 0.2 * Math.sin(opts.time / 240);
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(aim.x, aim.y, aim.r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,139,63,${(0.07 + 0.04 * Math.sin(opts.time / 300)).toFixed(3)})`;
+    ctx.fill();
+    ctx.setLineDash([12, 9]);
+    ctx.lineDashOffset = -(opts.time / 40) % 21; // бегущий пунктир — читается как «прицел»
+    ctx.strokeStyle = `rgba(255,139,63,${pulse.toFixed(2)})`;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  /* Маркер «играет задание» над фишками (стелс — не рисуем).
+     ПОЛОСКУ HP НАД ФИШКОЙ НЕ РИСУЕМ — HP показывается только в верхней панели ресурсов. */
   for (const b of opts.bars) {
     if (b.hidden) continue;
+    if (!b.playing) continue;
     ctx.save();
     ctx.translate(b.x, b.y - 32);
-    const W = 40, H = 7;
-    ctx.fillStyle = 'rgba(7,9,18,0.82)';
-    ctx.fillRect(-W / 2 - 1, -1, W + 2, H + 2);
-    const frac = Math.max(0, Math.min(1, b.hp / 100));
-    ctx.fillStyle = frac > 0.5 ? '#35d46f' : frac > 0.25 ? '#ffcf3f' : '#ff5d73';
-    ctx.fillRect(-W / 2, 0, W * frac, H);
-    if (b.playing) {
-      ctx.font = '12px monospace';
-      ctx.textAlign = 'center';
-      ctx.globalAlpha = 0.65 + 0.35 * Math.sin(opts.time / 220);
-      ctx.fillText('▶', 0, -7);
-      ctx.globalAlpha = 1;
-    }
+    ctx.font = '12px monospace';
+    ctx.textAlign = 'center';
+    ctx.globalAlpha = 0.65 + 0.35 * Math.sin(opts.time / 220);
+    ctx.fillText('▶', 0, 0);
+    ctx.globalAlpha = 1;
     ctx.restore();
   }
   ctx.restore();

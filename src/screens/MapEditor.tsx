@@ -2123,10 +2123,9 @@ export default function MapEditor() {
         toast('RUBG: на карте нет ни одного ЛУТБОКСА — игрокам нечем лечиться и нечем атаковать. Поставьте лутбоксы (тип ячейки «Лут.»)', 'err');
         return;
       }
-      if (map.startCoins !== undefined) {
-        sfx.fail();
-        toast('RUBG: ресурс может быть только ОДИН — полоска HP. Выключите монеты в панели «Ресурсы игроков»', 'err');
-        return;
+      /* RUBG: ресурс — только «Полоска HP»: молча исправляем старые карты (монеты выключаем) */
+      if (map.startCoins !== undefined || map.coinsOnly || map.resMode !== 'hp') {
+        updMap({ resMode: 'hp', coinsOnly: undefined, startCoins: undefined });
       }
     } else if (map.cells.some((c) => c.type === 'loot')) {
       sfx.fail();
@@ -2528,7 +2527,7 @@ export default function MapEditor() {
               </div>
 
               <div>
-                <div className="tick-label mb-2">Ресурсы игроков</div>
+                <div className="tick-label mb-2">Ресурс игроков — ВЫБОР ОДНОГО</div>
                 {(map.mode ?? 'classic') === 'skill' ? (
                   /* SKILL CHALLENGE: ресурсы фиксированы условием челленджа — менять нельзя */
                   <div className="space-y-2">
@@ -2536,48 +2535,70 @@ export default function MapEditor() {
                     <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><span className="font-display text-sm text-gold">60</span></div>
                     <p className="text-[10px] text-magma leading-tight border-2 border-magma/40 px-2 py-1.5">Условие челленджа: у каждого ровно 60 минут и 60 попыток — менять нельзя.</p>
                   </div>
+                ) : (map.mode ?? 'classic') === 'rubg' ? (
+                  /* RUBG: ресурс ВСЕГДА полоска HP — выбор заблокирован */
+                  <div className="space-y-2">
+                    <div className="border-2 border-coral/60 bg-coral/10 px-3 py-2.5">
+                      <div className="font-display uppercase text-[12px] text-coral">❤ Полоска HP</div>
+                      <div className="text-[10px] text-dim mt-1 leading-tight">В RUBG ресурс всегда ПОЛОСКА HP: победа в задании +10%, поражение −5%; вне зоны HP тает каждый секунду. Выбор заблокирован.</div>
+                    </div>
+                    <p className="text-[9px] text-faint leading-tight">Монеты/время/попытки в RUBG не используются — в игре показывается только полоска HP.</p>
+                  </div>
                 ) : (
                   <div className="space-y-2">
-                    <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Минут у каждого</span><Stepper value={map.startMin ?? 60} onChange={(v) => updMap({ startMin: v })} min={5} max={180} step={5} /></div>
-                    <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><Stepper value={map.startTries ?? 60} onChange={(v) => updMap({ startTries: v })} min={5} max={180} step={5} /></div>
+                    {/* ТРИ взаимоисключающих варианта — как в мастере «Создать челлендж» */}
+                    {([
+                      { id: 'std', title: '⏱ 🎯 Время и попытки', desc: 'Классика: таймер и попытки у каждого. Кнопки «Время/Попытки» в окне задания.' },
+                      { id: 'coins', title: '🪙 Монеты', desc: 'Единственный ресурс — монеты (старт/награды/плата за пропуск). 0 монет = вылет.' },
+                      { id: 'hp', title: '❤ Полоска HP', desc: 'Единственный ресурс — HP: победа +10%, поражение/пропуск −5%. На нуле — вылет.' },
+                    ] as const).map((r) => {
+                      const on = (map.resMode ?? (map.coinsOnly && map.startCoins !== undefined ? 'coins' : 'std')) === r.id;
+                      return (
+                        <button
+                          key={r.id}
+                          onClick={() => {
+                            sfx.hover();
+                            if (r.id === 'coins') {
+                              updMap({ resMode: 'coins', coinsOnly: true, startCoins: map.startCoins ?? 100, taskWinCoins: map.taskWinCoins ?? 10, skipCoins: map.skipCoins ?? 5, quizWinCoins: map.quizWinCoins ?? 5, quizLoseCoins: map.quizLoseCoins ?? 5 });
+                            } else if (r.id === 'hp') {
+                              updMap({ resMode: 'hp', coinsOnly: undefined, startCoins: undefined });
+                            } else {
+                              updMap({ resMode: 'std', coinsOnly: undefined, startCoins: undefined });
+                            }
+                          }}
+                          className={`w-full text-left px-3 py-2 border-2 transition-colors cursor-pointer ${on ? 'border-gold bg-gold/10' : 'border-edge hover:border-edge2'}`}
+                        >
+                          <div className={`font-display uppercase text-[12px] ${on ? 'text-gold' : 'text-paper'}`}>{on ? '✓ ' : ''}{r.title}</div>
+                          <div className="text-[10px] text-dim mt-0.5 leading-tight">{r.desc}</div>
+                        </button>
+                      );
+                    })}
+                    {/* настройки выбранного варианта */}
+                    {(map.resMode ?? 'std') === 'std' && (
+                      <div className="space-y-2 pt-1">
+                        <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Минут у каждого</span><Stepper value={map.startMin ?? 60} onChange={(v) => updMap({ startMin: v })} min={5} max={180} step={5} /></div>
+                        <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><Stepper value={map.startTries ?? 60} onChange={(v) => updMap({ startTries: v })} min={5} max={180} step={5} /></div>
+                      </div>
+                    )}
+                    {map.resMode === 'coins' && (
+                      <div className="space-y-2 pt-1">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] text-dim">Стартовый капитал</span>
+                          <Stepper value={map.startCoins ?? 100} onChange={(v) => updMap({ startCoins: v })} min={0} max={99999} step={25} suffix=" бр" />
+                        </div>
+                        <div className="text-[9px] text-faint leading-tight">{coinsStr(map.startCoins ?? 100)} · 100 бронзы = 1 серебряная, 100 серебр. = 1 золотая, 100 зол. = 1 платиновая</div>
+                        <div className="flex items-center justify-between"><span className="text-[11px] text-dim">+ за победу в задании</span><Stepper value={map.taskWinCoins ?? 10} onChange={(v) => updMap({ taskWinCoins: v })} min={0} max={9999} step={5} suffix=" бр" /></div>
+                        <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Цена пропуска задания</span><Stepper value={map.skipCoins ?? 5} onChange={(v) => updMap({ skipCoins: v })} min={0} max={9999} step={5} suffix=" бр" /></div>
+                        <div className="flex items-center justify-between"><span className="text-[11px] text-dim">+ за верный ответ квиза</span><Stepper value={map.quizWinCoins ?? 5} onChange={(v) => updMap({ quizWinCoins: v })} min={0} max={9999} step={5} suffix=" бр" /></div>
+                        <div className="flex items-center justify-between"><span className="text-[11px] text-dim">− за неверный ответ квиза</span><Stepper value={map.quizLoseCoins ?? 5} onChange={(v) => updMap({ quizLoseCoins: v })} min={0} max={9999} step={5} suffix=" бр" /></div>
+                        <p className="text-[9px] text-faint leading-tight">Пропуск 0 бр = бесплатный. В монетном режиме перезапуски задания бесплатны. Квизы платят бронзой.</p>
+                      </div>
+                    )}
+                    {map.resMode === 'hp' && (
+                      <p className="text-[9px] text-faint leading-tight">Победа в задании +10% HP, поражение/пропуск −5% HP, перезапуски бесплатны. На нуле полоски — вылет. В игре показывается только полоска HP.</p>
+                    )}
                   </div>
                 )}
-                {/* МОНЕТЫ: третий ресурс — бронза/серебро/золото/платина (1:100) */}
-                <div className="mt-3 border-t-2 border-edge pt-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="tick-label text-teal">🪙 Монеты</span>
-                    <button
-                      onClick={() => { sfx.hover(); updMap(map.startCoins === undefined ? { startCoins: 100, taskWinCoins: 10, skipCoins: 5, quizWinCoins: 5, quizLoseCoins: 5 } : { startCoins: undefined, coinsOnly: undefined, taskWinCoins: undefined, skipCoins: undefined, quizWinCoins: undefined, quizLoseCoins: undefined }); }}
-                      className={`px-2 py-1 text-[9px] font-pixel border-2 cursor-pointer ${map.startCoins !== undefined ? 'border-teal text-teal' : 'border-edge text-faint hover:text-dim'}`}
-                    >{map.startCoins !== undefined ? 'включены ✓' : 'выключены'}</button>
-                  </div>
-                  {map.startCoins !== undefined ? (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] text-dim">Стартовый капитал</span>
-                        <Stepper value={map.startCoins} onChange={(v) => updMap({ startCoins: v })} min={0} max={99999} step={25} suffix=" бр" />
-                      </div>
-                      <div className="text-[9px] text-faint leading-tight">{coinsStr(map.startCoins)} · 100 бронзы = 1 серебряная, 100 серебр. = 1 золотая, 100 зол. = 1 платиновая</div>
-                      <div className="flex items-center justify-between"><span className="text-[11px] text-dim">+ за победу в задании</span><Stepper value={map.taskWinCoins ?? 10} onChange={(v) => updMap({ taskWinCoins: v })} min={0} max={9999} step={5} suffix=" бр" /></div>
-                      <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Цена пропуска задания</span><Stepper value={map.skipCoins ?? 5} onChange={(v) => updMap({ skipCoins: v })} min={0} max={9999} step={5} suffix=" бр" /></div>
-                      <div className="flex items-center justify-between"><span className="text-[11px] text-dim">+ за верный ответ квиза</span><Stepper value={map.quizWinCoins ?? 5} onChange={(v) => updMap({ quizWinCoins: v })} min={0} max={9999} step={5} suffix=" бр" /></div>
-                      <div className="flex items-center justify-between"><span className="text-[11px] text-dim">− за неверный ответ квиза</span><Stepper value={map.quizLoseCoins ?? 5} onChange={(v) => updMap({ quizLoseCoins: v })} min={0} max={9999} step={5} suffix=" бр" /></div>
-                      <label className="flex items-center gap-2 cursor-pointer pt-1">
-                        <input
-                          type="checkbox"
-                          checked={!!map.coinsOnly}
-                          onChange={(e) => { sfx.hover(); updMap({ coinsOnly: e.target.checked || undefined }); }}
-                          className="accent-[#2ee6a8] w-4 h-4 cursor-pointer"
-                        />
-                        <span className="text-[11px] text-paper">Только монеты — без времени/попыток (0 монет = вылет)</span>
-                      </label>
-                      <p className="text-[9px] text-faint leading-tight">Пропуск 0 бр = бесплатный. В монетном режиме перезапуски задания бесплатны. Квизы при включённых монетах платят бронзой вместо минут/попыток.</p>
-                    <p className="text-[9px] text-faint leading-tight">Ресурс может быть ТОЛЬКО ОДИН: включённые монеты заменяют выбор «время/попытки» в окне задания. В режиме RUBG ресурс всегда полоска HP — монеты запрещены.</p>
-                    </div>
-                  ) : (
-                    <p className="text-[9px] text-faint leading-tight">Включите — и монеты станут ЕДИНСТВЕННЫМ ресурсом (вместо времени/попыток): награды за победы, плата за пропуски, квизы платят бронзой.</p>
-                  )}
-                </div>
               </div>
 
               <div>
@@ -2588,7 +2609,12 @@ export default function MapEditor() {
                     return (
                       <button
                         key={md.id}
-                        onClick={() => { updMap({ mode: md.id }); sfx.hover(); }}
+                        onClick={() => {
+                          sfx.hover();
+                          /* RUBG: ресурс всегда «Полоска HP» — при включении режима монеты выключаются */
+                          if (md.id === 'rubg') updMap({ mode: md.id, resMode: 'hp', coinsOnly: undefined, startCoins: undefined });
+                          else updMap({ mode: md.id });
+                        }}
                         title={md.hint}
                         className={`w-full text-left border-2 px-2.5 py-2 cursor-pointer transition-colors ${on ? 'border-gold bg-gold/10' : 'border-edge bg-panel hover:border-edge2'}`}
                       >
