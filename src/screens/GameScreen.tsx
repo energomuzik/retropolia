@@ -339,9 +339,17 @@ export default function GameScreen() {
   /* ---------- ВЗЛОМ ЯЩИКА: окно мини-игры «замок» (отмычка с пояса) ---------- */
   const [hackBox, setHackBox] = useState<{ cellIdx: number } | null>(null);
   const [hackAttempt, setHackAttempt] = useState(0);
-  const [hackFixed, setHackFixed] = useState<boolean[]>([]); // прогресс: какие бойки уже зафиксированы (живёт между попытками)
+  /* бойки КАЖДОЙ попытки: случайное число случайных бойков уже поднято (0–4, чаще меньше).
+     Фиксации НЕ запоминаются между попытками: сломал отмычку — новая попытка рандомится заново,
+     чтобы нельзя было «докручивать» чужой прогресс и спамить попытками ради удачного расклада */
+  const [hackFixed, setHackFixed] = useState<boolean[]>([]);
+  const [hackBroken, setHackBroken] = useState(false); // отмычка сломана — интерфейс остаётся открытым: «другая отмычка» / «открыть силой» / «прекратить»
   const [forceArm, setForceArm] = useState(false); // двухшаговое «открыть силой» (провал = ящик закрыт навсегда)
-  useEffect(() => { setForceArm(false); setHackAttempt(0); }, [hackBox?.cellIdx]);
+  useEffect(() => {
+    if (!hackBox) { setForceArm(false); return; }
+    setForceArm(false); setHackBroken(false); setHackAttempt(0); setHackFixed(randomPrePins());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hackBox?.cellIdx]);
   useEffect(() => { if (!hackBox) setForceArm(false); }, [hackBox]);
   useEffect(() => {
     pocketBlockRef.current = !!myStealing || !!hackBox;
@@ -1096,14 +1104,23 @@ export default function GameScreen() {
         });
 
         /* RUBG: оверлей поверх поля — безопасная зона, самолёт, маркеры игры, радиус атаки,
-           ВСКРЫТЫЕ ящики (анимация «открыт») и ЛЕТЯЩИЕ ПУЛИ выстрелов */
+           ВСКРЫТЫЕ и ЗАКЛИНИВШИЕ (для меня) ящики и ЛЕТЯЩИЕ ПУЛИ выстрелов */
         if (isRubg) {
           const openedBoxes: { x: number; y: number; w: number; h: number }[] = [];
+          const bannedBoxes: { x: number; y: number; w: number; h: number }[] = [];
+          const myBans = sess.rubg?.boxBan?.[me] ?? [];
           for (const li of sess.rubg?.looted ?? []) {
             const lc = m.cells[li];
             if (!lc || lc.type !== 'loot') continue;
             const lr = cellRectOf(m, li);
             if (lr) openedBoxes.push(lr);
+          }
+          for (const bi of myBans) {
+            if ((sess.rubg?.looted ?? []).includes(bi)) continue;
+            const bc = m.cells[bi];
+            if (!bc || bc.type !== 'loot') continue;
+            const br = cellRectOf(m, bi);
+            if (br) bannedBoxes.push(br);
           }
           const flyShots: { sx: number; sy: number; tx: number; ty: number; kind: string; ts: number }[] = [];
           for (const sh of sess.rubg?.shots ?? []) {
@@ -1119,6 +1136,7 @@ export default function GameScreen() {
             bars: rubgBars,
             aim: aimRadiusRef.current,
             opened: openedBoxes,
+            banned: bannedBoxes,
             shots: flyShots,
           });
         }
@@ -1342,9 +1360,33 @@ export default function GameScreen() {
     const iv = setInterval(() => setStealHoldMs(stealHoldRef.current ? Date.now() - stealHoldRef.current : 0), 80);
     return () => clearInterval(iv);
   }, [stealCharging]);
-  /* отпустили кнопку, но хост не подтвердил старт (жертва ушла/у неё уже воруют) — закрываем */
+  /* отпустили кнопку — три сценария:
+     (а) хост подтвердил старт (myStealing) → воровство идёт; когда ЗАВЕРШИЛОСЬ (запись
+         исчезла: успех — предмет уже у нас, или провал) окно закрывается МОЛЧА; если в
+         инвентаре появился новый предмет — тост «Предмет сворован»;
+     (б) хост НЕ подтвердил (жертва ушла/у неё уже воруют) → через 0.9 с сообщение о провале;
+     РАНЬше после УСПЕШНОЙ кражи вылезало «Кража не началась» — исправлено. */
+  const stealStartedRef = useRef(false);
+  const stealSnapRef = useRef<string[]>([]);
   useEffect(() => {
-    if (!stealSent || myStealing) return;
+    if (myStealing) {
+      if (!stealStartedRef.current) {
+        stealStartedRef.current = true;
+        stealSnapRef.current = (useApp.getState().session?.players.find((x) => x.id === me)?.items ?? []).map((x) => x.id);
+      }
+      return;
+    }
+    if (!stealSent) return;
+    if (stealStartedRef.current) {
+      stealStartedRef.current = false;
+      setStealOpen(false);
+      setStealSent(false);
+      const nowIds = (useApp.getState().session?.players.find((x) => x.id === me)?.items ?? []).map((x) => x.id);
+      if (nowIds.some((id) => !stealSnapRef.current.includes(id))) {
+        useApp.getState().toast('🤏 Предмет СВОРОВАН — он у тебя в инвентаре или на поясе', 'ok');
+      }
+      return;
+    }
     const t = setTimeout(() => {
       setStealOpen(false);
       setStealSent(false);
@@ -3140,7 +3182,8 @@ export default function GameScreen() {
           {mySteal === undefined && (
             <div className="fixed bottom-3 right-3 z-30 w-64 pixel-panel pixel-corners p-2.5 space-y-1.5 max-h-[62vh] overflow-y-auto">
               <div className="tick-label">🧰 ПОЯС · HP {Math.round(mePlayer.hp ?? 100)}% · слотов {RUBG_BELT_SLOTS}</div>
-              {/* ЯЩИК РЯДОМ: взлом отмычкой (мини-игра «замок») или силой (25%, провал — закрыт навсегда) */}
+              {/* ЯЩИК РЯДОМ: только ВЗЛОМ ОТМЫЧКОЙ (мини-игра «замок»); «открыть силой» —
+                  ТОЛЬКО в окне взлома после поломки отмычки, просто так его больше нет */}
               {nearBox && (
                 <div className="border-2 border-[#ffcf3f]/70 bg-[#ffcf3f]/10 px-2 py-1.5 space-y-1">
                   <div className="font-display text-[11px] text-[#ffcf3f]">📦 РЯДОМ ЯЩИК №{nearBox.idx + 1}</div>
@@ -3149,14 +3192,6 @@ export default function GameScreen() {
                     disabled={!beltLockpick}
                     className={`w-full py-1.5 border-2 font-pixel text-[8px] select-none touch-none ${beltLockpick ? 'border-teal text-teal cursor-pointer hover:bg-teal/10' : 'border-edge text-faint cursor-not-allowed'}`}
                   >{beltLockpick ? '🔓 ОТКРЫТЬ ЯЩИК ОТМЫЧКОЙ' : 'нужна отмычка 🔑 на поясе'}</button>
-                  <button
-                    onClick={() => {
-                      if (!forceArm) { setForceArm(true); window.setTimeout(() => setForceArm(false), 4000); return; }
-                      setForceArm(false);
-                      dispatch({ t: 'rubgBoxForce', id: me, cellIdx: nearBox.idx });
-                    }}
-                    className={`w-full py-1.5 border-2 font-pixel text-[8px] select-none touch-none ${forceArm ? 'border-coral bg-coral/15 text-coral' : 'border-magma text-magma cursor-pointer hover:bg-magma/10'}`}
-                  >{forceArm ? '⚠ ТОЧНО? провал = ящик закрыт навсегда — ЖМИ ЕЩЁ РАЗ' : '💥 ОТКРЫТЬ СИЛОЙ · шанс 25%'}</button>
                 </div>
               )}
               {(() => {
@@ -3274,56 +3309,88 @@ export default function GameScreen() {
               Отмычка выбирается на поясе; в окне — замок сбоку, отмычка и 5 подпружиненных
               бойков. Мышь влево-вправо — выбор бойка, движение мышьей ВВЕРХ — удар по бойку
               (чем резче — тем выше подскок; пружины у бойков случайные: плавные и резкие).
-              В верхней точке — «ЗАФИКСИРОВАТЬ». Фиксация мимо верхней точки — отмычка СЛОМАНА.
-              Все 5 зафиксированы — «ОТКРЫТЬ ЗАМОК». Есть «ОТКРЫТЬ СИЛОЙ» (25%, провал — бан) ---------- */}
+              В верхней точке — «ЗАФИКСИРОВАТЬ». Фиксация мимо верхней точки — отмычка СЛОМАНА,
+              но окно остаётся открытым: «ДРУГАЯ ОТМЫЧКА» (новый случайный расклад бойков) /
+              «ОТКРЫТЬ СИЛОЙ» (25%, провал — бан; доступно ТОЛЬКО после поломки отмычки) /
+              «ПРЕКРАТИТЬ ВЗЛОМ» (отказ тоже ломает отмычку — спамить попытками нельзя) ---------- */}
           {hackBox && (() => {
             const lp = (mePlayer.items ?? []).find((x) => x.kind === 'lockpick' && x.belt);
+            /* прекратить взлом: если отмычка ещё «в замке» (не сломана и не потрачена на успех) —
+               она СЧИТАЕТСЯ СЛОМАННОЙ: выхода без потери отмычки нет, спамить попытками нельзя */
+            const stopHack = () => {
+              if (!hackBroken && lp) {
+                dispatch({ t: 'rubgBoxBreak', id: me, cellIdx: hackBox.cellIdx, itemId: lp.id });
+                sfx.pinBreak();
+                useApp.getState().toast('Взлом прекращён — отмычка сломана', 'err');
+              }
+              setHackBox(null);
+            };
             return (
               <div className="fixed inset-0 z-[64] flex items-center justify-center bg-[rgba(4,6,14,0.85)] p-4">
                 <div className="pixel-panel pixel-corners p-4 max-w-md w-full max-h-[94vh] overflow-y-auto">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="tick-label text-gold">🔓 ЗАМОК ЯЩИКА №{hackBox.cellIdx + 1} · попытка {hackAttempt + 1}</div>
-                    <button onClick={() => setHackBox(null)} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
+                    <div className="tick-label text-gold">{hackBroken ? '🔓 ЗАМОК ЯЩИКА №' + (hackBox.cellIdx + 1) + ' · отмычка сломана' : '🔓 ЗАМОК ЯЩИКА №' + (hackBox.cellIdx + 1) + ' · попытка ' + (hackAttempt + 1)}</div>
+                    <button onClick={stopHack} className="text-dim hover:text-coral cursor-pointer" aria-label="Прекратить взлом">{Ic.cross(14)}</button>
                   </div>
                   <p className="text-[10px] text-faint mt-1">
-                    Мышь влево-вправо — выбор бойка. Двигай мышь ВВЕРХ — боек подлетает (сила = скорость мыши, пружины у всех разные). В зелёной зоне жми «ЗАФИКСИРОВАТЬ» — промах сломает отмычку!
+                    {hackBroken
+                      ? 'Отмычка сломана о замок. Можно взять другую отмычку (новый случайный расклад бойков), попробовать открыть СИЛОЙ или прекратить взлом.'
+                      : 'Мышь влево-вправо — выбор бойка. Двигай мышь ВВЕРХ — боек подлетает (сила = скорость мыши, пружины у всех разные). В зелёной зоне жми «ЗАФИКСИРОВАТЬ» — промах сломает отмычку!'}
                   </p>
-                  <LockpickGame
-                    attempt={hackAttempt}
-                    fixedInit={hackFixed}
-                    onFix={(arr) => { setHackFixed(arr); sfx.pinFix(); }}
-                    onBreak={() => {
-                      if (lp) dispatch({ t: 'rubgBoxBreak', id: me, cellIdx: hackBox.cellIdx, itemId: lp.id });
-                      sfx.pinBreak();
-                      useApp.getState().toast('Отмычка СЛОМАНА — нужна новая (ящики и победы в заданиях дают отмычки)', 'err');
-                      setHackAttempt((a) => a + 1); // следующая попытка: фиксы сохраняются, пружины случайные
-                      setHackBox(null);
-                    }}
-                  />
-                  <div className="grid grid-cols-2 gap-2 mt-2">
-                    <PxBtn
-                      color="gold"
-                      disabled={(hackFixed.filter(Boolean).length ?? 0) < 5}
-                      title={(hackFixed.filter(Boolean).length ?? 0) < 5 ? 'Сначала зафиксируй все 5 бойков в верхней точке' : undefined}
-                      onClick={() => {
-                        if (lp) dispatch({ t: 'rubgBoxHack', id: me, cellIdx: hackBox.cellIdx, itemId: lp.id });
-                        sfx.boxOpen();
-                        setHackFixed([]);
-                        setHackBox(null);
+                  <div className={hackBroken ? 'opacity-40 pointer-events-none' : undefined}>
+                    <LockpickGame
+                      attempt={hackAttempt}
+                      fixedInit={hackFixed}
+                      onFix={(arr) => { setHackFixed(arr); sfx.pinFix(); }}
+                      onBreak={() => {
+                        if (lp) dispatch({ t: 'rubgBoxBreak', id: me, cellIdx: hackBox.cellIdx, itemId: lp.id });
+                        sfx.pinBreak();
+                        useApp.getState().toast('Отмычка СЛОМАНА — нужна новая (ящики и победы в заданиях дают отмычки)', 'err');
+                        setHackBroken(true); // интерфейс НЕ закрывается: другая отмычка / сила / прекратить
                       }}
-                    >🔓 ОТКРЫТЬ ЗАМОК</PxBtn>
-                    <button
-                      onClick={() => {
-                        if (!forceArm) { setForceArm(true); window.setTimeout(() => setForceArm(false), 4000); return; }
-                        setForceArm(false);
-                        dispatch({ t: 'rubgBoxForce', id: me, cellIdx: hackBox.cellIdx });
-                        setHackFixed([]);
-                        setHackBox(null);
-                      }}
-                      className={`py-2 px-2 border-2 font-pixel text-[9px] uppercase select-none touch-none ${forceArm ? 'border-coral bg-coral/15 text-coral' : 'border-magma text-magma cursor-pointer hover:bg-magma/10'}`}
-                    >{forceArm ? '⚠ точно? ящик закроется навсегда' : '💥 открыть силой · 25%'}</button>
+                    />
                   </div>
-                  <p className="text-[9px] text-faint leading-tight mt-1.5">Попытка тратит ОТМЫЧКУ 🔑 с пояса (победа или поломка). «Силой» — без отмычки, шанс 25%; провал закрывает этот ящик для тебя НАВСЕГДА.</p>
+                  {hackBroken ? (
+                    <div className="mt-2 space-y-2">
+                      <div className="border-2 border-coral bg-coral/10 px-2 py-1.5 font-pixel text-[9px] text-coral uppercase">❌ отмычка сломана — мини-игра прервана</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <PxBtn
+                          color="gold"
+                          disabled={!lp}
+                          title={lp ? 'Новая попытка со случайным раскладом бойков' : 'Нет отмычки на поясе — надень её в ИНВЕНТАРЕ'}
+                          onClick={() => { setHackFixed(randomPrePins()); setHackAttempt((a) => a + 1); setHackBroken(false); }}
+                        >🔑 ДРУГАЯ ОТМЫЧКА</PxBtn>
+                        <button
+                          onClick={() => {
+                            if (!forceArm) { setForceArm(true); window.setTimeout(() => setForceArm(false), 4000); return; }
+                            setForceArm(false);
+                            dispatch({ t: 'rubgBoxForce', id: me, cellIdx: hackBox.cellIdx });
+                            setHackBox(null);
+                          }}
+                          className={`py-2 px-2 border-2 font-pixel text-[9px] uppercase select-none touch-none ${forceArm ? 'border-coral bg-coral/15 text-coral' : 'border-magma text-magma cursor-pointer hover:bg-magma/10'}`}
+                        >{forceArm ? '⚠ точно? ящик закроется навсегда' : '💥 открыть силой · 25%'}</button>
+                      </div>
+                      {!lp && <p className="text-[9px] text-faint leading-tight">Отмычек на поясе нет. Открой ИНВЕНТАРЬ (вверху), надень отмычку на пояс и снова нажми «открыть ящик».</p>}
+                      <PxBtn color="dim" className="w-full" onClick={stopHack}>✋ ПРЕКРАТИТЬ ВЗЛОМ</PxBtn>
+                    </div>
+                  ) : (
+                    <div className="mt-2 space-y-2">
+                      <PxBtn
+                        color="gold"
+                        className="w-full"
+                        disabled={(hackFixed.filter(Boolean).length ?? 0) < 5}
+                        title={(hackFixed.filter(Boolean).length ?? 0) < 5 ? 'Сначала зафиксируй все 5 бойков в верхней точке' : undefined}
+                        onClick={() => {
+                          if (lp) dispatch({ t: 'rubgBoxHack', id: me, cellIdx: hackBox.cellIdx, itemId: lp.id });
+                          sfx.boxOpen();
+                          setHackFixed([]);
+                          setHackBox(null);
+                        }}
+                      >🔓 ОТКРЫТЬ ЗАМОК ЯЩИКА</PxBtn>
+                      <PxBtn color="dim" className="w-full" onClick={stopHack}>✋ ПРЕКРАТИТЬ ВЗЛОМ (отмычка сломается)</PxBtn>
+                    </div>
+                  )}
+                  <p className="text-[9px] text-faint leading-tight mt-1.5">Попытка тратит ОТМЫЧКУ 🔑 с пояса (победа, поломка или отказ от взлома). «СИЛОЙ» — только когда отмычка сломана: шанс 25%, провал закрывает этот ящик для тебя НАВСЕГДА. У каждой новой попытки — свой случайный расклад бойков.</p>
                 </div>
               </div>
             );
@@ -4026,7 +4093,7 @@ function CellInspectModal({ idx, onClose }: { idx: number; onClose: () => void }
             <p className="text-[12px] text-dim">Ячейка-квиз: прозвучит случайный вопрос из колоды ({(map.quizzes ?? []).length} шт.).</p>
           )}
           {cell.type === 'loot' && (
-            <p className="text-[12px] text-dim">Ячейка-ЯЩИК (режим RUBG): одноразовый. Проходом больше НЕ вскрывается — подойди, выбери на поясе отмычку 🔑 и взломай замок (мини-игра) или открой силой (25%, провал — ящик закрыт для тебя навсегда). Внутри: фляжки/аптечки/ящик медбрата лечат, пистолет/ПП/снайперка бьют, отмычки и карты воровства/стелса дают особые действия.</p>
+            <p className="text-[12px] text-dim">Ячейка-ЯЩИК (режим RUBG): одноразовый. Проходом НЕ вскрывается — подойди, выбери на поясе отмычку 🔑 и взломай замок (мини-игра). «Открыть силой» (25%) — только когда отмычка сломалась; провал заклинивает ящик для тебя навсегда (он подписан «ЗАКЛИНИЛО»). Внутри: фляжки/аптечки/ящик медбрата лечат, пистолет/ПП/снайперка бьют, отмычки и карты воровства/стелса дают особые действия.</p>
           )}
         </div>
       )}
@@ -4039,9 +4106,23 @@ function CellInspectModal({ idx, onClose }: { idx: number; onClose: () => void }
    резкое движение мышьей ВВЕРХ — удар: боек подлетает тем выше, чем резче удар,
    пружина возвращает его вниз (у каждого бойка СЛУЧАЙНАЯ пружина: плавная или резкая).
    В верхней (зелёной) зоне — «ЗАФИКСИРОВАТЬ»: боек заклинен вверх. Промах — отмычка
-   СЛОМАНА, мини-игра закончена (нужна новая отмычка; зафиксированные бойки сохраняются). */
+   СЛОМАНА, но окно взлома остаётся открытым: «другая отмычка» / «открыть силой» (25%, только
+   отсюда!) / «прекратить взлом». КАЖДАЯ попытка начинается заново: случайное число случайных
+   бойков уже поднято (фиксации между попытками НЕ переносятся) — спамить попытками бессмысленно,
+   ведь выход из взлома тоже СЧИТАЕТСЯ поломкой отмычки. */
 
 const HACK_PINS = 5;      // бойков в замке
+
+/* случайные бойки для НОВОЙ попытки: 0–4 уже подняты (чем больше — тем реже),
+   какие именно — случайно. Расклад у каждой попытки свой, никакого «памяти» */
+function randomPrePins(): boolean[] {
+  const r = Math.random();
+  const n = r < 0.28 ? 0 : r < 0.52 ? 1 : r < 0.72 ? 2 : r < 0.88 ? 3 : 4;
+  const order = [0, 1, 2, 3, 4];
+  for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+  const up = new Set(order.slice(0, n));
+  return Array.from({ length: HACK_PINS }, (_, i) => up.has(i));
+}
 const FIX_ZONE = 0.9;     // верхняя зона фиксации (h ≥ 0.9)
 const CH_X0 = 36;         // левый край первой камеры (viewBox 320)
 const CH_PITCH = 52;      // шаг камер (камера 40px + зазор 12px)
@@ -4052,8 +4133,8 @@ const PIN_H = 26;         // высота бойка, px
 interface HackPin { h: number; v: number; k: number; fixed: boolean; }
 
 function LockpickGame({ attempt, fixedInit, onFix, onBreak }: {
-  attempt: number;                     // смена попытки — пружины рерандомизируются
-  fixedInit: boolean[];                // зафиксированные ранее бойки (прогресс между попытками)
+  attempt: number;                     // смена попытки — пружины и расклад рерандомизируются
+  fixedInit: boolean[];                // случайные уже поднятые бойки ЭТОЙ попытки (0–4)
   onFix: (fixed: boolean[]) => void;   // боек зафиксирован (клик по кнопке в верхней зоне)
   onBreak: () => void;                 // фиксация мимо верхней точки — отмычка сломана
 }) {
@@ -4068,8 +4149,8 @@ function LockpickGame({ attempt, fixedInit, onFix, onBreak }: {
   const onBreakRef = useRef(onBreak);
   onBreakRef.current = onBreak;
 
-  /* инициализация попытки: зафиксированные бойки стоят наверху, остальные — случайно
-     чуть приподняты, у каждого случайная пружина (k: ~0.8 — плавная, ~2.8 — резкая) */
+  /* инициализация попытки: случайные «уже поднятые» бойки стоят наверху, остальные —
+     случайно чуть приподняты, у каждого случайная пружина (k: ~0.8 — плавная, ~2.8 — резкая) */
   useEffect(() => {
     brokenRef.current = false;
     pinsRef.current = Array.from({ length: HACK_PINS }, (_, i) => ({

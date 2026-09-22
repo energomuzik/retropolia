@@ -1062,7 +1062,8 @@ export function drawRubgOverlay(
     plane: import('./types').RubgPlane | null;
     bars: { x: number; y: number; hp: number; playing: boolean; hidden: boolean }[];
     aim?: { x: number; y: number; r: number } | null; // РАДИУС АТАКИ: круг вокруг моей фишки при выбранном оружии (r — px поля)
-    opened?: { x: number; y: number; w: number; h: number }[]; // ВСКРЫТЫЕ ЯЩИКИ: анимированная открытая крышка + блеск
+    opened?: { x: number; y: number; w: number; h: number }[]; // ВСКРЫТЫЕ ЯЩИКИ: анимированная открытая крышка + подпись «ВСКРЫТ»
+    banned?: { x: number; y: number; w: number; h: number }[]; // ЗАКЛИНИВШИЕ ЯЩИКИ (провал «открыть силой»): для этого игрока закрыты навсегда
     shots?: { sx: number; sy: number; tx: number; ty: number; kind: string; ts: number }[]; // ЛЕТЯЩИЕ ПУЛИ (трассеры)
   },
 ) {
@@ -1210,9 +1211,10 @@ export function drawRubgOverlay(
     ctx.restore();
   }
 
-  /* ВСКРЫТЫЕ ЯЩИКИ: анимация «ящик открыт» — крышка откинута и покачивается,
-     из проёма мерцают искры-блёстки. Рисуется ПОВЕРХ ячейки — сразу видно,
-     что лут отсюда уже забрали (закрытый ящик — иконка 📦 на самой ячейке). */
+  /* ВСКРЫТЫЕ ЯЩИКИ: анимация «ящик открыт» — крышка откинута и покачивается, проём
+     пустой и затемнён, сверху подпись «ВСКРЫТ». Рисуется ПОВЕРХ ячейки — сразу видно,
+     что лут отсюда уже забрали (закрытый ящик — иконка 📦 на самой ячейке).
+     Блёстки убраны: они вводили в заблуждение, будто лут ещё лежит внутри. */
   for (const b of opts.opened ?? []) {
     const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
     const s = Math.min(b.w, b.h) * 0.34;
@@ -1221,36 +1223,69 @@ export function drawRubgOverlay(
     /* тень-проём */
     ctx.fillStyle = 'rgba(0,0,0,0.35)';
     ctx.fillRect(-s * 1.05, -s * 0.9, s * 2.1, s * 1.5);
-    /* корпус */
-    ctx.fillStyle = '#5a3a10';
+    /* корпус (приглушённый — ящик пустой) */
+    ctx.fillStyle = '#4a3410';
     ctx.fillRect(-s, -s * 0.25, s * 2, s * 1.05);
-    ctx.fillStyle = '#7a5218';
+    ctx.fillStyle = '#5f4515';
     ctx.fillRect(-s, -s * 0.25, s * 2, s * 0.22);
-    ctx.strokeStyle = '#3a2508';
+    ctx.strokeStyle = '#2c1e06';
     ctx.lineWidth = 2;
     ctx.strokeRect(-s, -s * 0.25, s * 2, s * 1.05);
     /* открытая крышка — откинута назад, чуть покачивается */
     ctx.save();
     ctx.translate(-s, -s * 0.25);
     ctx.rotate(-1.15 + 0.07 * Math.sin(opts.time / 420));
-    ctx.fillStyle = '#8a5f22';
+    ctx.fillStyle = '#6d4d1a';
     ctx.fillRect(0, -s * 0.2, s * 2, s * 0.24);
-    ctx.strokeStyle = '#3a2508';
+    ctx.strokeStyle = '#2c1e06';
     ctx.strokeRect(0, -s * 0.2, s * 2, s * 0.24);
     ctx.restore();
-    /* искры-блёстки из проёма (мерцают) */
-    for (let i = 0; i < 3; i++) {
-      const tw = 0.5 + 0.5 * Math.sin(opts.time / 240 + i * 2.1);
-      if (tw < 0.35) continue;
-      const gxp = Math.sin(i * 2.4 + opts.time / 900) * s * 0.55;
-      const gyp = -s * 0.55 - Math.cos(i * 1.7 + opts.time / 700) * s * 0.3;
-      const rr = (2.5 + 2.5 * tw) * 1;
-      ctx.fillStyle = `rgba(255,207,63,${(tw * 0.9).toFixed(2)})`;
-      ctx.beginPath();
-      ctx.moveTo(gxp, gyp - rr); ctx.lineTo(gxp + rr, gyp); ctx.lineTo(gxp, gyp + rr); ctx.lineTo(gxp - rr, gyp);
-      ctx.closePath();
-      ctx.fill();
-    }
+    /* подпись «ВСКРЫТ» над ящиком */
+    ctx.fillStyle = '#35d46f';
+    ctx.font = '7px "Press Start 2P", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('ВСКРЫТ', 0, -s * 1.05);
+    ctx.restore();
+  }
+
+  /* ЗАКЛИНИВШИЕ ЯЩИКИ: провал «открыть силой» заклинил замок — этот ящик закрыт для
+     игрока НАВСЕГДА (и отмычкой, и силой). Тёмный приглушённый ящик с красным крестом
+     и подписью «ЗАКЛИНИЛО». Видит только сам игрок (запрет у каждого свой). */
+  for (const b of opts.banned ?? []) {
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+    const s = Math.min(b.w, b.h) * 0.34;
+    ctx.save();
+    ctx.translate(cx, cy);
+    /* затемнение-подложка */
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(-s * 1.15, -s * 1.3, s * 2.3, s * 2.2);
+    /* корпус (тусклый, серый) */
+    ctx.fillStyle = '#3a3d47';
+    ctx.fillRect(-s, -s * 0.2, s * 2, s * 1.0);
+    ctx.fillStyle = '#4a4e5a';
+    ctx.fillRect(-s, -s * 0.2, s * 2, s * 0.2);
+    ctx.strokeStyle = '#15161c';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-s, -s * 0.2, s * 2, s * 1.0);
+    /* замок-накладка по центру */
+    ctx.fillStyle = '#5c6172';
+    ctx.fillRect(-s * 0.22, -s * 0.05, s * 0.44, s * 0.5);
+    ctx.strokeStyle = '#15161c';
+    ctx.strokeRect(-s * 0.22, -s * 0.05, s * 0.44, s * 0.5);
+    /* красный крест поверх */
+    ctx.strokeStyle = '#ff4b3f';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.95, -s * 0.85);
+    ctx.lineTo(s * 0.95, s * 0.65);
+    ctx.moveTo(s * 0.95, -s * 0.85);
+    ctx.lineTo(-s * 0.95, s * 0.65);
+    ctx.stroke();
+    /* подпись «ЗАКЛИНИЛО» над ящиком */
+    ctx.fillStyle = '#ff6b5f';
+    ctx.font = '7px "Press Start 2P", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('ЗАКЛИНИЛО', 0, -s * 1.15);
     ctx.restore();
   }
 
