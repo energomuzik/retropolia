@@ -754,7 +754,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         ctx.fillStyle = '#e9ecff';
         ctx.font = '8px "Press Start 2P", monospace';
         ctx.textAlign = 'center';
-        const name = cell.label || (cell.type === 'bonus' ? 'БОНУС' : cell.type === 'trap' ? 'ЛОВУШКА' : cell.type === 'rest' ? 'ОТДЫХ' : cell.type === 'loot' ? 'ЛУТБОКС' : 'КВИЗ');
+        const name = cell.label || (cell.type === 'bonus' ? 'БОНУС' : cell.type === 'trap' ? 'ЛОВУШКА' : cell.type === 'rest' ? 'ОТДЫХ' : cell.type === 'loot' ? 'ЯЩИК' : 'КВИЗ');
         ctx.fillText(name.slice(0, Math.floor((W - 10) / 8)).toUpperCase(), 0, H / 2 - 8);
       }
       if (o.showNumbers && cell.n > 0 && !cell.nonumber) {
@@ -1062,6 +1062,8 @@ export function drawRubgOverlay(
     plane: import('./types').RubgPlane | null;
     bars: { x: number; y: number; hp: number; playing: boolean; hidden: boolean }[];
     aim?: { x: number; y: number; r: number } | null; // РАДИУС АТАКИ: круг вокруг моей фишки при выбранном оружии (r — px поля)
+    opened?: { x: number; y: number; w: number; h: number }[]; // ВСКРЫТЫЕ ЯЩИКИ: анимированная открытая крышка + блеск
+    shots?: { sx: number; sy: number; tx: number; ty: number; kind: string; ts: number }[]; // ЛЕТЯЩИЕ ПУЛИ (трассеры)
   },
 ) {
   const { view, width, height } = opts;
@@ -1206,6 +1208,99 @@ export function drawRubgOverlay(
     ctx.fillText('▶', 0, 0);
     ctx.globalAlpha = 1;
     ctx.restore();
+  }
+
+  /* ВСКРЫТЫЕ ЯЩИКИ: анимация «ящик открыт» — крышка откинута и покачивается,
+     из проёма мерцают искры-блёстки. Рисуется ПОВЕРХ ячейки — сразу видно,
+     что лут отсюда уже забрали (закрытый ящик — иконка 📦 на самой ячейке). */
+  for (const b of opts.opened ?? []) {
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+    const s = Math.min(b.w, b.h) * 0.34;
+    ctx.save();
+    ctx.translate(cx, cy);
+    /* тень-проём */
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(-s * 1.05, -s * 0.9, s * 2.1, s * 1.5);
+    /* корпус */
+    ctx.fillStyle = '#5a3a10';
+    ctx.fillRect(-s, -s * 0.25, s * 2, s * 1.05);
+    ctx.fillStyle = '#7a5218';
+    ctx.fillRect(-s, -s * 0.25, s * 2, s * 0.22);
+    ctx.strokeStyle = '#3a2508';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-s, -s * 0.25, s * 2, s * 1.05);
+    /* открытая крышка — откинута назад, чуть покачивается */
+    ctx.save();
+    ctx.translate(-s, -s * 0.25);
+    ctx.rotate(-1.15 + 0.07 * Math.sin(opts.time / 420));
+    ctx.fillStyle = '#8a5f22';
+    ctx.fillRect(0, -s * 0.2, s * 2, s * 0.24);
+    ctx.strokeStyle = '#3a2508';
+    ctx.strokeRect(0, -s * 0.2, s * 2, s * 0.24);
+    ctx.restore();
+    /* искры-блёстки из проёма (мерцают) */
+    for (let i = 0; i < 3; i++) {
+      const tw = 0.5 + 0.5 * Math.sin(opts.time / 240 + i * 2.1);
+      if (tw < 0.35) continue;
+      const gxp = Math.sin(i * 2.4 + opts.time / 900) * s * 0.55;
+      const gyp = -s * 0.55 - Math.cos(i * 1.7 + opts.time / 700) * s * 0.3;
+      const rr = (2.5 + 2.5 * tw) * 1;
+      ctx.fillStyle = `rgba(255,207,63,${(tw * 0.9).toFixed(2)})`;
+      ctx.beginPath();
+      ctx.moveTo(gxp, gyp - rr); ctx.lineTo(gxp + rr, gyp); ctx.lineTo(gxp, gyp + rr); ctx.lineTo(gxp - rr, gyp);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  /* ЛЕТЯЩИЕ ПУЛИ: трассер от стрелка к цели + дульная вспышка + вспышка попадания.
+     Пистолет — одна быстрая пуля; ПП — очередь из трёх с интервалом 70 мс;
+     снайперка — толстый длинный трассер на высокой скорости. */
+  const NOWMS = Date.now();
+  for (const sh of opts.shots ?? []) {
+    const K = sh.kind === 'sniper' ? { spd: 1700, w: 3.2, burst: 1, len: 42 }
+      : sh.kind === 'smg' ? { spd: 1150, w: 2.0, burst: 3, len: 24 }
+        : { spd: 950, w: 2.3, burst: 1, len: 28 };
+    const dist = Math.hypot(sh.tx - sh.sx, sh.ty - sh.sy) || 1;
+    const flightMs = (dist / K.spd) * 1000;
+    const ux = (sh.tx - sh.sx) / dist, uy = (sh.ty - sh.sy) / dist;
+    for (let bIdx = 0; bIdx < K.burst; bIdx++) {
+      const t0 = sh.ts + bIdx * 70;
+      const p = (NOWMS - t0) / flightMs;
+      if (p < 0 || p > 1.4) continue;
+      if (p <= 1) {
+        const bx = sh.sx + (sh.tx - sh.sx) * p, by = sh.sy + (sh.ty - sh.sy) * p;
+        const tail = Math.min(1, p * 4 + 0.25);
+        ctx.strokeStyle = 'rgba(255,225,120,0.95)';
+        ctx.lineWidth = K.w;
+        ctx.beginPath();
+        ctx.moveTo(bx - ux * K.len * tail, by - uy * K.len * tail);
+        ctx.lineTo(bx, by);
+        ctx.stroke();
+        ctx.fillStyle = '#fff3c4';
+        ctx.beginPath();
+        ctx.arc(bx, by, K.w * 0.95, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        const q = (p - 1) / 0.4; // вспышка попадания ~150 мс после прилёта
+        if (q <= 1) {
+          ctx.strokeStyle = `rgba(255,200,80,${(1 - q).toFixed(2)})`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(sh.tx, sh.ty, 4 + q * 11, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+    }
+    /* дульная вспышка у стрелка (первые 90 мс) */
+    const mfp = (NOWMS - sh.ts) / 90;
+    if (mfp >= 0 && mfp < 1) {
+      ctx.fillStyle = `rgba(255,220,120,${(1 - mfp).toFixed(2)})`;
+      ctx.beginPath();
+      ctx.arc(sh.sx + ux * 10, sh.sy + uy * 10, 6.5 - 3.5 * mfp, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
   ctx.restore();
 }

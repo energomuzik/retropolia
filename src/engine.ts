@@ -64,7 +64,10 @@ export type Action =
   | { t: 'rubgJobDone'; id: string; cellIdx: number; win: boolean } // RUBG: игрок сам закрыл ЛИЧНОЕ задание (доверие): win — победа (+HP+лут), false — поражение (−HP)
   | { t: 'rubgJobLeave'; id: string; cellIdx: number } // RUBG: игрок ушёл из личного задания без последствий
   | { t: 'rubgUseItem'; id: string; itemId: string } // RUBG: использовать хилку (+HP)
-  | { t: 'rubgShoot'; id: string; itemId: string; targetId: string } // RUBG: выстрел по цели (играющему — 100%, идущему — шанс от расстояния)
+  | { t: 'rubgShoot'; id: string; itemId: string; targetId: string } // RUBG: выстрел по цели (играющему — 100%, идущему — шанс от расстояния); все видят летящую пулю
+  | { t: 'rubgBoxHack'; id: string; cellIdx: number; itemId: string } // RUBG: игрок взломал ЯЩИК отмычкой (мини-игра «замок» пройдена): отмычка сгорает, лут выдается
+  | { t: 'rubgBoxBreak'; id: string; cellIdx: number; itemId: string } // RUBG: фиксация мимо верхней точки — отмычка СЛОМАНА (ящик остаётся закрытым)
+  | { t: 'rubgBoxForce'; id: string; cellIdx: number } // RUBG: открыть СИЛОЙ — шанс 25%; провал закрывает этот ящик для игрока НАВСЕГДА
   | { t: 'rubgStealStart'; id: string; victimId: string; holdMs: number } // RUBG: отпустил кнопку кражи — старт мини-игры «карман» (holdMs = сколько держал)
   | { t: 'rubgStealPick'; id: string; victimId: string; itemId: string } // RUBG: выбрал предмет из кармана жертвы
   | { t: 'rubgStealFail'; id: string; victimId: string } // RUBG: время вышло — кража провалена (стелс слетает)
@@ -99,8 +102,9 @@ function normPlayer(p: PlayerState) {
 
 const CELL_PX = CELL; // клетка сетки поля
 
-/* прямоугольник ячейки в px поля (для JOURNEY: «фишка пересекла ячейку») */
-function cellRectOf(map: GameMap, idx: number) {
+/* прямоугольник ячейки в px поля (для JOURNEY: «фишка пересекла ячейку»;
+   экспорт — GameScreen использует для «ящика рядом» и открытых ящиков) */
+export function cellRectOf(map: GameMap, idx: number) {
   const c = map.cells[idx];
   if (!c) return null;
   if (c.cx !== undefined && c.cy !== undefined) {
@@ -321,17 +325,33 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     return total / RUBG_ZONE_TOTAL;
   };
 
-  /* RUBG: РАБОЧИЙ ПЛАН ФАЗ зоны в px поля. Авторские фазы (map.zonePhases: пауза/сжатие
-     в секундах, сужение в КЛЕТКАХ) — приоритет; иначе дефолтные фазы (mul-цепочка от r0),
-     растянутые настройкой zoneSec. Вызывается ОДИН раз при появлении зоны — план
+  /* RUBG: РАБОЧИЙ ПЛАН ФАЗ зоны в px поля. ЕДИНАЯ ФАЗА (map.zonePhase: пауза/сжатие/сужение
+     в клетках) — приоритет: зона повторяет её, пока радиус не закроется (урон растёт по номеру фазы).
+     Далее СТАРАЯ пофазная (map.zonePhases, карты до v0.41), иначе дефолтные фазы (mul-цепочка
+     от r0), растянутые настройкой zoneSec. Вызывается ОДИН раз при появлении зоны — план
      сохраняется в состоянии зоны, дальше тик работает только с ним. */
   const rubgBuildPlan = (r0: number): RubgZonePhasePlan[] => {
+    const dpsOf = (i: number): number => RUBG_ZONE_PHASES[Math.min(i, RUBG_ZONE_PHASES.length - 1)].dps;
+    const one = map.zonePhase;
+    if (one) {
+      const wait = Math.max(0, Math.floor(one.wait || 0));
+      const shrink = Math.max(5, Math.floor(one.shrink || 0));
+      const distC = Math.max(0, Math.floor(one.dist || 0));
+      const plan: RubgZonePhasePlan[] = [];
+      let rr = r0;
+      for (let i = 0; i < 40 && rr > 0.5; i++) {
+        const distPx = distC > 0 ? Math.min(rr, distC * CELL_PX) : rr; // dist=0 — первое же сжатие закрывает карту
+        plan.push({ wait, shrink, dps: dpsOf(i), distPx });
+        rr -= distPx;
+      }
+      return plan.length ? plan : [{ wait, shrink, dps: dpsOf(0), distPx: r0 }];
+    }
     const custom = map.zonePhases;
     if (custom && custom.length) {
       return custom.slice(0, 24).map((p, i) => ({
         wait: Math.max(0, Math.floor(p.wait || 0)),
         shrink: Math.max(5, Math.floor(p.shrink || 0)),
-        dps: RUBG_ZONE_PHASES[Math.min(i, RUBG_ZONE_PHASES.length - 1)].dps,
+        dps: dpsOf(i),
         distPx: Math.max(0, Math.floor(p.dist || 0)) * CELL_PX,
       }));
     }
@@ -367,7 +387,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       phase: 'wait', phaseStart: now, phaseEnd: now + waitSec * 1000,
       idx: 0, dps: ph.dps, lastTick: now, plan,
     };
-    log(`⭕ Безопасная зона появилась: первое сжатие через ${rubgFmtZone(waitSec)}. Ищите задания и лутбоксы!`);
+    log(`⭕ Безопасная зона появилась: первое сжатие через ${rubgFmtZone(waitSec)}. Ищите задания и ЯЩИКИ с лутом!`);
   };
 
   /* RUBG: выдать предмет — на ПОЯС, если есть свободный слот (макс. 3), иначе в общий инвентарь */
@@ -411,13 +431,12 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     return true;
   };
 
-  /* RUBG: ПОСЛЕ ВЫСАДКИ — кто приземлился ПРЯМО в ячейку лутбокса/задания, получает
-     её содержимое сразу (как при входе ходьбой). Один раз при старте партии.
-     ОДНА ячейка задания — ОДИН игрок (rubgTryJob). */
+  /* RUBG: ПОСЛЕ ВЫСАДКИ — кто приземлился ПРЯМО в ячейку задания, сразу её открывает
+     (как при входе ходьбой). Один раз при старте партии. ОДНА ячейка задания — ОДИН игрок.
+     ЯЩИКИ С ЛУТОМ больше НЕ вскрываются проходом/приземлением — только взломом (отмычка/сила). */
   const rubgLandingJobs = () => {
     const rg = s.rubg;
     if (!rg) return;
-    rg.looted = rg.looted ?? [];
     for (const pl of s.players) {
       if (!pl.alive || pl.spect) continue;
       if ((rg.jobs ?? {})[pl.id]) continue;
@@ -425,24 +444,13 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (!pp) continue;
       for (let i = 0; i < map.cells.length; i++) {
         const c = map.cells[i];
-        if (!c || (c.type !== 'task' && c.type !== 'loot')) continue;
+        if (!c || c.type !== 'task') continue;
         const r = cellRectOf(map, i);
         if (!r) continue;
         if (!(pp.x >= r.x && pp.x < r.x + r.w && pp.y >= r.y && pp.y < r.y + r.h)) continue;
         pl.pos = i;
         if (!s.revealed.includes(i)) s.revealed.push(i);
-        if (c.type === 'loot') {
-          if (rg.looted.includes(i)) break; // вскрыт раньше
-          rg.looted.push(i);
-          const kind = rubgRandomKind();
-          rubgGiveItem(pl, kind);
-          const meta = RUBG_ITEMS[kind];
-          rg.stealth = (rg.stealth ?? []).filter((xid) => xid !== pl.id);
-          pl.stealth = false;
-          log(`📦 ${pl.name} вскрыл ЛУТБОКС №${i + 1}: ${meta.icon} ${meta.name}${kind === 'steal' ? ' (3 исп.)' : ''}`);
-        } else {
-          rubgTryJob(pl, i, true);
-        }
+        rubgTryJob(pl, i, true);
         break;
       }
     }
@@ -1110,7 +1118,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       for (const p of s.players) {
         p.secLeft = sm * 60; p.triesLeft = st; p.coinsLeft = sc0; p.pos = startPos;
         if (soloMode) p.spect = !p.isHost; // играет только хост — остальные смотрят
-        if (map.mode === 'rubg') { p.hp = RUBG_HP_MAX; p.items = []; p.stealth = false; }
+        if (map.mode === 'rubg') { p.hp = RUBG_HP_MAX; p.items = [{ ...rubgMkItem('lockpick'), belt: true }]; p.stealth = false; } // стартовая ОТМЫЧКА на поясе — механику взлома можно пробовать сразу
       }
       /* RUBG: САМОЛЁТ через карту — бойцы выпрыгивают, ГДЕ ХОЧУТ (стартовая ячейка НЕ нужна:
          в редакторе RUBG-карту можно завершить без неё). Зона — когда все выпрыгнут. */
@@ -1153,7 +1161,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
          сразу панель готовности хоста (без кубиков). SKILL CHALLENGE — на карте, с жеребьёвкой. */
       if (map.mapless) s.rollOffWinner = s.players.find((p) => p.isHost)?.id ?? null;
       log(map.mode === 'rubg'
-        ? `🪂 RUBG! ${s.players.length} бойцов на борту. Самолёт летит — ПРЫГАЙТЕ, где хотите! Ресурс — полоска HP. Побеждает последний живой!`
+        ? `🪂 RUBG! ${s.players.length} бойцов на борту. Самолёт летит — ПРЫГАЙТЕ, где хотите! Ресурс — полоска HP, у каждого ОТМЫЧКА 🔑 для ящиков. Побеждает последний живой!`
         : soloMode && map.mode === 'skill'
           ? `🧨 SKILL CHALLENGE! Играет только хост — ${SKILL_TURNS} заданий на карте. Остальные — зрители.`
           : map.mapless
@@ -1337,12 +1345,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (prev && !stopped && !a.tp && Math.hypot(x - prev.x, y - prev.y) > CELL_PX * 2.5) break;
       s.journeyPos = s.journeyPos ?? {};
       s.journeyPos[p.id] = { x, y, dir: a.dir, ts: Date.now(), mv: a.mv !== false, tp: a.tp || undefined };
-      /* RUBG: вход в ячейку — ЛИЧНОЕ задание (никого не останавливает) или лутбокс.
-         Стелс слетает при входе в ячейку и при подборе предмета. */
+      /* RUBG: вход в ячейку — ЛИЧНОЕ задание (никого не останавливает). ЯЩИКИ больше
+         НЕ вскрываются проходом — только взломом (отмычка/сила). Стелс слетает при входе в ячейку. */
       if (map.mode === 'rubg' && s.rubg) {
         const rg = s.rubg;
         rg.jobs = rg.jobs ?? {};
-        rg.looted = rg.looted ?? [];
         rg.stealth = rg.stealth ?? [];
         for (let i = 0; i < map.cells.length; i++) {
           const c = map.cells[i];
@@ -1354,17 +1361,6 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           if (inOld) continue; // уже стоял в ней — вход был раньше
           p.pos = i;
           if (!s.revealed.includes(i)) s.revealed.push(i);
-          if (c.type === 'loot') {
-            if (rg.looted.includes(i)) continue; // лутбокс одноразовый — вскрыт раньше
-            rg.looted.push(i);
-            const kind = rubgRandomKind();
-            rubgGiveItem(p, kind); // на пояс, если есть слот (макс. 3), иначе в общий инвентарь
-            const meta = RUBG_ITEMS[kind];
-            rg.stealth = rg.stealth.filter((xid) => xid !== p.id); // подбор снимает стелс
-            p.stealth = false;
-            log(`📦 ${p.name} вскрыл ЛУТБОКС №${i + 1}: ${meta.icon} ${meta.name}${kind === 'steal' ? ` (${3} исп.)` : ''}`);
-            continue;
-          }
           if (c.type === 'task') {
             rubgTryJob(p, i, true); // ОДНА ячейка — ОДИН игрок: занятая другим — отказ с пояснением
           }
@@ -1556,6 +1552,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (s.phase !== 'playing') break;
       rg.jobs = rg.jobs ?? {}; rg.looted = rg.looted ?? []; rg.stealth = rg.stealth ?? [];
       rg.steals = rg.steals ?? {}; rg.stopCd = rg.stopCd ?? {};
+      rg.shots = (rg.shots ?? []).filter((x) => now - x.ts < 2000); // старые пули чистим
       rubgStartZone(); // фолбэк: старая сессия без зоны — создаём при первом тике игры
       /* зависшие кражи: время давно вышло — закрываем как провал */
       for (const [vid, st] of Object.entries(rg.steals)) {
@@ -1694,6 +1691,12 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const dist = Math.hypot(tp.x - mp.x, tp.y - mp.y);
       const range = meta.radius * CELL_PX;
       if (dist > range) break; // вне радиуса оружия
+      /* ЛЕТЯЩАЯ ПУЛЯ: запись выстрела видят ВСЕ — каждый клиент рисует трассер
+         от стрелка к цели и включает звук (пистолет/ПП/снайперка звучат по-разному) */
+      rg.shots = [
+        ...(rg.shots ?? []).filter((x) => Date.now() - x.ts < 2000),
+        { id: 'sh' + Math.random().toString(36).slice(2, 9), from: p.id, to: target.id, kind, ts: Date.now() },
+      ];
       /* по цели в ЛИЧНОМ задании — 100% попадание; по ходячей — шанс от расстояния */
       const busy = !!(rg.jobs ?? {})[target.id];
       const hit = busy ? true : Math.random() < Math.max(0.15, 1 - dist / range);
@@ -1707,6 +1710,67 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         log(`💨 ${p.name} промахнулся по ${target.name} (${meta.name}, ${Math.round(dist / CELL_PX)} кл)`);
       }
       checkElim();
+      break;
+    }
+    /* ---------- ЯЩИКИ С ЛУТОМ (вместо «пройти мимо и забрать»): взлом ОТМЫЧКОЙ
+       (мини-игра «замок» у клиента, хост выдаёт лут) или СИЛОЙ (25%, провал — бан ящика).
+       Подход к ящику обязателен: проверяем расстояние до прямоугольника ячейки. ---------- */
+    case 'rubgBoxHack':
+    case 'rubgBoxBreak':
+    case 'rubgBoxForce': {
+      if (s.phase !== 'playing' || map.mode !== 'rubg' || !s.rubg) break;
+      const p = actor();
+      if (!p || !p.alive || p.spect) break;
+      const rg = s.rubg;
+      rg.looted = rg.looted ?? [];
+      rg.boxBan = rg.boxBan ?? {};
+      const cell = map.cells[a.cellIdx];
+      if (!cell || cell.type !== 'loot') break;
+      if (rg.looted.includes(a.cellIdx)) break; // уже вскрыт
+      if ((rg.boxBan[p.id] ?? []).includes(a.cellIdx)) break; // провалил силой — закрыт навсегда
+      const pp = playerPx(s, map, p.id);
+      const r = cellRectOf(map, a.cellIdx);
+      if (!pp || !r) break;
+      const ddx = Math.max(r.x - pp.x, 0, pp.x - (r.x + r.w));
+      const ddy = Math.max(r.y - pp.y, 0, pp.y - (r.y + r.h));
+      if (Math.hypot(ddx, ddy) > CELL_PX * 2) break; // далеко от ящика (запас 2 клетки — на пинг)
+      if (a.t === 'rubgBoxForce') {
+        /* ОТКРЫТЬ СИЛОЙ: шанс 25%. Провал — ящик для этого игрока закрыт НАВСЕГДА
+           (и отмычкой, и силой): ломать замок грубой силой больше не выйдет */
+        if (Math.random() < 0.25) {
+          rg.looted.push(a.cellIdx);
+          const kind = rubgRandomKind();
+          rubgGiveItem(p, kind);
+          const meta = RUBG_ITEMS[kind];
+          log(`💥 ${p.name} ВЫЛОМАЛ ЯЩИК №${a.cellIdx + 1} СИЛОЙ: ${meta.icon} ${meta.name}${kind === 'steal' ? ' (3 исп.)' : ''}`);
+        } else {
+          if (!rg.boxBan[p.id]) rg.boxBan[p.id] = [];
+          if (!rg.boxBan[p.id].includes(a.cellIdx)) rg.boxBan[p.id].push(a.cellIdx);
+          log(`💥 ${p.name} не смог выломать ЯЩИК №${a.cellIdx + 1} — замок заклинило НАВСЕГДА, этот ящик для него закрыт`);
+        }
+        break;
+      }
+      /* взлом отмычкой: предмет должен быть отмычкой НА ПОЯСЕ у игрока */
+      const inv = p.items ?? (p.items = []);
+      const ii = inv.findIndex((x) => x.id === a.itemId);
+      if (ii < 0) break;
+      if (inv[ii].kind !== 'lockpick') break;
+      if (!inv[ii].belt) break; // только поясная отмычка взламывает
+      if (a.t === 'rubgBoxBreak') {
+        /* промах фиксации: отмычка СЛОМАНА — уходит в никуда, ящик остаётся закрытым */
+        inv.splice(ii, 1);
+        log(`🔓 ${p.name} СЛОМАЛ отмычку о замок ЯЩИКА №${a.cellIdx + 1} — нужна новая (ящики и победы в заданиях её дают)`);
+        break;
+      }
+      /* успех мини-игры: отмычка сгорает, из ящика — случайный предмет */
+      inv.splice(ii, 1);
+      rg.looted.push(a.cellIdx);
+      const kind = rubgRandomKind();
+      rubgGiveItem(p, kind);
+      const meta = RUBG_ITEMS[kind];
+      rg.stealth = (rg.stealth ?? []).filter((xid) => xid !== p.id);
+      p.stealth = false;
+      log(`🔓 ${p.name} ВЗЛОМАЛ ЯЩИК №${a.cellIdx + 1} отмычкой: ${meta.icon} ${meta.name}${kind === 'steal' ? ' (3 исп.)' : ''}`);
       break;
     }
     case 'rubgStealStart': {

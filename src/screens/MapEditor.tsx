@@ -9,7 +9,7 @@ import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, GameMap, PlacedAnim, PlacedBoss, PlateBg, PortalZone, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
-import { bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, MAP_MODES, MAX_FIELD, PLATE_SIZES, tileRectOf, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, rubgFmtZone } from '../types';
+import { bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, MAP_MODES, MAX_FIELD, PLATE_SIZES, tileRectOf, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
 
@@ -130,7 +130,7 @@ const CELL_TYPES: { key: CellType; label: string; cls: string }[] = [
   { key: 'trap', label: 'Лов.', cls: 'border-coral text-coral bg-coral/10' },
   { key: 'quiz', label: 'Квиз', cls: 'border-sky text-sky bg-sky/10' },
 ];
-const LOOT_CELL_TYPE: { key: CellType; label: string; cls: string } = { key: 'loot', label: 'Лут.', cls: 'border-[#ff8b3f] text-[#ff8b3f] bg-[#ff8b3f]/10' }; // ЛУТБОКС — только в режиме RUBG
+const LOOT_CELL_TYPE: { key: CellType; label: string; cls: string } = { key: 'loot', label: 'Ящ.', cls: 'border-[#ff8b3f] text-[#ff8b3f] bg-[#ff8b3f]/10' }; // ЯЩИК с лутом — только в режиме RUBG
 
 export default function MapEditor() {
   const { maps, tiles, tokens, anims, bossAnims, challenges, setScreen, refresh, toast } = useApp();
@@ -2109,19 +2109,19 @@ export default function MapEditor() {
         return;
       }
     }
-    /* RUBG: задания + лутбоксы. Квизы/бонусы/ловушки/отдых запрещены (лутбоксы заменяют бонусы/ловушки),
+    /* RUBG: задания + ящики с лутом. Квизы/бонусы/ловушки/отдых запрещены (ящики заменяют бонусы/ловушки),
        монеты запрещены — в RUBG ресурс ОДИН: полоска HP */
     if ((map.mode ?? 'classic') === 'rubg') {
       const bad = map.cells.filter((c) => c.type === 'quiz' || c.type === 'bonus' || c.type === 'trap' || c.type === 'rest').length;
       if (bad > 0) {
         sfx.fail();
-        toast(`RUBG: ячейки квизов/бонусов/штрафов/отдыха недоступны (лутбоксы заменяют бонусы/ловушки) — на карте ${bad} таких. Уберите их или измените режим`, 'err');
+        toast(`RUBG: ячейки квизов/бонусов/штрафов/отдыха недоступны (ящики заменяют бонусы/ловушки) — на карте ${bad} таких. Уберите их или измените режим`, 'err');
         return;
       }
       const lootCnt = map.cells.filter((c) => c.type === 'loot').length;
       if (lootCnt === 0) {
         sfx.fail();
-        toast('RUBG: на карте нет ни одного ЛУТБОКСА — игрокам нечем лечиться и нечем атаковать. Поставьте лутбоксы (тип ячейки «Лут.»)', 'err');
+        toast('RUBG: на карте нет ни одного ЯЩИКА — игрокам нечем лечиться и нечем атаковать. Поставьте ящики (тип ячейки «Ящ.»)', 'err');
         return;
       }
       /* RUBG: ресурс — только «Полоска HP»: молча исправляем старые карты (монеты выключаем) */
@@ -2130,7 +2130,7 @@ export default function MapEditor() {
       }
     } else if (map.cells.some((c) => c.type === 'loot')) {
       sfx.fail();
-      toast('Ячейки-лутбоксы работают только в режиме RUBG — измените тип ячеек или включите режим RUBG', 'err');
+      toast('Ячейки-ящики работают только в режиме RUBG — измените тип ячеек или включите режим RUBG', 'err');
       return;
     }
     /* НЕВИДИМЫЕ СТЕНЫ работают только в TRIATHLON/JOURNEY: карта со стенами в другом режиме не завершается.
@@ -2602,35 +2602,30 @@ export default function MapEditor() {
                 )}
               </div>
 
-              {/* RUBG: БЕЗОПАСНАЯ ЗОНА — ПОДРОБНАЯ настройка: полное время + КАЖДАЯ ФАЗА
-                  (своя пауза, длительность сжатия и сужение радиуса в КЛЕТКАХ) */}
+              {/* RUBG: БЕЗОПАСНАЯ ЗОНА — ЕДИНАЯ ФАЗА для ВСЕХ сжатий: настраивается ОДНА фаза
+                  (пауза, длительность сжатия и сужение радиуса в КЛЕТКАХ) — зона повторяет её,
+                  пока радиус не закроется. Урон вне зоны нарастает по номеру фазы сам. */}
               {(map.mode ?? 'classic') === 'rubg' && (() => {
                 const CPX = 64; // px в клетке поля
                 const mwL = map.mw ?? map.cols * CPX, mhL = map.mh ?? map.rows * CPX;
                 const r0L = Math.hypot(mwL, mhL) / 2 * 0.75;
-                const scaleL = Math.max(30, Math.floor(map.zoneSec ?? 600)) / RUBG_ZONE_TOTAL;
-                /* эффективные фазы: авторские (zonePhases) или дефолт (масштаб zoneSec),
-                   пересчитанные в КЛЕТКИ для показа */
-                let rrL = r0L;
-                const eff: { wait: number; shrink: number; dist: number }[] = map.zonePhases?.length
-                  ? map.zonePhases.map((p) => ({ wait: Math.max(0, Math.floor(p.wait || 0)), shrink: Math.max(5, Math.floor(p.shrink || 0)), dist: Math.max(0, Math.floor(p.dist || 0)) }))
-                  : RUBG_ZONE_PHASES.map((p) => {
-                      const nr = rrL * p.mul;
-                      const d = Math.max(0, Math.round((rrL - nr) / CPX));
-                      rrL = nr;
-                      return { wait: Math.round(p.wait * scaleL), shrink: Math.round(p.shrink * scaleL), dist: d };
-                    });
-                const totalL = eff.reduce((a, p) => a + p.wait + p.shrink, 0);
-                const setPhases = (ph: { wait: number; shrink: number; dist: number }[]) => updMap({ zonePhases: ph });
+                /* ЕДИНАЯ фаза: авторская (zonePhase) или дефолт. СТАРАЯ пофазная (zonePhases)
+                   ещё работает в игре, но при первой же правке заменяется единой фазой. */
+                const phL = map.zonePhase ?? { wait: 30, shrink: 25, dist: 4 };
+                const distC = Math.max(0, Math.floor(phL.dist || 0));
+                const phasesN = distC > 0 ? Math.max(1, Math.ceil(r0L / CPX / distC)) : 1;
+                const totalL = phasesN * (Math.max(0, phL.wait) + Math.max(5, phL.shrink));
+                const updPh = (patch: Partial<{ wait: number; shrink: number; dist: number }>) =>
+                  updMap({ zonePhase: { ...phL, ...patch } });
                 const rescale = (nt: number) => {
-                  const k = Math.max(30, nt) / Math.max(1, totalL);
-                  setPhases(eff.map((p) => ({ wait: Math.max(0, Math.round(p.wait * k)), shrink: Math.max(5, Math.round(p.shrink * k)), dist: p.dist })));
+                  const k = Math.max(30, nt) / Math.max(1, phL.wait + Math.max(5, phL.shrink));
+                  updPh({ wait: Math.max(0, Math.round(phL.wait * k)), shrink: Math.max(5, Math.round(phL.shrink * k)) });
                 };
                 return (
                   <div>
                     <div className="tick-label mb-2">⭕ Безопасная зона · RUBG</div>
                     <div className="space-y-2">
-                      {/* Полное время: пересчитывает ВСЕ фазы пропорционально */}
+                      {/* Полное время: пересчитывает паузу и сжатие пропорционально */}
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-[11px] text-dim shrink-0">Полное время зоны</span>
                         <div className="flex items-center gap-1">
@@ -2639,42 +2634,33 @@ export default function MapEditor() {
                         </div>
                       </div>
                       <p className="text-[9px] text-faint leading-tight">
-                        Меняет время сразу для всех фаз (пропорционально). Ниже — ПОДРОБНАЯ настройка: у каждой фазы СВОЯ пауза, длительность сжатия и сужение в клетках. Урон вне зоны нарастает по фазам сам: {RUBG_ZONE_PHASES.map((p) => p.dps).join(' → ')} %/с.
+                        Фаз сжатия: <span className="text-paper">{phasesN}</span> (зона повторяет ОДНУ фазу, пока радиус не закроется) · итог: {rubgFmtZone(totalL)}. Меняется «полное время» — пауза и сжатие растягиваются пропорционально. Урон вне зоны нарастает по фазам сам: {RUBG_ZONE_PHASES.map((p) => p.dps).join(' → ')} %/с.
                       </p>
-                      {/* ФАЗЫ: пауза / сжатие / сужение каждой */}
-                      <div className="space-y-1.5">
-                        {eff.map((p, i) => {
-                          const dps = RUBG_ZONE_PHASES[Math.min(i, RUBG_ZONE_PHASES.length - 1)].dps;
-                          const upd = (patch: Partial<{ wait: number; shrink: number; dist: number }>) => {
-                            setPhases(eff.map((q, j) => (j === i ? { ...q, ...patch } : q)));
-                          };
-                          return (
-                            <div key={i} className="border-2 border-edge px-2 py-1.5 space-y-1">
-                              <div className="flex items-center justify-between text-[10px]">
-                                <span className="font-display uppercase text-paper">Фаза {i + 1}</span>
-                                <span className="font-pixel text-[8px] text-coral" title="Урон вне зоны в эту фазу">вне зоны −{dps}%/с</span>
-                              </div>
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-[10px] text-dim shrink-0">Пауза до сжатия</span>
-                                <div className="flex items-center gap-1">
-                                  <Stepper value={Math.min(180, Math.floor(p.wait / 60))} onChange={(m) => upd({ wait: m * 60 + (p.wait % 60) })} min={0} max={180} suffix=" мин" />
-                                  <Stepper value={p.wait % 60} onChange={(sc) => upd({ wait: Math.floor(p.wait / 60) * 60 + sc })} min={0} max={55} step={5} suffix=" с" />
-                                </div>
-                              </div>
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-[10px] text-dim shrink-0">Длительность сжатия</span>
-                                <Stepper value={Math.min(180, p.shrink)} onChange={(v) => upd({ shrink: v })} min={5} max={180} step={5} suffix=" с" />
-                              </div>
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-[10px] text-dim shrink-0">Сужение радиуса</span>
-                                <Stepper value={Math.min(60, p.dist)} onChange={(v) => upd({ dist: v })} min={0} max={60} suffix=" кл" />
-                              </div>
-                            </div>
-                          );
-                        })}
+                      {/* ЕДИНАЯ ФАЗА: одна настройка для всех сжатий */}
+                      <div className="border-2 border-edge px-2 py-1.5 space-y-1">
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="font-display uppercase text-paper">Фаза (одна для всех сжатий)</span>
+                          <span className="font-pixel text-[8px] text-coral" title="Урон вне зоны в первую фазу">вне зоны −{RUBG_ZONE_PHASES[0].dps}%/с →</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] text-dim shrink-0">Пауза до сжатия</span>
+                          <div className="flex items-center gap-1">
+                            <Stepper value={Math.min(180, Math.floor(phL.wait / 60))} onChange={(m) => updPh({ wait: m * 60 + (phL.wait % 60) })} min={0} max={180} suffix=" мин" />
+                            <Stepper value={phL.wait % 60} onChange={(sc) => updPh({ wait: Math.floor(phL.wait / 60) * 60 + sc })} min={0} max={55} step={5} suffix=" с" />
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] text-dim shrink-0">Длительность сжатия</span>
+                          <Stepper value={Math.min(180, Math.max(5, phL.shrink))} onChange={(v) => updPh({ shrink: v })} min={5} max={180} step={5} suffix=" с" />
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] text-dim shrink-0">Сужение радиуса</span>
+                          <Stepper value={Math.min(60, distC)} onChange={(v) => updPh({ dist: v })} min={0} max={60} suffix=" кл" />
+                        </div>
                       </div>
                       <p className="text-[9px] text-faint leading-tight">
-                        Итог: {rubgFmtZone(totalL)}. «Сужение» — на сколько КЛЕТОК уменьшится радиус в этой фазе (для большой карты шаг в 3–6 кл заметен; фаза с сужением по всему радиусу закроет карту целиком). Минимум полного времени — 30 с.
+                        «Сужение» — на сколько КЛЕТОК уменьшается радиус В КАЖДОЙ фазе (для большой карты шаг в 3–6 кл заметен; 0 = первое же сжатие закроет карту целиком).
+                        {map.zonePhases?.length && !map.zonePhase ? ' У этой карты старая настройка «каждая фаза своя» — при первой правке здесь она заменится единой фазой для всех сжатий.' : ''}
                       </p>
                     </div>
                   </div>
@@ -3193,7 +3179,7 @@ export default function MapEditor() {
                       <p className="text-[10px] text-sky mt-1 leading-tight">Пустая клетка-передышка: ничего не происходит, ход просто переходит дальше. Ром не нужен — «без рома» не считается.</p>
                     )}
                     {selCellDef.type === 'loot' && (
-                      <p className="text-[10px] text-[#ff8b3f] mt-1 leading-tight">ЛУТБОКС (только RUBG): одноразовый. Зашедший игрок вскрыает его и получает случайный предмет: фляжку/аптечку/ящик (лечение), пистолет/ПП/снайперку (атаки), карту воровства (3 исп.) или карту стелса.</p>
+                      <p className="text-[10px] text-[#ff8b3f] mt-1 leading-tight">ЯЩИК с лутом (только RUBG): одноразовый, проходом НЕ вскрывается — подойди и взломай ОТМЫЧКОЙ (мини-игра «замок») или открой СИЛОЙ (25%, провал — ящик закрыт навсегда). Внутри: фляжка/аптечка/ящик (лечение), пистолет/ПП/снайперка (атаки), отмычка, карта воровства (3 исп.) или стелса.</p>
                     )}
                     <button
                       onClick={() => {

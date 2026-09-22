@@ -472,7 +472,7 @@ export default function TaskEditor() {
           <option value="">Ячейка: выберите…</option>
           {map.cells.map((c, i) => (
             <option key={i} value={i}>
-              {`${c.nonumber || c.n === 0 ? 'БЕЗ №' : '№' + c.n} · ${c.type === 'start' ? 'Старт' : c.type === 'task' ? 'Задание' : c.type === 'rest' ? 'Отдых' : c.type === 'bonus' ? 'Бонус' : c.type === 'trap' ? 'Ловушка' : c.type === 'loot' ? 'ЛУТБОКС' : 'Квиз'}${c.label ? ' · ' + c.label : ''}${c.task ? ' ✓' : ''}`}
+              {`${c.nonumber || c.n === 0 ? 'БЕЗ №' : '№' + c.n} · ${c.type === 'start' ? 'Старт' : c.type === 'task' ? 'Задание' : c.type === 'rest' ? 'Отдых' : c.type === 'bonus' ? 'Бонус' : c.type === 'trap' ? 'Ловушка' : c.type === 'loot' ? 'ЯЩИК' : 'Квиз'}${c.label ? ' · ' + c.label : ''}${c.task ? ' ✓' : ''}`}
             </option>
           ))}
         </select>
@@ -580,7 +580,7 @@ export default function TaskEditor() {
                     ))}
                   </div>
                   {cell.type === 'loot' && (
-                    <p className="text-[10px] text-[#ff8b3f] leading-tight">ЛУТБОКС (только RUBG): одноразовый. Зашедший игрок получает случайный предмет: лечение, оружие или карты воровства/стелса.</p>
+                    <p className="text-[10px] text-[#ff8b3f] leading-tight">ЯЩИК с лутом (только RUBG): одноразовый, вскрывается ОТМЫЧКОЙ (мини-игра «замок») или силой (25%). Внутри — случайный предмет: лечение, оружие, отмычка или карты воровства/стелса.</p>
                   )}
                   {cell.type === 'start' && (
                     <p className="text-[10px] text-teal leading-tight">Стартовая ячейка: игроки начнут партию с неё, задание не нужно. В RUBG НЕ обязательна — бойцы выпрыгивают из самолёта, где хотят.</p>

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp, getRomData, useBlobImage } from '../store';
 import { dispatch, streamBus, type StreamPacket } from '../useGame';
 import { CELL, cellAtPoint, cellCenter, drawBoard, drawRubgOverlay, fitView, mapSize, smoothPxPerFrame, jumpFrameFactor, DEF_MOVE_SPEED, clampMoveSpeed } from '../render';
-import { cellTaskOf, fmtClock, spentInfo } from '../engine';
+import { cellRectOf, cellTaskOf, fmtClock, spentInfo } from '../engine';
 import { effectLabel } from './TaskEditor';
 import { cardArt, cartridgeArt } from '../assets';
 import SegaBox, { type SegaApi } from '../SegaBox';
@@ -16,7 +16,7 @@ import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
 import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, tileAt, tileRectOf, tileNumOf, coinsShort, coinsStr, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS } from '../types';
-import type { AnimClip, CardDef, ChaosKind, GameMap, PortalZone, TaskDef, TokenDir, RubgItem } from '../types';
+import type { AnimClip, CardDef, ChaosKind, GameMap, GameSession, PortalZone, TaskDef, TokenDir, RubgItem } from '../types';
 import Randomizer from './Randomizer';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
@@ -137,7 +137,13 @@ export default function GameScreen() {
      повторного срабатывания, пока не выйдешь); snapCam — камера мгновенно за фишкой */
   const journeySelf = useRef<{ x: number; y: number; dir?: TokenDir; moving: boolean; dirty: boolean; lastSent: number; tp?: boolean; pinside: Set<string> } | null>(null);
   const snapCamRef = useRef(false);
-  const journeyPress = (d: TokenDir, on: boolean) => { if (on) journeyKeys.current.add(d); else journeyKeys.current.delete(d); };
+  const rubgLastPhaseRef = useRef<GameSession['phase'] | null>(null); // смена фазы RUBG (для снапа камеры после высадки)
+  /* экранный D-pad: пока открыт мини-экран (карман/взлом) — направления игнорируются,
+     фишка на фоне стоит (ref объявлен ниже, читается в рантайме после монтирования) */
+  const journeyPress = (d: TokenDir, on: boolean) => {
+    if (on && pocketBlockRef.current) return;
+    if (on) journeyKeys.current.add(d); else journeyKeys.current.delete(d);
+  };
   /* ---------- FX: разовые анимации-спектакль (5-я/6-я фишки, реакции боссов) ----------
      fxStart — локальный старт клипа (rAF-мс) по id fx С УЧЁТОМ паузы delay;
      звук и fxDone — по ОДНОМУ разу; fxBreak — разбитие ячейки в момент старта клипов */
@@ -309,6 +315,63 @@ export default function GameScreen() {
      паузит игру без сброса — вернулся из карты мира / нажал «Продолжить» и играешь дальше */
   const [rubgPaused, setRubgPaused] = useState(false);
   useEffect(() => { setRubgPaused(false); }, [myJob?.cellIdx, rubgJobArmed]);
+
+  /* ---------- ЗВУК ВЫСТРЕЛОВ: новый выстрел в rubg.shots — все клиенты играют звук
+     (у пистолета/ПП/снайперки разные звуки). Повторы отсекаются по id выстрела ---------- */
+  const seenShotsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const shots = s?.rubg?.shots ?? [];
+    for (const sh of shots) {
+      if (seenShotsRef.current.has(sh.id)) continue;
+      seenShotsRef.current.add(sh.id);
+      if (Date.now() - sh.ts > 1200) continue; // старые (после переподключения) не озвучиваем
+      if (sh.kind === 'sniper') sfx.shotSniper();
+      else if (sh.kind === 'smg') sfx.shotSmg();
+      else sfx.shotPistol();
+    }
+    if (seenShotsRef.current.size > 80) seenShotsRef.current = new Set([...seenShotsRef.current].slice(-40));
+  }, [s?.rubg?.shots]);
+
+  /* ---------- БЛОКИРОВКА ХОДЬБЫ, пока открыт мини-экран (КАРМАН при воровстве /
+     ВЗЛОМ замка): WASD/стрелки ведут мини-игру, а НЕ фишку на фоне — персонаж стоит ---------- */
+  const pocketBlockRef = useRef(false);
+
+  /* ---------- ВЗЛОМ ЯЩИКА: окно мини-игры «замок» (отмычка с пояса) ---------- */
+  const [hackBox, setHackBox] = useState<{ cellIdx: number } | null>(null);
+  const [hackAttempt, setHackAttempt] = useState(0);
+  const [hackFixed, setHackFixed] = useState<boolean[]>([]); // прогресс: какие бойки уже зафиксированы (живёт между попытками)
+  const [forceArm, setForceArm] = useState(false); // двухшаговое «открыть силой» (провал = ящик закрыт навсегда)
+  useEffect(() => { setForceArm(false); setHackAttempt(0); }, [hackBox?.cellIdx]);
+  useEffect(() => { if (!hackBox) setForceArm(false); }, [hackBox]);
+  useEffect(() => {
+    pocketBlockRef.current = !!myStealing || !!hackBox;
+    if (myStealing) journeyKeys.current.clear(); // зажатые до открытия клавиши сбрасываем
+  }, [!!myStealing, !!hackBox]);
+  /* ЯЩИК РЯДОМ: ближайший невскрытый (и не запретный для меня) ячейка-ящик в радиусе 1.5 клетки */
+  const nearBox = useMemo(() => {
+    if (!isRubg || !s || s.phase !== 'playing' || !map || !me) return null;
+    const mp = s.journeyPos?.[me];
+    if (!mp) return null;
+    const looted = s.rubg?.looted ?? [];
+    const banned = s.rubg?.boxBan?.[me] ?? [];
+    let best: { idx: number; d: number } | null = null;
+    map.cells.forEach((c, i) => {
+      if (!c || c.type !== 'loot' || looted.includes(i) || banned.includes(i)) return;
+      const r = cellRectOf(map, i);
+      if (!r) return;
+      const dx = Math.max(r.x - mp.x, 0, mp.x - (r.x + r.w));
+      const dy = Math.max(r.y - mp.y, 0, mp.y - (r.y + r.h));
+      const d = Math.hypot(dx, dy);
+      if (d <= CELL * 1.5 && (!best || d < best.d)) best = { idx: i, d };
+    });
+    return best as { idx: number; d: number } | null;
+  }, [isRubg, s, map, me, s?.journeyPos?.[me ?? '']?.x, s?.journeyPos?.[me ?? '']?.y]);
+  const beltLockpick = (mePlayer?.items ?? []).find((x) => x.kind === 'lockpick' && x.belt);
+  const openHack = (cellIdx: number) => {
+    const lp = (useApp.getState().session?.players.find((x) => x.id === me)?.items ?? []).find((x) => x.kind === 'lockpick' && x.belt);
+    if (!lp) { useApp.getState().toast('Нужна отмычка 🔑 на поясе (надень её в инвентаре)', 'err'); return; }
+    setHackBox({ cellIdx });
+  };
 
   /* ---------- RUBG: локальный тик перерисовки (позиция самолёта, таймер кармана) ---------- */
   useEffect(() => {
@@ -654,6 +717,20 @@ export default function GameScreen() {
                 for (const q of m.portals ?? []) if (sx0 >= q.x && sx0 < q.x + q.w && sy0 >= q.y && sy0 < q.y + q.h) pin0.add(q.id);
                 self = journeySelf.current = { x: sx0, y: sy0, dir: undefined, moving: false, dirty: false, lastSent: 0, pinside: pin0 };
               }
+              /* АНТИ-ДЕСИНК: авторитетная точка ушла ДАЛЕКО, пока фишка стоит (прыжок из самолёта
+                 в RUBG — точка приземления приходит от хоста ПОСЛЕ локальной инициализации;
+                 восстановление партии). Мгновенный снап к ней. Идущего НЕ трогаем — локальная
+                 симуляция всегда чуть впереди сети. Раньше фишка после прыжка оставалась стоять
+                 на стартовой ячейке, и «Старт игры» происходил не там, где спрыгнул игрок. */
+              if (jp && !self.moving && !self.dirty) {
+                const snapD = Math.hypot(jp.x - self.x, jp.y - self.y);
+                if (snapD > CELL * 1.5) {
+                  self.x = jp.x;
+                  self.y = jp.y;
+                  self.pinside.clear();
+                  for (const q of m.portals ?? []) if (self.x >= q.x && self.x < q.x + q.w && self.y >= q.y && self.y < q.y + q.h) self.pinside.add(q.id);
+                }
+              }
               let vx = 0, vy = 0;
               const canWalk = sess.phase === 'playing' && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate);
               if (canWalk) {
@@ -951,6 +1028,12 @@ export default function GameScreen() {
           };
         }
         const v = viewRef.current;
+        /* RUBG: после завершения ВЫСАДКИ (rollOff → playing) камера МГНОВЕННО переносится
+           к фишке — она стоит в точке приземления; иначе долгое «плытьё» через всю карту */
+        if (isRubg && sess.phase !== rubgLastPhaseRef.current) {
+          if (rubgLastPhaseRef.current === 'rollOff' && sess.phase === 'playing') snapCamRef.current = true;
+          rubgLastPhaseRef.current = sess.phase;
+        }
         /* пока фишку передвигают — камера держит фокус ПЛОТНЕЕ (жёстче догоняет цель):
            иначе на быстром ходу фишка уезжала из центра кадра, и слежение «сдвигалось» */
         const camK = anyoneMoving ? 0.2 : 0.07;
@@ -1012,8 +1095,22 @@ export default function GameScreen() {
           bossFx,
         });
 
-        /* RUBG: оверлей поверх поля — безопасная зона, самолёт, маркеры игры, радиус атаки */
+        /* RUBG: оверлей поверх поля — безопасная зона, самолёт, маркеры игры, радиус атаки,
+           ВСКРЫТЫЕ ящики (анимация «открыт») и ЛЕТЯЩИЕ ПУЛИ выстрелов */
         if (isRubg) {
+          const openedBoxes: { x: number; y: number; w: number; h: number }[] = [];
+          for (const li of sess.rubg?.looted ?? []) {
+            const lc = m.cells[li];
+            if (!lc || lc.type !== 'loot') continue;
+            const lr = cellRectOf(m, li);
+            if (lr) openedBoxes.push(lr);
+          }
+          const flyShots: { sx: number; sy: number; tx: number; ty: number; kind: string; ts: number }[] = [];
+          for (const sh of sess.rubg?.shots ?? []) {
+            const fp = sess.journeyPos?.[sh.from], tp = sess.journeyPos?.[sh.to];
+            if (!fp || !tp) continue;
+            flyShots.push({ sx: fp.x, sy: fp.y, tx: tp.x, ty: tp.y, kind: sh.kind, ts: sh.ts });
+          }
           drawRubgOverlay(ctx, {
             view: v, width: w, height: h, time: t,
             mapW: m.mw ?? m.cols * CELL, mapH: m.mh ?? m.rows * CELL,
@@ -1021,6 +1118,8 @@ export default function GameScreen() {
             plane: sess.rubg?.plane ?? null,
             bars: rubgBars,
             aim: aimRadiusRef.current,
+            opened: openedBoxes,
+            shots: flyShots,
           });
         }
       }
@@ -1075,12 +1174,12 @@ export default function GameScreen() {
     return () => clearTimeout(t);
   }, [myStealing?.victim, myStealing?.startedAt, myStealing?.dur, myStealing, me]);
 
-  /* ---------- RUBG: мини-игра «карман» — сетка 15×15, старт от ВЫХОДА 🚪 ----------
-     Отпустил кнопку — таймер и карман: WASD/стрелки/тап нащупывай предметы,
-     встав на нужный — «ЗАХВАТИТЬ ПРЕДМЕТ», донеси его до ВЫХОДА — «СВОРОВАТЬ».
-     Мгновенно украсть нельзя: добычу нужно ДОНЕСТИ до выхода. ---------- */
-  const POCKET_COLS = 15;
-  const POCKET_CELLS = 225; // 15×15 клеток — большой карман, предметы разбросаны случайно
+  /* ---------- RUBG: мини-игра «карман» — сетка 10×10, старт от ВЫХОДА 🚪 ----------
+     Отпустил кнопку — таймер и карман: WASD/стрелки/джой/стрелки НА ЭКРАНЕ нащупывай
+     предметы (МЫШЬЮ клетку выбрать НЕЛЬЗЯ), встав на нужный — «ЗАХВАТИТЬ ПРЕДМЕТ»,
+     донеси его до ВЫХОДА — «СВОРОВАТЬ». Мгновенно украсть нельзя: добычу нужно ДОНЕСТИ. */
+  const POCKET_COLS = 10;
+  const POCKET_CELLS = 100; // 10×10 клеток — карман, предметы разбросаны случайно
   const POCKET_EXIT = 0;    // клетка ВЫХОДА (левый верхний угол) — старт и точка сдачи добычи
   const [pocketCur, setPocketCur] = useState(0);
   const [pocketHeld, setPocketHeld] = useState<RubgItem | null>(null); // предмет В РУКЕ (несём к выходу)
@@ -1134,7 +1233,7 @@ export default function GameScreen() {
       if (['arrowup', 'w'].includes(k)) { e.preventDefault(); setPocketCur((c) => Math.max(0, c - POCKET_COLS)); }
       else if (['arrowdown', 's'].includes(k)) { e.preventDefault(); setPocketCur((c) => Math.min(last, c + POCKET_COLS)); }
       else if (['arrowleft', 'a'].includes(k)) { e.preventDefault(); setPocketCur((c) => Math.max(0, c - 1)); }
-      else if (['arrowright', 'd'].includes(k)) { e.preventDefault(); setPocketCur((c) => Math.min(last, c + 1)); }
+      else if (['arrowright', 'd'].includes(k)) { e.preventDefault(); setPocketCur((c) => Math.min(POCKET_CELLS - 1, c + 1)); }
       else if (['enter', ' ', 'e'].includes(k)) {
         e.preventDefault();
         pocketAct(myStealing.victim);
@@ -1143,6 +1242,45 @@ export default function GameScreen() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [!!myStealing, myStealing?.victim, me]);
+  /* ДЖОЙСТИК в кармане: крестовина/стик двигают РУКУ (край-триггер: одно нажатие — один шаг).
+     Фишка на фоне при этом НЕ двигается (pocketBlockRef отключает ходьбу). */
+  const pocketPadPrev = useRef<Set<TokenDir>>(new Set());
+  useEffect(() => {
+    if (!myStealing) { pocketPadPrev.current.clear(); return; }
+    const iv = window.setInterval(() => {
+      const prefs = loadEmuPrefs();
+      const dirs = new Set<TokenDir>();
+      if (prefs.gamepad !== false) {
+        for (const gp of listGamepads()) {
+          const addBtn = (idx: number | undefined, d: TokenDir) => {
+            if (idx === undefined || idx < 0 || idx > 17) return;
+            if (gp.buttons[idx]?.pressed) dirs.add(d);
+          };
+          addBtn(12, 'up'); addBtn(13, 'down'); addBtn(14, 'left'); addBtn(15, 'right');
+          addBtn(prefs.gpad?.UP, 'up'); addBtn(prefs.gpad?.DOWN, 'down');
+          addBtn(prefs.gpad?.LEFT, 'left'); addBtn(prefs.gpad?.RIGHT, 'right');
+          addBtn(prefs.segaPad?.UP, 'up'); addBtn(prefs.segaPad?.DOWN, 'down');
+          addBtn(prefs.segaPad?.LEFT, 'left'); addBtn(prefs.segaPad?.RIGHT, 'right');
+          const ax = gp.axes[0] ?? 0, ay = gp.axes[1] ?? 0;
+          if (ax < -0.45) dirs.add('left');
+          if (ax > 0.45) dirs.add('right');
+          if (ay < -0.45) dirs.add('up');
+          if (ay > 0.45) dirs.add('down');
+        }
+      }
+      /* край-триггер: только НОВЫЕ направления двигают руку — удержание не «бежит» */
+      const last = POCKET_CELLS - 1;
+      for (const d of dirs) {
+        if (pocketPadPrev.current.has(d)) continue;
+        if (d === 'up') setPocketCur((c) => Math.max(0, c - POCKET_COLS));
+        else if (d === 'down') setPocketCur((c) => Math.min(last, c + POCKET_COLS));
+        else if (d === 'left') setPocketCur((c) => Math.max(0, c - 1));
+        else if (d === 'right') setPocketCur((c) => Math.min(last, c + 1));
+      }
+      pocketPadPrev.current = dirs;
+    }, 66);
+    return () => { clearInterval(iv); pocketPadPrev.current.clear(); };
+  }, [!!myStealing]);
 
   /* ---------- RUBG: воровство — КЛИК по карте воровства открывает «карман», ----------
      удержание «НАЧАТЬ ВОРОВСТВО» заряжает время (окантовка-часы), отпускание —
@@ -1381,6 +1519,9 @@ export default function GameScreen() {
     const dn = (e: KeyboardEvent) => {
       const d = dirOf(e.code);
       if (!d || e.repeat) return;
+      /* мини-экран КАРМАНА открыт (воровство) — WASD/стрелки ведут РУКУ, а не фишку:
+         ходьба заблокирована, персонаж на фоне стоит на месте */
+      if (pocketBlockRef.current) return;
       e.preventDefault(); // стрелки не крутят страницу — они ведут фишку
       journeyKeys.current.add(d);
     };
@@ -1406,7 +1547,9 @@ export default function GameScreen() {
     const iv = window.setInterval(() => {
       const prefs = loadEmuPrefs();
       const dirs = new Set<TokenDir>();
-      if (prefs.gamepad !== false) {
+      /* мини-экран КАРМАНА открыт — крестовина джойстика ведёт РУКУ (обрабатывается
+         отдельным эффектом), фишка на фоне НЕ двигается */
+      if (!pocketBlockRef.current && prefs.gamepad !== false) {
         const pads = listGamepads();
         const addBtn = (gp: Gamepad, idx: number | undefined, d: TokenDir) => {
           if (idx === undefined || idx < 0 || idx > 17) return;
@@ -2006,7 +2149,7 @@ export default function GameScreen() {
             <div className="absolute inset-0 flex items-center justify-center bg-[rgba(4,6,14,0.5)] z-10">
               <div className="pixel-panel pixel-corners pop-in p-6 max-w-md w-full mx-4 text-center max-h-[92vh] overflow-y-auto">
                 <div className="font-display uppercase tracking-wider text-gold text-lg">🪂 САМОЛЁТ НА ЛИНИИ</div>
-                <p className="text-[11px] text-dim mt-1">Выпрыгивай, ГДЕ ХОЧЕШЬ — прыжок приземлит тебя под самолётом. Ищи задания и лутбоксы, следи за зоной!</p>
+                <p className="text-[11px] text-dim mt-1">Выпрыгивай, ГДЕ ХОЧЕШЬ — прыжок приземлит тебя под самолётом. Ищи задания и ЯЩИКИ с лутом (вскрывай отмычкой), следи за зоной!</p>
                 <div className="font-pixel text-[10px] text-paper my-3">Пройдено маршрута: {Math.round((dd / len) * 100)}%{inside ? '' : ' · самолёт ВНЕ карты'}</div>
                 {iJumped ? (
                   <div className="font-pixel text-[9px] text-teal blink-hard">ПРЫЖОК СОВЕРШЁН — ждём остальных ({jumped.length}/{rosterR.length})</div>
@@ -2135,7 +2278,7 @@ export default function GameScreen() {
                 <span className="text-gold inline-block floaty">{isRubg ? '🪂' : isJourney ? Ic.pawn(40) : Ic.dice(40)}</span>
                 <div className="font-pixel text-gold text-[11px] mt-3">{isRubg ? 'RUBG БЕЗ САМОЛЁТА — СТАРТ СО СТАРТОВОЙ ЯЧЕЙКИ' : isJourney ? (isSoloJourney ? 'ОДИНОКОЕ ПРИКЛЮЧЕНИЕ' : 'ВСЕ СТАРТУЮТ ОДНОВРЕМЕННО') : 'ПЕРВЫМ ХОДИТ'}</div>
                 {isRubg ? (
-                  <p className="text-[11px] text-dim mt-2">Фолбэк: сессия без самолёта. Ищите личные задания и лутбоксы, следите за сжимающейся зоной. Побеждает ПОСЛЕДНИЙ ЖИВОЙ!</p>
+                  <p className="text-[11px] text-dim mt-2">Фолбэк: сессия без самолёта. Ищите личные задания и ящики, следите за сжимающейся зоной. Побеждает ПОСЛЕДНИЙ ЖИВОЙ!</p>
                 ) : isJourney ? (
                   <p className="text-[11px] text-dim mt-2">{isSoloJourney ? 'Играет ТОЛЬКО ХОСТ — все подключившиеся смотрят трансляцию. Жеребьёвки нет: фишка хоста идёт свободно от старта.' : 'Жеребьёвки нет — каждый ведёт СВОЮ фишку со старта. Кто ПЕРВЫМ пересечёт ячейку задания — у того оно и откроется, остальные будут смотреть.'}</p>
                 ) : (
@@ -2824,17 +2967,26 @@ export default function GameScreen() {
                         <p className="text-[10px] text-dim leading-tight">Эмулятор загружен и стоит НА ПАУЗЕ — прочитайте задание, подготовьтесь и настройте управление. Игра начнётся по кнопке «Старт игры».</p>
                       </>
                     ) : (
-                      <div className="grid grid-cols-3 gap-2">
-                        <PxBtn color="teal" onClick={() => { sfx.success(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: true }); }}>
-                          🏆 ПОБЕДА +{RUBG_WIN_HP}%
-                        </PxBtn>
-                        <PxBtn color="coral" onClick={() => { sfx.fail(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: false }); }}>
-                          💀 ПОРАЖЕНИЕ −{RUBG_LOSE_HP}%
-                        </PxBtn>
-                        <GhostBtn onClick={() => setRubgPaused((x) => !x)} title="Пауза эмулятора без сброса прогресса">
-                          {rubgPaused ? Ic.play(13) : Ic.pause(13)} {rubgPaused ? 'Продолжить' : 'Пауза'}
+                      <>
+                        <div className="grid grid-cols-3 gap-2">
+                          <PxBtn color="teal" onClick={() => { sfx.success(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: true }); }}>
+                            🏆 ПОБЕДА +{RUBG_WIN_HP}%
+                          </PxBtn>
+                          <PxBtn color="coral" onClick={() => { sfx.fail(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: false }); }}>
+                            💀 ПОРАЖЕНИЕ −{RUBG_LOSE_HP}%
+                          </PxBtn>
+                          <GhostBtn onClick={() => setRubgPaused((x) => !x)} title="Пауза эмулятора без сброса прогресса">
+                            {rubgPaused ? Ic.play(13) : Ic.pause(13)} {rubgPaused ? 'Продолжить' : 'Пауза'}
+                          </GhostBtn>
+                        </div>
+                        <GhostBtn
+                          className="w-full mt-2"
+                          title="Перезапустить игру с сохранения (или с начала, если сохранения нет) — как «Перезапуск задания» в других режимах"
+                          onClick={() => { ejsApiRef.current?.loadSaveReliable((rSaveState as string | null) ?? null); sfx.alarm(); }}
+                        >
+                          {Ic.rotate(13)} Перезапуск задания
                         </GhostBtn>
-                      </div>
+                      </>
                     )}
                   </div>
                 </div>
@@ -2846,7 +2998,7 @@ export default function GameScreen() {
 
           {/* ---------- КАРМАН: ЗАЖАТЬ «НАЧАТЬ ВОРОВСТВО» (окантовка-часы, без лимита) ----------
               → ОТПУСТИТЬ: таймер и ВЫХОД 🚪 → WASD нащупывай предметы → «ЗАХВАТИТЬ» →
-              донеси до ВЫХОДА → «СВОРОВАТЬ». Карман 15×15 клеток ---------- */}
+              донеси до ВЫХОДА → «СВОРОВАТЬ». Карман 10×10 клеток ---------- */}
           {(myStealing || (stealOpen && stealVictim)) && (() => {
             const vid = myStealing ? myStealing.victim : stealVictim!;
             const victim = s.players.find((x) => x.id === vid);
@@ -2876,10 +3028,10 @@ export default function GameScreen() {
                   </div>
                   <p className="text-[10px] text-faint mt-1">
                     {active
-                      ? 'Старт от ВЫХОДА 🚪. WASD/стрелки/тап — нащупывай предметы, встав на нужный — «ЗАХВАТИТЬ», донеси до выхода — «СВОРОВАТЬ». Пояс не воруется!'
+                      ? 'Старт от ВЫХОДА 🚪. WASD/стрелки/джой — нащупывай предметы (мышь выключена), встав на нужный — «ЗАХВАТИТЬ», донеси до выхода — «СВОРОВАТЬ». Пояс не воруется!'
                       : 'ЗАЖМИ «НАЧАТЬ ВОРОВСТВО» — окантовка крутится БЕЗ ЛИМИТА: сколько удержал — столько времени получишь. ОТПУСТИ — таймер пойдёт.'}
                   </p>
-                  {/* СЕТКА 15×15 с окантовкой-часами; клетка 0 — ВЫХОД 🚪 */}
+                  {/* СЕТКА 10×10 с окантовкой-часами; клетка 0 — ВЫХОД 🚪 */}
                   <div
                     className="mt-3 p-[4px]"
                     style={{ background: `conic-gradient(${ringColor} 0 ${(frac * 360).toFixed(1)}deg, rgba(49,60,114,0.55) ${(frac * 360).toFixed(1)}deg 360deg)` }}
@@ -2888,22 +3040,21 @@ export default function GameScreen() {
                       {Array.from({ length: POCKET_CELLS }).map((_, i) => {
                         if (i === POCKET_EXIT) {
                           return (
-                            <button
+                            <div
                               key="pocket-exit"
-                              onClick={() => { if (active) setPocketCur(POCKET_EXIT); }}
-                              title="ВЫХОД — отсюда начинаешь и сюда несёшь добычу"
-                              className={`aspect-square min-h-0 flex items-center justify-center text-[11px] leading-none cursor-pointer border-2 ${pocketCur === POCKET_EXIT && active ? 'border-teal bg-teal/25' : 'border-teal/60 bg-teal/10'}`}
-                            >🚪</button>
+                              title="ВЫХОД — отсюда начинаешь и сюда несёшь добычу (дойти стрелками/WASD)"
+                              className={`aspect-square min-h-0 flex items-center justify-center text-[11px] leading-none select-none border-2 ${pocketCur === POCKET_EXIT && active ? 'border-teal bg-teal/25' : 'border-teal/60 bg-teal/10'}`}
+                            >🚪</div>
                           );
                         }
                         const it = pocketLayout.get(i);
                         const sel = active && i === pocketCur;
                         const heldHere = !!held && it?.id === held.id;
+                        /* МЫШЬЮ клетку выбрать НЕЛЬЗЯ: перемещение — только стрелки/WASD/джой/экранные стрелки */
                         return (
-                          <button
+                          <div
                             key={i}
-                            onClick={() => { if (active) setPocketCur(i); }}
-                            className={`aspect-square min-h-0 border flex items-center justify-center leading-none cursor-pointer ${sel ? (held ? 'border-gold bg-gold/20' : 'border-coral bg-coral/15') : heldHere ? 'border-gold/70 bg-gold/10' : it ? 'border-[#313c72] hover:border-edge2' : 'border-[#1a2244] hover:border-edge2'}`}
+                            className={`aspect-square min-h-0 border flex items-center justify-center leading-none select-none ${sel ? (held ? 'border-gold bg-gold/20' : 'border-coral bg-coral/15') : heldHere ? 'border-gold/70 bg-gold/10' : it ? 'border-[#313c72]' : 'border-[#1a2244]'}`}
                             title={it ? RUBG_ITEMS[it.kind].name : 'пусто'}
                           >
                             {active && heldHere ? (
@@ -2913,7 +3064,7 @@ export default function GameScreen() {
                             ) : (
                               <span className="text-[7px] text-[#1a2244]">·</span>
                             )}
-                          </button>
+                          </div>
                         );
                       })}
                     </div>
@@ -2989,6 +3140,25 @@ export default function GameScreen() {
           {mySteal === undefined && (
             <div className="fixed bottom-3 right-3 z-30 w-64 pixel-panel pixel-corners p-2.5 space-y-1.5 max-h-[62vh] overflow-y-auto">
               <div className="tick-label">🧰 ПОЯС · HP {Math.round(mePlayer.hp ?? 100)}% · слотов {RUBG_BELT_SLOTS}</div>
+              {/* ЯЩИК РЯДОМ: взлом отмычкой (мини-игра «замок») или силой (25%, провал — закрыт навсегда) */}
+              {nearBox && (
+                <div className="border-2 border-[#ffcf3f]/70 bg-[#ffcf3f]/10 px-2 py-1.5 space-y-1">
+                  <div className="font-display text-[11px] text-[#ffcf3f]">📦 РЯДОМ ЯЩИК №{nearBox.idx + 1}</div>
+                  <button
+                    onClick={() => openHack(nearBox.idx)}
+                    disabled={!beltLockpick}
+                    className={`w-full py-1.5 border-2 font-pixel text-[8px] select-none touch-none ${beltLockpick ? 'border-teal text-teal cursor-pointer hover:bg-teal/10' : 'border-edge text-faint cursor-not-allowed'}`}
+                  >{beltLockpick ? '🔓 ОТКРЫТЬ ЯЩИК ОТМЫЧКОЙ' : 'нужна отмычка 🔑 на поясе'}</button>
+                  <button
+                    onClick={() => {
+                      if (!forceArm) { setForceArm(true); window.setTimeout(() => setForceArm(false), 4000); return; }
+                      setForceArm(false);
+                      dispatch({ t: 'rubgBoxForce', id: me, cellIdx: nearBox.idx });
+                    }}
+                    className={`w-full py-1.5 border-2 font-pixel text-[8px] select-none touch-none ${forceArm ? 'border-coral bg-coral/15 text-coral' : 'border-magma text-magma cursor-pointer hover:bg-magma/10'}`}
+                  >{forceArm ? '⚠ ТОЧНО? провал = ящик закрыт навсегда — ЖМИ ЕЩЁ РАЗ' : '💥 ОТКРЫТЬ СИЛОЙ · шанс 25%'}</button>
+                </div>
+              )}
               {(() => {
                 const inv = mePlayer.items ?? [];
                 const belted = inv.filter((x: RubgItem) => x.belt);
@@ -3044,6 +3214,13 @@ export default function GameScreen() {
                           className="mt-1 w-full py-1 border-2 border-[#c07aff] text-[#c07aff] font-pixel text-[8px] cursor-pointer hover:bg-[#c07aff]/10"
                         >👻 АКТИВИРОВАТЬ СТЕЛС</button>
                       )}
+                      {it.kind === 'lockpick' && (
+                        <button
+                          onClick={() => { if (nearBox) openHack(nearBox.idx); }}
+                          disabled={!nearBox}
+                          className={`mt-1 w-full py-1 border-2 font-pixel text-[8px] select-none touch-none ${nearBox ? 'border-teal text-teal cursor-pointer hover:bg-teal/10' : 'border-edge text-faint cursor-not-allowed'}`}
+                        >{nearBox ? `🔓 ОТКРЫТЬ ЯЩИК №${nearBox.idx + 1}` : 'подойди к ящику 📦'}</button>
+                      )}
                       {weapon && (
                         <button
                           onClick={() => setAimItemId(aimItemId === it.id ? null : it.id)}
@@ -3089,9 +3266,68 @@ export default function GameScreen() {
                 });
               })()}
               {/* Кнопка «Инвентарь» здесь НЕ нужна: она есть вверху, рядом с «Карта мира» */}
-              <p className="text-[8px] text-faint leading-tight">На поясе макс. {RUBG_BELT_SLOTS} предмета — только они действуют (лечиться/стрелять/воровать/стелс). Пояс НЕ воруется. Надеть/снять — только в ИНВЕНТАРЕ.</p>
+              <p className="text-[8px] text-faint leading-tight">На поясе макс. {RUBG_BELT_SLOTS} предмета — только они действуют (лечиться/стрелять/воровать/стелс/взлом). Пояс НЕ воруется. Надеть/снять — только в ИНВЕНТАРЕ.</p>
             </div>
           )}
+
+          {/* ---------- ВЗЛОМ ЯЩИКА: мини-игра «ЗАМОК В РАЗРЕЗЕ» ----------
+              Отмычка выбирается на поясе; в окне — замок сбоку, отмычка и 5 подпружиненных
+              бойков. Мышь влево-вправо — выбор бойка, движение мышьей ВВЕРХ — удар по бойку
+              (чем резче — тем выше подскок; пружины у бойков случайные: плавные и резкие).
+              В верхней точке — «ЗАФИКСИРОВАТЬ». Фиксация мимо верхней точки — отмычка СЛОМАНА.
+              Все 5 зафиксированы — «ОТКРЫТЬ ЗАМОК». Есть «ОТКРЫТЬ СИЛОЙ» (25%, провал — бан) ---------- */}
+          {hackBox && (() => {
+            const lp = (mePlayer.items ?? []).find((x) => x.kind === 'lockpick' && x.belt);
+            return (
+              <div className="fixed inset-0 z-[64] flex items-center justify-center bg-[rgba(4,6,14,0.85)] p-4">
+                <div className="pixel-panel pixel-corners p-4 max-w-md w-full max-h-[94vh] overflow-y-auto">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="tick-label text-gold">🔓 ЗАМОК ЯЩИКА №{hackBox.cellIdx + 1} · попытка {hackAttempt + 1}</div>
+                    <button onClick={() => setHackBox(null)} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
+                  </div>
+                  <p className="text-[10px] text-faint mt-1">
+                    Мышь влево-вправо — выбор бойка. Двигай мышь ВВЕРХ — боек подлетает (сила = скорость мыши, пружины у всех разные). В зелёной зоне жми «ЗАФИКСИРОВАТЬ» — промах сломает отмычку!
+                  </p>
+                  <LockpickGame
+                    attempt={hackAttempt}
+                    fixedInit={hackFixed}
+                    onFix={(arr) => { setHackFixed(arr); sfx.pinFix(); }}
+                    onBreak={() => {
+                      if (lp) dispatch({ t: 'rubgBoxBreak', id: me, cellIdx: hackBox.cellIdx, itemId: lp.id });
+                      sfx.pinBreak();
+                      useApp.getState().toast('Отмычка СЛОМАНА — нужна новая (ящики и победы в заданиях дают отмычки)', 'err');
+                      setHackAttempt((a) => a + 1); // следующая попытка: фиксы сохраняются, пружины случайные
+                      setHackBox(null);
+                    }}
+                  />
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    <PxBtn
+                      color="gold"
+                      disabled={(hackFixed.filter(Boolean).length ?? 0) < 5}
+                      title={(hackFixed.filter(Boolean).length ?? 0) < 5 ? 'Сначала зафиксируй все 5 бойков в верхней точке' : undefined}
+                      onClick={() => {
+                        if (lp) dispatch({ t: 'rubgBoxHack', id: me, cellIdx: hackBox.cellIdx, itemId: lp.id });
+                        sfx.boxOpen();
+                        setHackFixed([]);
+                        setHackBox(null);
+                      }}
+                    >🔓 ОТКРЫТЬ ЗАМОК</PxBtn>
+                    <button
+                      onClick={() => {
+                        if (!forceArm) { setForceArm(true); window.setTimeout(() => setForceArm(false), 4000); return; }
+                        setForceArm(false);
+                        dispatch({ t: 'rubgBoxForce', id: me, cellIdx: hackBox.cellIdx });
+                        setHackFixed([]);
+                        setHackBox(null);
+                      }}
+                      className={`py-2 px-2 border-2 font-pixel text-[9px] uppercase select-none touch-none ${forceArm ? 'border-coral bg-coral/15 text-coral' : 'border-magma text-magma cursor-pointer hover:bg-magma/10'}`}
+                    >{forceArm ? '⚠ точно? ящик закроется навсегда' : '💥 открыть силой · 25%'}</button>
+                  </div>
+                  <p className="text-[9px] text-faint leading-tight mt-1.5">Попытка тратит ОТМЫЧКУ 🔑 с пояса (победа или поломка). «Силой» — без отмычки, шанс 25%; провал закрывает этот ящик для тебя НАВСЕГДА.</p>
+                </div>
+              </div>
+            );
+          })()}
         </>
       )}
 
@@ -3378,7 +3614,7 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
             >
               {stopCdLeft > 0 ? `🚨 ОСТАНОВИТЬ ВОРОВСТВО (${Math.ceil(stopCdLeft / 1000)}с)` : '🚨 ОСТАНОВИТЬ ВОРОВСТВО'}
             </PxBtn>
-            {rubgInv.length === 0 && <div className="text-[11px] text-dim">Пусто — ищи ЛУТБОКСЫ 📦 на карте</div>}
+            {rubgInv.length === 0 && <div className="text-[11px] text-dim">Пусто — взламывай ЯЩИКИ 📦 отмычкой 🔑 или побеждай в заданиях</div>}
             {rubgInv.map((it: RubgItem) => {
               const meta = RUBG_ITEMS[it.kind];
               return (
@@ -3725,7 +3961,7 @@ function CellInspectModal({ idx, onClose }: { idx: number; onClose: () => void }
   const revealed = (s.revealed ?? []).includes(idx) || !!ownerId;
   const hidden = !!st.options.hideUnrevealed && !revealed;
   const rom = task ? st.roms.find((r) => r.id === task.romId) : undefined;
-  const typeLabel = cell.type === 'task' ? 'Задание' : cell.type === 'rest' ? 'Передышка' : cell.type === 'bonus' ? 'Бонус (шанс)' : cell.type === 'trap' ? 'Ловушка' : cell.type === 'loot' ? 'ЛУТБОКС' : 'Квиз';
+  const typeLabel = cell.type === 'task' ? 'Задание' : cell.type === 'rest' ? 'Передышка' : cell.type === 'bonus' ? 'Бонус (шанс)' : cell.type === 'trap' ? 'Ловушка' : cell.type === 'loot' ? 'ЯЩИК С ЛУТОМ' : 'Квиз';
   const typeColor = cell.type === 'task' ? 'text-gold' : cell.type === 'rest' ? 'text-dim' : cell.type === 'bonus' ? 'text-teal' : cell.type === 'trap' ? 'text-coral' : cell.type === 'loot' ? 'text-[#ff8b3f]' : 'text-sky';
   const joyMeta = task?.joy ? JOY_LIST.find((j) => j.id === task.joy) : null;
   return (
@@ -3790,10 +4026,185 @@ function CellInspectModal({ idx, onClose }: { idx: number; onClose: () => void }
             <p className="text-[12px] text-dim">Ячейка-квиз: прозвучит случайный вопрос из колоды ({(map.quizzes ?? []).length} шт.).</p>
           )}
           {cell.type === 'loot' && (
-            <p className="text-[12px] text-dim">Ячейка-ЛУТБОКС (режим RUBG): одноразовый ящик со случайным предметом — фляжки/аптечки/ящик медбрата лечат, пистолет/ПП/снайперка бьют, карты воровства и стелса дают особые действия.</p>
+            <p className="text-[12px] text-dim">Ячейка-ЯЩИК (режим RUBG): одноразовый. Проходом больше НЕ вскрывается — подойди, выбери на поясе отмычку 🔑 и взломай замок (мини-игра) или открой силой (25%, провал — ящик закрыт для тебя навсегда). Внутри: фляжки/аптечки/ящик медбрата лечат, пистолет/ПП/снайперка бьют, отмычки и карты воровства/стелса дают особые действия.</p>
           )}
         </div>
       )}
     </Modal>
+  );
+}
+
+/* ---------- мини-игра «ЗАМОК В РАЗРЕЗЕ» (взлом ящика отмычкой, RUBG) ----------
+   Замок сбоку: 5 подпружиненных бойков в камерах. Мышь влево-вправо — выбор бойка,
+   резкое движение мышьей ВВЕРХ — удар: боек подлетает тем выше, чем резче удар,
+   пружина возвращает его вниз (у каждого бойка СЛУЧАЙНАЯ пружина: плавная или резкая).
+   В верхней (зелёной) зоне — «ЗАФИКСИРОВАТЬ»: боек заклинен вверх. Промах — отмычка
+   СЛОМАНА, мини-игра закончена (нужна новая отмычка; зафиксированные бойки сохраняются). */
+
+const HACK_PINS = 5;      // бойков в замке
+const FIX_ZONE = 0.9;     // верхняя зона фиксации (h ≥ 0.9)
+const CH_X0 = 36;         // левый край первой камеры (viewBox 320)
+const CH_PITCH = 52;      // шаг камер (камера 40px + зазор 12px)
+const CH_TOP = 34;        // верх камеры
+const CH_BOT = 170;       // низ камеры (позиция бойка в покое)
+const PIN_H = 26;         // высота бойка, px
+
+interface HackPin { h: number; v: number; k: number; fixed: boolean; }
+
+function LockpickGame({ attempt, fixedInit, onFix, onBreak }: {
+  attempt: number;                     // смена попытки — пружины рерандомизируются
+  fixedInit: boolean[];                // зафиксированные ранее бойки (прогресс между попытками)
+  onFix: (fixed: boolean[]) => void;   // боек зафиксирован (клик по кнопке в верхней зоне)
+  onBreak: () => void;                 // фиксация мимо верхней точки — отмычка сломана
+}) {
+  const pinsRef = useRef<HackPin[]>([]);
+  const [sel, setSel] = useState(0);
+  const [, setFrame] = useState(0);
+  const lastYRef = useRef<number | null>(null);
+  const bumpAtRef = useRef(0);
+  const brokenRef = useRef(false);
+  const onFixRef = useRef(onFix);
+  onFixRef.current = onFix;
+  const onBreakRef = useRef(onBreak);
+  onBreakRef.current = onBreak;
+
+  /* инициализация попытки: зафиксированные бойки стоят наверху, остальные — случайно
+     чуть приподняты, у каждого случайная пружина (k: ~0.8 — плавная, ~2.8 — резкая) */
+  useEffect(() => {
+    brokenRef.current = false;
+    pinsRef.current = Array.from({ length: HACK_PINS }, (_, i) => ({
+      h: fixedInit[i] ? 1 : Math.random() * 0.16,
+      v: 0,
+      k: 0.8 + Math.random() * 2.0,
+      fixed: !!fixedInit[i],
+    }));
+    setFrame((f) => f + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attempt]);
+
+  /* физика пружин (rAF ~60fps): пружина тянет вниз (жёстче k — резче возврат), трение гасит */
+  useEffect(() => {
+    let raf = 0;
+    let last = performance.now();
+    const loop = (now: number) => {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      for (const p of pinsRef.current) {
+        if (p.fixed) continue;
+        p.v -= 3.4 * p.k * dt;
+        p.v *= Math.max(0, 1 - 2.4 * dt);
+        p.h += p.v * dt;
+        if (p.h <= 0) { p.h = 0; p.v = 0; }
+        if (p.h > 1.12) { p.h = 1.12; p.v = Math.min(p.v, 0); }
+      }
+      setFrame((f) => (f + 1) % 1000000);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  const tryFix = () => {
+    if (brokenRef.current) return;
+    const pins = pinsRef.current;
+    const p = pins[sel];
+    if (!p || p.fixed) return;
+    if (p.h >= FIX_ZONE) {
+      p.fixed = true; p.h = 1; p.v = 0;
+      onFixRef.current(pins.map((q) => q.fixed));
+    } else {
+      brokenRef.current = true;
+      onBreakRef.current();
+    }
+  };
+
+  /* мышь/тач: X — выбор бойка, движение ВВЕРХ — удар (сила = скорость мыши) */
+  const onPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    const svg = e.currentTarget;
+    const r = svg.getBoundingClientRect();
+    const px = ((e.clientX - r.left) / r.width) * 320;
+    const py = ((e.clientY - r.top) / r.height) * 240;
+    const idx = Math.max(0, Math.min(HACK_PINS - 1, Math.floor((px - CH_X0) / CH_PITCH)));
+    if (idx !== sel) setSel(idx);
+    const lastY = lastYRef.current;
+    lastYRef.current = py;
+    if (lastY === null) return;
+    const dyUp = lastY - py; // >0 — мышь идёт вверх
+    if (dyUp <= 0 || brokenRef.current) return;
+    const p = pinsRef.current[idx];
+    if (!p || p.fixed) return;
+    p.v += dyUp * 0.058; // сила удара = скорость мыши
+    const now = performance.now();
+    if (dyUp > 14 && now - bumpAtRef.current > 80) { bumpAtRef.current = now; sfx.pinBump(); }
+  };
+
+  const pins = pinsRef.current;
+  const fixedN = pins.filter((p) => p.fixed).length;
+  const xc = (i: number) => CH_X0 + i * CH_PITCH + 20; // центр камеры i
+  const pinTopY = (h: number) => CH_BOT - PIN_H - h * (CH_BOT - CH_TOP - PIN_H);
+  const pinBotY = (h: number) => CH_BOT - h * (CH_BOT - CH_TOP - PIN_H);
+
+  return (
+    <div className="mt-2 select-none touch-none">
+      <svg
+        viewBox="0 0 320 240"
+        className="w-full border-[3px] border-edge bg-[#0a0e20]"
+        style={{ touchAction: 'none', cursor: 'ns-resize' }}
+        onPointerMove={onPointerMove}
+        onPointerLeave={() => { lastYRef.current = null; }}
+      >
+        {/* корпус замка */}
+        <rect x="14" y="22" width="292" height="160" fill="#1a2038" stroke="#313c72" strokeWidth="3" />
+        {/* ключевой проём снизу */}
+        <circle cx="160" cy="212" r="9" fill="#0a0e20" stroke="#313c72" strokeWidth="2" />
+        <rect x="156" y="212" width="8" height="18" fill="#0a0e20" stroke="#313c72" strokeWidth="1.5" />
+        {pins.map((p, i) => {
+          const x0 = CH_X0 + i * CH_PITCH;
+          const top = pinTopY(p.h);
+          const bot = pinBotY(p.h);
+          const isSel = i === sel;
+          /* пружина: зигзаг от верха камеры до бойка, сжимается при подъёме */
+          const coils = 5;
+          const seg = Math.max(4, (top - (CH_TOP + 2)) / coils);
+          let path = `M ${xc(i)} ${CH_TOP + 2}`;
+          for (let c = 0; c < coils; c++) {
+            const dir = c % 2 === 0 ? 9 : -9;
+            path += ` L ${xc(i) + dir} ${CH_TOP + 2 + seg * (c + 0.5)} L ${xc(i)} ${CH_TOP + 2 + seg * (c + 1)}`;
+          }
+          return (
+            <g key={i}>
+              {/* камера */}
+              <rect x={x0 + 4} y={CH_TOP} width={CH_PITCH - 12} height={CH_BOT - CH_TOP} fill={isSel ? '#111a3c' : '#0d1226'} stroke={isSel ? '#ffcf3f' : '#313c72'} strokeWidth={isSel ? 2.5 : 1.5} />
+              {/* зелёная зона фиксации */}
+              <rect x={x0 + 4} y={CH_TOP} width={CH_PITCH - 12} height={8} fill={p.h >= FIX_ZONE || p.fixed ? 'rgba(53,212,111,0.65)' : 'rgba(53,212,111,0.18)'} />
+              {/* пружина */}
+              {!p.fixed && <path d={path} fill="none" stroke="#7c86b8" strokeWidth="2" strokeLinejoin="round" />}
+              {/* боек */}
+              <rect x={x0 + 6} y={top} width={CH_PITCH - 16} height={PIN_H} fill={p.fixed ? '#35d46f' : isSel ? '#ffcf3f' : '#8f97c9'} stroke={p.fixed ? '#1f7a43' : '#0a0e20'} strokeWidth="1.5" />
+              {!p.fixed && <line x1={x0 + 6} y1={bot - 6} x2={x0 + CH_PITCH - 10} y2={bot - 6} stroke="#0a0e20" strokeWidth="1.5" />}
+              {p.fixed && <text x={xc(i)} y={top + 18} textAnchor="middle" fontSize="12" fill="#0a0e20">✓</text>}
+              {/* номер бойка */}
+              <text x={xc(i)} y={CH_BOT + 14} textAnchor="middle" fontSize="8" fill={isSel ? '#ffcf3f' : '#7c86b8'}>{i + 1}</text>
+            </g>
+          );
+        })}
+        {/* отмычка: стержень + наконечник под выбранным бойком */}
+        <g>
+          <rect x="14" y="196" width={Math.max(10, xc(sel) - 16)} height="6" fill="#c9a24b" stroke="#7a5c1e" strokeWidth="1.5" />
+          <path d={`M ${xc(sel) - 5} 202 L ${xc(sel)} 186 L ${xc(sel) + 5} 202 Z`} fill="#e0b95c" stroke="#7a5c1e" strokeWidth="1.5" />
+        </g>
+      </svg>
+      <div className="flex items-center justify-between mt-1.5">
+        <span className="font-pixel text-[9px] text-faint">Зафиксировано: <span className={fixedN >= HACK_PINS ? 'text-teal' : 'text-paper'}>{fixedN}/{HACK_PINS}</span></span>
+        <span className="font-pixel text-[8px] text-faint">боек {sel + 1} выбран</span>
+      </div>
+      <button
+        onClick={tryFix}
+        disabled={brokenRef.current || !!pins[sel]?.fixed}
+        className={`mt-1.5 w-full py-2.5 border-2 font-pixel text-[10px] uppercase select-none touch-none ${pins[sel]?.h >= FIX_ZONE && !pins[sel]?.fixed ? 'border-teal bg-teal/20 text-teal cursor-pointer pulse-ring' : brokenRef.current ? 'border-coral text-coral cursor-not-allowed' : 'border-gold text-gold cursor-pointer hover:bg-gold/10'}`}
+      >
+        📌 ЗАФИКСИРОВАТЬ боек {sel + 1}
+      </button>
+    </div>
   );
 }
