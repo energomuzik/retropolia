@@ -1143,8 +1143,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const mlTotal = map.mapless?.total ?? 0;
       if (mlTotal > 0) s.mapless = { done: 0, total: mlTotal, over: false };
       if (isJourneyLike(map.mode)) {
-        // фишка хоста стартует ОДНОВРЕМЕННО (в TRIATHLON — фишки ВСЕХ игроков);
-        // жеребьёвки нет — панель готовности (в JOURNEY-на-одного она у хоста одна)
+        // фишка хоста стартует ОДНОВРЕМЕННО (в JOURNEY — фишки ВСЕХ игроков);
+        // жеребьёвки нет — панель готовности (в JOURNEY SOLO она у хоста одна)
         const sc = map.cells[startPos];
         const scx = sc ? (sc.cx ?? (sc.x + (sc.w || 1) / 2) * CELL_PX) : 0;
         const scy = sc ? (sc.cy ?? (sc.y + (sc.h || 1) / 2) * CELL_PX) : 0;
@@ -1169,7 +1169,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
             : soloMode
               ? `🧭 JOURNEY! Играет только хост (${sm} мин / ${st} поп.) — все остальные подключаются зрителями.`
               : isJourneyLike(map.mode)
-                ? `🧭 TRIATHLON! У каждого: ${sm} мин и ${st} поп. Все фишки стартуют ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, тот и играет.`
+                ? `🧭 JOURNEY! У каждого: ${sm} мин и ${st} поп. Все фишки стартуют ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, тот и играет.`
                 : `Игра начинается! У каждого: ${sm} мин и ${st} поп. Бросок за первый ход…`);
       break;
     }
@@ -1208,7 +1208,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         break;
       }
       if (s.phase !== 'playing') break;
-      if (isJourneyLike(map.mode)) break; // TRIATHLON/JOURNEY: кубиков нет — ходят фишкой напрямую
+      if (isJourneyLike(map.mode)) break; // JOURNEY/JOURNEY SOLO/RUBG: кубиков нет — ходят фишкой напрямую
       if (gatingFx()) break; // идёт анимация победы/поражения — ждём её
       const p = current();
       if (!p || p.id !== a.id || s.moving || s.challenge || s.pendingCard || s.awaitPost || s.quiz) break;
@@ -1309,8 +1309,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       resolveLanding();
       break;
     }
-    /* ---------- TRIATHLON / JOURNEY: прямое управление фишкой ----------
-       TRIATHLON — все игроки ходят ОДНОВРЕМЕННО; JOURNEY — только хост, остальные зрители. */
+    /* ---------- JOURNEY / JOURNEY SOLO / RUBG: прямое управление фишкой ----------
+       JOURNEY — все игроки ходят ОДНОВРЕМЕННО; JOURNEY SOLO — только хост, остальные зрители. */
     case 'journeyMove': {
       if (s.phase !== 'playing' || !isJourneyLike(map.mode)) break;
       /* Очередь ходов отсутствует — каждый игрок ведёт СВОЮ фишку

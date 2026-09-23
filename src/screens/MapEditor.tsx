@@ -9,7 +9,8 @@ import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, GameMap, PlacedAnim, PlacedBoss, PlateBg, PortalZone, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
-import { bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, MAP_MODES, MAX_FIELD, PLATE_SIZES, tileRectOf, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
+import { bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, MAP_MODES, mapModeModified, MAX_FIELD, MODE_PRESETS, PLATE_SIZES, tileRectOf, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
+import type { MapMode } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
 
@@ -106,7 +107,7 @@ const TOOLS: { key: Tool; label: string; hint: string }[] = [
   { key: 'hop', label: 'Переход', hint: 'ВТОРАЯ стрелка: клик по ячейке А, затем по Б — когда фишка ОСТАНОВИТСЯ на А, она прыгнет на Б (выход из круга, штраф-телепорт). Клик по той же ячейке — убрать' },
   { key: 'anim', label: 'Анимация', hint: 'выберите анимацию в левой панели, кликните по карте — поставится проигрыватель анимации. Клик по уже стоящей — выбрать и тянуть' },
   { key: 'boss', label: 'Босс', hint: 'вшейте босса в карту (спойлер «Боссы» слева), выберите его и кликните по карте — босс встанет на ячейку: живёт (idle), реагирует на победы/поражения игроков в радиусе' },
-  { key: 'wall', label: 'Стена', hint: 'НЕВИДИМАЯ стена (только JOURNEY): протяните прямоугольник — фишка не сможет зайти внутрь. Клик по стене — выбрать и тянуть. В игре стены НЕ видны' },
+  { key: 'wall', label: 'Стена', hint: 'НЕВИДИМАЯ стена (JOURNEY, JOURNEY SOLO и RUBG): протяните прямоугольник — фишка не сможет зайти внутрь. Клик по стене — выбрать и тянуть. В игре стены НЕ видны' },
   { key: 'portal', label: 'Портал', hint: 'ТЕЛЕПОРТ между плитками: протяните зону входа, затем кликните по карте (можно на другой плитке — переключите её в панели «Плитки и порталы») — куда переносить. В JOURNEY фишка, войдя в зону, мгновенно переносится. Клик по порталу — выбрать и тянуть' },
   { key: 'erase', label: 'Ластик', hint: 'клик или протяни с зажатой кнопкой — убирает ТАЙЛЫ под курсором. Ячейки, анимации и стены ластик не трогает: выдели и нажми Delete' },
   { key: 'pan', label: 'Рука', hint: 'двигать камеру (колесо — зум под курсором)' },
@@ -2050,8 +2051,10 @@ export default function MapEditor() {
       startMin: r.startMin,
       startTries: r.startTries,
       moveSpeed: r.speed,
+      smoothMove: true, // ход фишек плавный — стандарт всех режимов с v0.43.0
       customId: cc.id,
       customName: cc.name,
+      resMode: r.resHp ? 'hp' : r.resCoins ? 'coins' : 'std',
       startCoins: r.resCoins ? Math.max(0, r.startCoins) : undefined,
       coinsOnly: r.resCoins && r.coinsOnly ? true : undefined,
       taskWinCoins: r.resCoins ? r.taskWinCoins : undefined,
@@ -2065,6 +2068,7 @@ export default function MapEditor() {
     };
     let extra = '';
     if (r.resCoins) extra += ` Монеты: старт ${coinsStr(r.startCoins)}, +${r.taskWinCoins} бр за победу, пропуск ${r.skipCoins} бр.`;
+    if (r.resHp) extra += ' Ресурс — ПОЛОСКА HP: +10% за победу, −5% за поражение/пропуск, на нуле — вылет.';
     if (empty) {
       patch.mw = r.mw;
       patch.mh = r.mh;
@@ -2079,6 +2083,48 @@ export default function MapEditor() {
     updMap(patch);
     sfx.coin();
     toast(`Свой режим «${cc.name}» применён: ${MAP_MODES.find((x) => x.id === r.baseMode)?.name ?? r.baseMode}, ${r.startMin} мин / ${r.startTries} поп.${extra}`, 'ok');
+  };
+
+  /** КЛИК ПО РЕЖИМУ В ВЕРХНЕЙ ПАНЕЛИ = КЛАССИЧЕСКИЙ ПРЕСЕТ режима: режим + стандартные
+     параметры (JOURNEY — 30 мин/30 поп., JOURNEY SOLO — 60/60, RUBG — полоска HP и зона
+     4 часа, ход фишек ПЛАВНЫЙ). Дальше параметры можно менять — режим станет «ИЗМЕНЕННЫЙ». */
+  const applyModePreset = (id: MapMode) => {
+    const pr = MODE_PRESETS[id];
+    const patch: Partial<GameMap> = {
+      mode: id,
+      startMin: pr.startMin,
+      startTries: pr.startTries,
+      resMode: pr.resMode,
+      smoothMove: pr.smoothMove,
+      coinsOnly: undefined,
+      startCoins: undefined,
+    };
+    let extra = '';
+    if (id === 'rubg') {
+      /* ЗОНА 4 ЧАСА: считаем число фаз по размеру поля (та же формула, что в панели зоны
+         и в движке), ставим ЕДИНУЮ фазу: сжатие 25 с, сужение 4 кл, пауза — остаток до 4 ч.
+         zonePhase имеет приоритет над zoneSec/zonePhases — старые настройки зоны затираем. */
+      const CPX = 64;
+      const W = mapRef.current?.mw ?? (mapRef.current?.cols ?? 20) * CPX;
+      const H = mapRef.current?.mh ?? (mapRef.current?.rows ?? 15) * CPX;
+      const r0 = Math.hypot(W, H) / 2 * 0.75;
+      const dist = pr.zoneDist ?? 4;
+      const n = dist > 0 ? Math.max(1, Math.ceil(r0 / CPX / dist)) : 1;
+      const total = pr.zoneTotalSec ?? 14400;
+      const shrink = pr.zoneShrinkSec ?? 25;
+      const wait = Math.max(0, Math.round(total / n - shrink));
+      patch.zonePhase = { wait, shrink, dist };
+      patch.zonePhases = undefined;
+      patch.zoneSec = undefined;
+      extra = ` Зона: полное время 4 ч (фаз сжатия: ${n}).`;
+    } else {
+      patch.zonePhase = undefined;
+      patch.zonePhases = undefined;
+      patch.zoneSec = undefined;
+    }
+    updMap(patch);
+    sfx.coin();
+    toast(`Режим ${MAP_MODES.find((x) => x.id === id)?.name ?? id}: пресет — ${pr.startMin} мин / ${pr.startTries} поп., ход фишек плавный.${extra}`, 'ok');
   };
 
   const finish = async () => {
@@ -2133,12 +2179,12 @@ export default function MapEditor() {
       toast('Ячейки-ящики работают только в режиме RUBG — измените тип ячеек или включите режим RUBG', 'err');
       return;
     }
-    /* НЕВИДИМЫЕ СТЕНЫ работают только в TRIATHLON/JOURNEY: карта со стенами в другом режиме не завершается.
+    /* НЕВИДИМЫЕ СТЕНЫ работают в JOURNEY, JOURNEY SOLO и RUBG: карта со стенами в другом режиме не завершается.
      Удалить все стены разом — кнопка в левой панели «Невидимые стены» */
     const wallCnt = (map.walls ?? []).length;
     if (wallCnt > 0 && !isJourneyLike(map.mode)) {
       sfx.fail();
-      toast(`На карте ${wallCnt} невидимых стен, но они работают только в TRIATHLON/JOURNEY. Измените режим игры или удалите все стены (кнопка «Удалить все стены разом» в панели слева)`, 'err');
+      toast(`На карте ${wallCnt} невидимых стен, но они работают только в JOURNEY, JOURNEY SOLO и RUBG. Измените режим игры (кнопки вверху) или удалите все стены (кнопка «Удалить все стены разом» в панели слева)`, 'err');
       return;
     }
     /* ПЛИТОЧНЫЙ РЕЖИМ: ячейки ВНЕ карт-плиток недостижимы в игре — карта не завершается */
@@ -2244,6 +2290,25 @@ export default function MapEditor() {
           {Ic.map(18)} Редактор карт
         </h1>
         {map && <span className="hud-chip pixel-corners px-3 py-1 font-display text-xs text-gold uppercase">{map.name}</span>}
+        {/* ВЫБОР РЕЖИМА — в ВЕРХНЕЙ панели (переехал из левой панели): клик по режиму =
+            его КЛАССИЧЕСКИЙ ПРЕСЕТ (JOURNEY 30/30, JOURNEY SOLO 60/60, RUBG — HP и зона 4 ч,
+            ход фишек плавный). Поменяли параметры после этого — режим «ИЗМЕНЕННЫЙ». */}
+        {map && (
+          <div className="flex items-center gap-1 flex-wrap">
+            {MAP_MODES.map((md) => {
+              const on = (map.mode ?? 'classic') === md.id;
+              const modified = on && mapModeModified(map);
+              return (
+                <button
+                  key={md.id}
+                  onClick={() => { sfx.hover(); if (!on || modified) applyModePreset(md.id); }}
+                  title={`${md.hint}${modified ? '\n\nПараметры карты отличаются от пресета — клик вернёт классический пресет.' : on ? '\n\nКлассический пресет уже применён.' : ''}`}
+                  className={`px-2.5 py-1 border-2 font-display text-[9px] uppercase cursor-pointer transition-colors whitespace-nowrap ${on ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}
+                >{on ? '✓ ' : ''}{md.name}{modified && <span className="ml-1 font-pixel text-[8px] text-magma">· ИЗМЕНЕННЫЙ</span>}</button>
+              );
+            })}
+          </div>
+        )}
         <div className="ml-auto flex gap-2 flex-wrap">
           {map && (
             <>
@@ -2668,27 +2733,13 @@ export default function MapEditor() {
               })()}
 
               <div>
-                <div className="tick-label mb-2">Режим игры</div>
-                <div className="space-y-1.5">
-                  {MAP_MODES.map((md) => {
-                    const on = (map.mode ?? 'classic') === md.id;
-                    return (
-                      <button
-                        key={md.id}
-                        onClick={() => {
-                          sfx.hover();
-                          /* RUBG: ресурс всегда «Полоска HP» — при включении режима монеты выключаются */
-                          if (md.id === 'rubg') updMap({ mode: md.id, resMode: 'hp', coinsOnly: undefined, startCoins: undefined });
-                          else updMap({ mode: md.id });
-                        }}
-                        title={md.hint}
-                        className={`w-full text-left border-2 px-2.5 py-2 cursor-pointer transition-colors ${on ? 'border-gold bg-gold/10' : 'border-edge bg-panel hover:border-edge2'}`}
-                      >
-                        <div className={`font-display text-[11px] uppercase ${on ? 'text-gold' : 'text-paper'}`}>{on ? '✓ ' : ''}{md.name}</div>
-                      </button>
-                    );
-                  })}
-                </div>
+                <div className="tick-label mb-2">Режим игры — кнопки вверху ↑</div>
+                <p className="text-[9px] text-faint leading-tight mb-2">
+                  Кнопки режимов переехали в ВЕРХНЮЮ панель редактора. Клик по режиму = его классический
+                  пресет: JOURNEY — 30 мин и 30 попыток у каждого, JOURNEY SOLO — 60 мин и 60 попыток,
+                  RUBG — полоска HP и зона 4 часа, ход фишек плавный. Поменяете параметры — режим будет
+                  помечен «ИЗМЕНЕННЫЙ» (и в лобби тоже).
+                </p>
                 {/* СВОИ ЧЕЛЛЕНДЖИ (мастер «Создать челлендж» с главного экрана): */}
                 {challenges.length > 0 && (
                   <div className="mt-2">
@@ -2742,7 +2793,7 @@ export default function MapEditor() {
                       <p key={md.id} className="text-[10px] text-faint leading-tight"><span className="text-dim font-display uppercase">{md.name}</span> — {md.hint}</p>
                     ))}
                     <p className="text-[10px] text-faint leading-tight">
-                      Отметка действует на ВСЮ карту и видна игрокам при выборе карты. RETROPOLIA — обычная игра с кубиками (по умолчанию).
+                      Отметка действует на ВСЮ карту и видна игрокам при выборе карты. Кнопки режимов — в ВЕРХНЕЙ панели. RETROPOLIA — обычная игра с кубиками (по умолчанию).
                     </p>
                   </div>
                 )}
@@ -2762,8 +2813,8 @@ export default function MapEditor() {
                     <p className="text-[10px] text-faint leading-tight">Зоны, куда фишка НЕ может зайти («невидимые стены» в играх). Ходить изначально можно ВЕЗДЕ — стены только исключения. Инструмент «Стена»: протяните прямоугольник по полю. В игре стены не рисуются.</p>
                     <p className={`text-[10px] leading-tight border-2 px-2 py-1.5 ${isJourneyLike(map.mode) ? 'text-teal border-teal/40' : 'text-magma border-magma/40'}`}>
                       {isJourneyLike(map.mode)
-                        ? `Режим ${map.mode === 'journey1p' ? 'JOURNEY' : 'TRIATHLON'} — стены активны: фишки не смогут их пересечь.`
-                        : 'Стены работают ТОЛЬКО в TRIATHLON и JOURNEY: с любым другим режимом карту не завершить — смените режим или удалите все стены.'}
+                        ? `Режим ${MAP_MODES.find((x) => x.id === (map.mode ?? 'classic'))?.name ?? ''} — стены активны: фишки не смогут их пересечь.`
+                        : 'Стены работают ТОЛЬКО в JOURNEY, JOURNEY SOLO и RUBG: с любым другим режимом карту не завершить — смените режим (кнопки вверху) или удалите все стены.'}
                     </p>
                     {(map.walls ?? []).length > 0 && (
                       <>

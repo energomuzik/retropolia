@@ -165,7 +165,7 @@ export default function GameScreen() {
   const active = s ? s.players[s.turn % s.players.length] : null;
   const myTurn = !!active && active.id === me;
   const ch = s?.challenge ?? null;
-  const isJourney = isJourneyLike(map?.mode); // TRIATHLON и одиночный JOURNEY — одна механика свободного хождения
+  const isJourney = isJourneyLike(map?.mode); // JOURNEY, JOURNEY SOLO и RUBG — одна механика свободного хождения
   const isSoloJourney = map?.mode === 'journey1p';
   const isSkill = map?.mode === 'skill';
   /* БЕЗ КАРТЫ: только СТАРЫЕ карты-челленджи v0.36.0 (возможность создавать убрана).
@@ -1006,7 +1006,7 @@ export default function GameScreen() {
           const pz = Math.max(0.55, Math.min(1.5, Math.min(w, h) / (CELL * 10)));
           goal = { x: plx, y: ply, zoom: pz };
         } else {
-          /* TRIATHLON: в свободном режиме каждый следит за СВОЕЙ фишкой (ходят одновременно);
+          /* JOURNEY: в свободном режиме каждый следит за СВОЕЙ фишкой (ходят одновременно);
              пока идёт задание — камера у всех на игроке задания (трансляция, как всегда) */
           const followId = journeyMode && journeyFree ? me : act?.id;
           const followP = followId ? dispRef.current[followId] : undefined;
@@ -1683,8 +1683,8 @@ export default function GameScreen() {
             МАТЧ {Math.min(s.mapless.done + 1, s.mapless.total)}/{s.mapless.total}
           </span>
         )}
-        {map?.mode === 'journey' && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal">TRIATHLON</span>}
-        {isSoloJourney && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-sky">JOURNEY · ОДИН</span>}
+        {map?.mode === 'journey' && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal">JOURNEY</span>}
+        {isSoloJourney && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-sky">JOURNEY SOLO</span>}
         {(() => {
           /* плиточный режим: номер карты-локации, за которой сейчас камера
              (в свободном хождении — своя фишка, иначе — игрок текущего хода/задания) */
@@ -3182,16 +3182,13 @@ export default function GameScreen() {
           {mySteal === undefined && (
             <div className="fixed bottom-3 right-3 z-30 w-64 pixel-panel pixel-corners p-2.5 space-y-1.5 max-h-[62vh] overflow-y-auto">
               <div className="tick-label">🧰 ПОЯС · HP {Math.round(mePlayer.hp ?? 100)}% · слотов {RUBG_BELT_SLOTS}</div>
-              {/* ЯЩИК РЯДОМ: только ВЗЛОМ ОТМЫЧКОЙ (мини-игра «замок»); «открыть силой» —
-                  ТОЛЬКО в окне взлома после поломки отмычки, просто так его больше нет */}
-              {nearBox && (
-                <div className="border-2 border-[#ffcf3f]/70 bg-[#ffcf3f]/10 px-2 py-1.5 space-y-1">
+              {/* ЯЩИК РЯДОМ: подсказка ТОЛЬКО когда отмычки на поясе нет (некому показать кнопку).
+                  Когда отмычка на поясе — чип СКРЫТ: у самой отмычки есть своя кнопка
+                  «ОТКРЫТЬ ЯЩИК №N» — единственная, без дублей (раньше кнопка была в двух местах). */}
+              {nearBox && !beltLockpick && (
+                <div className="border-2 border-[#ffcf3f]/70 bg-[#ffcf3f]/10 px-2 py-1.5">
                   <div className="font-display text-[11px] text-[#ffcf3f]">📦 РЯДОМ ЯЩИК №{nearBox.idx + 1}</div>
-                  <button
-                    onClick={() => openHack(nearBox.idx)}
-                    disabled={!beltLockpick}
-                    className={`w-full py-1.5 border-2 font-pixel text-[8px] select-none touch-none ${beltLockpick ? 'border-teal text-teal cursor-pointer hover:bg-teal/10' : 'border-edge text-faint cursor-not-allowed'}`}
-                  >{beltLockpick ? '🔓 ОТКРЫТЬ ЯЩИК ОТМЫЧКОЙ' : 'нужна отмычка 🔑 на поясе'}</button>
+                  <p className="text-[9px] text-faint leading-tight mt-0.5">нужна отмычка 🔑 на поясе — надень её из ИНВЕНТАРЯ, кнопка взлома появится на самой отмычке</p>
                 </div>
               )}
               {(() => {

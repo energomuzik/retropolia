@@ -8,6 +8,7 @@ import { exportGame, importGame, idbAll, idbDel, idbGet, idbPut, uid } from '../
 import { downloadHostBat } from '../host/hostPackage';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import type { BossAnimDef, CustomChallenge, GameMap, MapMode, SessionSnapshot, TokenDef } from '../types';
+import { mapModeModified } from '../types';
 import { bossLibEntryOf, challengeSummaryLines, coinsStr, isSoloMode, PLAYER_COLORS, PLAYER_NAMES } from '../types';
 import { sfx } from '../sound';
 
@@ -75,8 +76,8 @@ export function CreateScreen() {
   const modeChip: Record<MapMode, { label: string; cls: string }> = {
     classic: { label: 'RETROPOLIA', cls: 'border-edge text-faint' },
     skill: { label: 'SKILL CHALLENGE', cls: 'border-magma/60 text-magma' },
-    journey: { label: 'TRIATHLON', cls: 'border-teal/60 text-teal' },
-    journey1p: { label: 'JOURNEY', cls: 'border-sky/60 text-sky' },
+    journey: { label: 'JOURNEY', cls: 'border-teal/60 text-teal' },
+    journey1p: { label: 'JOURNEY SOLO', cls: 'border-sky/60 text-sky' },
     rubg: { label: 'RUBG', cls: 'border-[#ff8b3f]/70 text-[#ff8b3f]' },
   };
 
@@ -202,8 +203,8 @@ export function CreateScreen() {
               {chip(fMode === 'all', 'Все', () => setFMode('all'))}
               {chip(fMode === 'classic', 'Retropolia', () => setFMode('classic'))}
               {chip(fMode === 'skill', 'Skill Challenge', () => setFMode('skill'), 'magma')}
-              {chip(fMode === 'journey', 'Triathlon', () => setFMode('journey'), 'teal')}
-              {chip(fMode === 'journey1p', 'Journey', () => setFMode('journey1p'), 'sky')}
+              {chip(fMode === 'journey', 'Journey', () => setFMode('journey'), 'teal')}
+              {chip(fMode === 'journey1p', 'Journey Solo', () => setFMode('journey1p'), 'sky')}
               {chip(fMode === 'rubg', 'RUBG', () => setFMode('rubg'), 'magma')}
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
@@ -822,8 +823,9 @@ export function LobbyScreen() {
               <span className="text-gold">{Ic.map(16)}</span>
               <span className="font-display uppercase tracking-wider text-paper text-sm">{sessionMap.name}</span>
               {sessionMap.mode === 'skill' && <span className="font-pixel text-[7px] px-1.5 py-0.5 border-2 border-magma/60 text-magma shrink-0">SKILL CHALLENGE</span>}
-              {sessionMap.mode === 'journey' && <span className="font-pixel text-[7px] px-1.5 py-0.5 border-2 border-teal/60 text-teal shrink-0">TRIATHLON</span>}
-              {sessionMap.mode === 'journey1p' && <span className="font-pixel text-[7px] px-1.5 py-0.5 border-2 border-sky/60 text-sky shrink-0">JOURNEY</span>}
+              {sessionMap.mode === 'journey' && <span className="font-pixel text-[7px] px-1.5 py-0.5 border-2 border-teal/60 text-teal shrink-0">JOURNEY</span>}
+              {sessionMap.mode === 'journey1p' && <span className="font-pixel text-[7px] px-1.5 py-0.5 border-2 border-sky/60 text-sky shrink-0">JOURNEY SOLO</span>}
+              {mapModeModified(sessionMap) && <span className="font-pixel text-[7px] px-1.5 py-0.5 border-2 border-magma/60 text-magma shrink-0" title="Параметры карты отличаются от классического пресета режима">ИЗМЕНЕННЫЙ</span>}
               {(sessionMap.mode === 'skill' || sessionMap.mode === 'journey1p') && <span className="tick-label text-magma ml-auto">играет только хост · остальные — зрители</span>}
               {sessionMap.mode !== 'skill' && sessionMap.mode !== 'journey1p' && <span className="tick-label text-faint ml-auto">карту раздаёт хост — у всех игроков она одинаковая</span>}
             </div>

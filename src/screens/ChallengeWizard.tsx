@@ -9,7 +9,7 @@ import { sfx } from '../sound';
 /* ---------- МАСТЕР «СОЗДАТЬ ЧЕЛЛЕНДЖ» ----------
    Серия окон-вопросов: как играем (режим), какая карта, какие ячейки,
    РЕСУРСЫ + ШТРАФЫ И НАГРАДЫ (один шаг), скорость.
-   РЕСУРС ТОЛЬКО ОДИН: время ИЛИ попытки ИЛИ монеты — комбинации не сочетаются.
+   РЕСУРС ТОЛЬКО ОДИН: время ИЛИ попытки ИЛИ монеты ИЛИ полоска HP — комбинации не сочетаются.
    Из ответов складываются ПРАВИЛА челленджа — готовый набор появляется
    в редакторе карт («Мои челленджи», пометка «СВОЙ РЕЖИМ»).
    Вопрос «на чём играют» убран (игроки играют и на ПК, и на телефоне);
@@ -44,6 +44,7 @@ export default function ChallengeWizard() {
     resTime: true,
     resTries: false,
     resCoins: false,
+    resHp: false,
     startMin: 60,
     startTries: 60,
     startCoins: 100, // 1 серебряная монета
@@ -70,12 +71,13 @@ export default function ChallengeWizard() {
   };
 
   /* РЕСУРС ТОЛЬКО ОДИН: выбор ресурса выключает остальные */
-  const pickRes = (kind: 'time' | 'tries' | 'coins') => {
+  const pickRes = (kind: 'time' | 'tries' | 'coins' | 'hp') => {
     sfx.hover();
     upd({
       resTime: kind === 'time',
       resTries: kind === 'tries',
       resCoins: kind === 'coins',
+      resHp: kind === 'hp',
       coinsOnly: kind === 'coins', // монеты — единственный ресурс: платёж по итогам, перезапуски бесплатны
     });
   };
@@ -96,6 +98,7 @@ export default function ChallengeWizard() {
       startMin: clampMin(a.startMin),
       startTries: clampMin(a.startTries),
       resCoins: coinsOn,
+      resHp: a.resHp === true,
       startCoins: coinsOn ? clampCoin(a.startCoins) : 0,
       coinsOnly: coinsOn, // монеты всегда единственный ресурс
       taskWinCoins: coinsOn ? clampCoin(a.taskWinCoins) : 0,
@@ -136,7 +139,7 @@ export default function ChallengeWizard() {
       await idbPut('challenges', ch.id, ch);
       await refresh();
       sfx.success();
-      toast(`Челлендж «${ch.name}» создан — выберите его в редакторе карт, панель «Режим игры» → «Мои челленджи»`, 'ok');
+      toast(`Челлендж «${ch.name}» создан — выберите его в редакторе карт, левая панель «Мои челленджи»`, 'ok');
       setScreen('menu');
     } catch {
       toast('Не удалось сохранить челлендж', 'err');
@@ -160,12 +163,21 @@ export default function ChallengeWizard() {
   /* ---------- ОБЪЕДИНЁННЫЙ ШАГ: ресурсы + штрафы и награды ---------- */
   const resourcesStep = () => (
     <div className="space-y-3">
-      <p className="text-[10px] text-faint leading-tight">Ресурс ТОЛЬКО ОДИН — выберите, чем играют: минутами, попытками или монетами (полоска HP — это режим RUBG, он выбирается на карте).</p>
+      <p className="text-[10px] text-faint leading-tight">Ресурс ТОЛЬКО ОДИН — выберите, чем играют: минутами, попытками, монетами или ПОЛОСКОЙ HP.</p>
       <div className="flex gap-1.5">
         <button onClick={() => pickRes('time')} className={`flex-1 py-2 border-2 cursor-pointer font-display text-[10px] uppercase ${a.resTime ? 'border-sky text-sky bg-sky/10' : 'border-edge text-faint'}`}>⏱ Время</button>
         <button onClick={() => pickRes('tries')} className={`flex-1 py-2 border-2 cursor-pointer font-display text-[10px] uppercase ${a.resTries ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint'}`}>🎯 Попытки</button>
         <button onClick={() => pickRes('coins')} className={`flex-1 py-2 border-2 cursor-pointer font-display text-[10px] uppercase ${a.resCoins ? 'border-teal text-teal bg-teal/10' : 'border-edge text-faint'}`}>🪙 Монеты</button>
+        <button onClick={() => pickRes('hp')} title="Полоска HP: +10% за победу, −5% за поражение/пропуск, на нуле — вылет" className={`flex-1 py-2 border-2 cursor-pointer font-display text-[10px] uppercase ${a.resHp ? 'border-coral text-coral bg-coral/10' : 'border-edge text-faint'}`}>❤ HP</button>
       </div>
+
+      {a.resHp && (
+        <div className="space-y-2 border-2 border-coral/50 px-3 py-3">
+          <div className="tick-label text-coral">❤ Полоска HP — единственный ресурс</div>
+          <p className="text-[11px] text-dim leading-tight">У каждого игрока полоска HP: победа в задании +10%, поражение или пропуск −5%, перезапуски бесплатны. На нуле полоски — вылет. Побеждает тот, чья полоска не опустеет.</p>
+          <p className="text-[9px] text-faint leading-tight">Штрафы/награды в минутах и попытках при HP-ресурсе не действуют — HP и есть ресурс.</p>
+        </div>
+      )}
 
       {a.resTime && (
         <div className="space-y-2">
@@ -235,7 +247,7 @@ export default function ChallengeWizard() {
         </div>
         <p className="text-[12px] text-dim mb-4">
           Ответь на вопросы — из ответов соберутся правила твоего режима. Челлендж появится
-          в редакторе карт: панель «Режим игры» → «Мои челленджи» (пометка «СВОЙ РЕЖИМ»).
+          в редакторе карт: левая панель «Мои челленджи» (пометка «СВОЙ РЕЖИМ»).
         </p>
 
         {/* прогресс */}
@@ -263,8 +275,8 @@ export default function ChallengeWizard() {
           {stepKey === 'Как играем?' && (
             <div className="space-y-2">
               {opt(a.players === 'turns', 'По карте, играют по очереди (RETROPOLIA)', () => upd({ players: 'turns' }), 'Кубики, ход по маршруту — классика')}
-              {opt(a.players === 'together', 'По карте, все играют одновременно (TRIATHLON)', () => upd({ players: 'together' }), 'Каждый ведёт свою фишку, кто первый пересёк ячейку задания — тот играет')}
-              {opt(a.players === 'solo', 'По карте, играет один — остальные зрители (JOURNEY)', () => upd({ players: 'solo' }), 'Одиночное приключение: подключившиеся видят трансляцию')}
+              {opt(a.players === 'together', 'По карте, все играют одновременно (JOURNEY)', () => upd({ players: 'together' }), 'Каждый ведёт свою фишку, кто первый пересёк ячейку задания — тот играет')}
+              {opt(a.players === 'solo', 'По карте, играет один — остальные зрители (JOURNEY SOLO)', () => upd({ players: 'solo' }), 'Одиночное приключение: подключившиеся видят трансляцию')}
               <p className="text-[10px] text-faint leading-tight">Играют и на ПК, и на телефоне — вопрос «на чём играют» больше не нужен. Режим RUBG выбирается в редакторе карт.</p>
             </div>
           )}

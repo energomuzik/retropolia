@@ -3,6 +3,9 @@ import { useApp } from './store';
 import { DEFAULT_GPAD, DEFAULT_SEGA_GPAD, NES_TO_RETRO, SEGA_TO_RETRO } from './input';
 
 const CDN_DATA = 'https://cdn.emulatorjs.org/stable/data/';
+/* Максимум АВТОПЕРЕЗАПУСКОВ ядра при сбое загрузки (см. автоповтор ниже).
+   После исчерпания остаётся ручная кнопка «Попробовать снова». */
+const AUTO_RETRY_MAX = 3;
 
 export interface SegaApi {
   snapshot: () => Promise<string | null>; // base64-состояние ядра (живое, без перезапуска)
@@ -69,6 +72,9 @@ export default function SegaBox({
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   // номер текущей попытки загрузки ядра (виден в оверлее «ЗАГРУЗКА ЯДРА SEGA…»)
   const [loadAttempt, setLoadAttempt] = useState(0);
+  // АВТОПОВТОР: сколько раз ядро перезапускалось из-за сбоя загрузки (сбой CDN/сети/зависание).
+  // Готовность сбрасывает счётчик; после AUTO_RETRY_MAX остаётся кнопка «Попробовать снова».
+  const [autoRetry, setAutoRetry] = useState(0);
   const pausedRef = useRef(paused ?? false);
   pausedRef.current = paused ?? false;
   const pendingRef = useRef<Record<string, (s: string | null) => void>>({});
@@ -240,10 +246,11 @@ export default function SegaBox({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Каждый (пере)запуск: статус loading + сторожевой таймер.
-  // Если iframe за 20 секунд не прислал даже «hello» — встроенный скрипт бит (или
-  // ядро не грузится вовсе) → показываем ошибку. Если «hello» было, но ядро ещё не
-  // готово — просто медленный CDN, оставляем «загрузка».
+  // Каждый (пере)запуск: статус loading + сторожевые таймеры.
+  // 1) 20 с: если iframe за 20 секунд не прислал даже «hello» — встроенный скрипт бит (или
+  //    ядро не грузится вовсе) → ошибка (и дальше автоповтор).
+  // 2) 90 с: «hello» пришло, но ядро так и не поднялось (медленный/зависший CDN, оборванная
+  //    загрузка .wasm) → тоже ошибка: лучше перезапустить с другим зеркалом, чем висеть вечно.
   useEffect(() => {
     setStatus('loading');
     setLoadAttempt(0);
@@ -252,8 +259,30 @@ export default function SegaBox({
     const t = setTimeout(() => {
       if (!readyRef.current && !gotHelloRef.current) setStatus((prev) => (prev === 'ready' ? prev : 'error'));
     }, 20000);
-    return () => clearTimeout(t);
+    const t2 = setTimeout(() => {
+      if (!readyRef.current) setStatus((prev) => (prev === 'ready' ? prev : 'error'));
+    }, 90000);
+    return () => { clearTimeout(t); clearTimeout(t2); };
   }, [bootTick]);
+
+  /* АВТОПОВТОР ЗАГРУЗКИ (v0.43.0): раньше при сбое CDN ядро показывало ошибку «перезапустите ром»
+     и всё — в RUBG из-за этого чаще всего «не подгружался эмулятор» (личный ром у каждого игрока,
+     все стартуют одновременно и нагружают CDN). Теперь ошибка = ДО 3 автоперезапусков iframe:
+     заново грузится loader.js с ДРУГОГО зеркала (зеркала перебирает и внутренний цикл iframe),
+     уже скачанное браузер берёт из кэша. Готовность сбрасывает счётчик. */
+  useEffect(() => {
+    if (status !== 'ready') return;
+    setAutoRetry(0); // ядро поднялось — счётчик автоповторов в ноль
+  }, [status]);
+  useEffect(() => {
+    if (status !== 'error') return;
+    if (autoRetry >= AUTO_RETRY_MAX) return;
+    const t = setTimeout(() => {
+      setAutoRetry((n) => n + 1);
+      setBootTick((t2) => t2 + 1); // пересобрать srcDoc + перемонтировать iframe — полная новая попытка
+    }, 2500);
+    return () => clearTimeout(t);
+  }, [status, autoRetry]);
 
   // внешняя пауза — сообщением в работающее ядро
   useEffect(() => {
@@ -282,8 +311,13 @@ export default function SegaBox({
           <span className="font-pixel text-[9px] text-magma blink-hard">
             ЗАГРУЗКА ЯДРА {coreLabel}{loadAttempt > 1 ? `… ПОПЫТКА ${loadAttempt}` : '…'}
           </span>
+          {autoRetry > 0 && (
+            <span className="font-pixel text-[9px] text-gold">
+              СБОЙ ЗАГРУЗКИ — АВТОПОВТОР {autoRetry}/{AUTO_RETRY_MAX}
+            </span>
+          )}
           <span className="text-[11px] text-dim px-6 text-center max-w-sm">
-            {loadAttempt > 1
+            {loadAttempt > 1 || autoRetry > 0
               ? 'Сеть нестабильна — пробуем другое зеркало. Ядро скачается автоматически.'
               : `Первый запуск ${coreLabel}-рома скачивает ядро с CDN (один раз) — дальше браузер берёт его из кэша.`}
           </span>
@@ -298,9 +332,14 @@ export default function SegaBox({
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-[#05070f] p-6 text-center">
           <span className="font-pixel text-[9px] text-coral">НЕ УДАЛОСЬ ЗАГРУЗИТЬ ЯДРО</span>
           <span className="text-[11px] text-dim leading-relaxed max-w-sm">
-            Для первого запуска нужен интернет — ядро {coreLabel} берётся с CDN emulatorjs.org
-            (один раз, дальше из кэша браузера). Проверьте соединение и перезапустите ром.
+            {autoRetry >= AUTO_RETRY_MAX
+              ? `Автоповторы (${AUTO_RETRY_MAX}) не помогли. Для первого запуска нужен интернет — ядро ${coreLabel} берётся с CDN emulatorjs.org (один раз, дальше из кэша браузера). Проверьте соединение и попробуйте ещё раз.`
+              : `Сбой загрузки ядра ${coreLabel} — сейчас перезапустимся автоматически (попытка ${autoRetry + 1} из ${AUTO_RETRY_MAX}). Ядро берётся с CDN, дальше — из кэша браузера.`}
           </span>
+          <button
+            onClick={() => { setAutoRetry(0); setBootTick((t) => t + 1); }}
+            className="px-4 py-1.5 border-2 border-gold text-gold font-pixel text-[9px] uppercase cursor-pointer hover:bg-gold/10"
+          >↻ Попробовать снова</button>
         </div>
       )}
     </div>
