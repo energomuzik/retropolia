@@ -5,8 +5,8 @@ import PixelPaint, { emptyGrid, gridToDataUrl, imageToGrid } from '../PixelPaint
 import { extractTilesFromImage, scaleTileImg, shiftTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbAll, idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimClip, AnimDef, BossAnimDef, BossLibEntry, GameMap, SoundDef, TokenAnim, TokenDef, TileGroup, TileImg } from '../types';
-import { bossLibEntryOf } from '../types';
+import type { AnimClip, AnimDef, BossAnimDef, BossLibEntry, GameMap, NpcAnimDef, SoundDef, TokenAnim, TokenDef, TileGroup, TileImg } from '../types';
+import { bossLibEntryOf, npcLibEntryOf } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns } from '../delGuard';
 import { sfx } from '../sound';
 import { playOneShot, stopOneShot } from '../loopsnd';
@@ -94,6 +94,19 @@ const emptyBossClips = (): Record<BossClipKey, ClipDraft> => ({
   win: { fps: 6, frames: [] },
   lose: { fps: 6, frames: [] },
   defeated: { fps: 6, frames: [] },
+});
+
+/* NPC режима QUEST: клип IDLE (стоит) + клип «КВЕСТ ВЫПОЛНЕН» (играет, когда все
+   квесты NPC сданы игроку). Диалоги/квесты/радиус задаются на экземпляре в редакторе карт. */
+interface NpcDraft { id?: string; name: string; clips: Record<NpcClipKey, ClipDraft>; createdAt?: number; sndIds?: { idle?: string; done?: string } }
+type NpcClipKey = 'idle' | 'done';
+const NPC_CLIPS: { key: NpcClipKey; label: string; hint: string }[] = [
+  { key: 'idle', label: 'IDLE · СТОИТ', hint: 'обязательный клип — NPC ждёт на карте' },
+  { key: 'done', label: '✅ КВЕСТ ВЫПОЛНЕН', hint: 'необязательный клип: NPC играет его, когда ВСЕ его квесты сданы игроку (у каждого игрока свой прогресс)' },
+];
+const emptyNpcClips = (): Record<NpcClipKey, ClipDraft> => ({
+  idle: { fps: 6, frames: [] },
+  done: { fps: 6, frames: [] },
 });
 
 const DEF_TOKEN_SIZE = 64; // размер фишки на карте по умолчанию = оригинальный размер тайла (клетка)
@@ -194,8 +207,8 @@ function SoundAttach({ sounds, value, onDetach }: { sounds: SoundDef[]; value?: 
 }
 
 export default function TokenEditor() {
-  const { tokens, anims, bossAnims, sounds, animTiles, animGroups, setScreen, refresh, toast } = useApp();
-  const [tab, setTab] = useState<'anims' | 'atokens' | 'tokens' | 'bosses'>('anims');
+  const { tokens, anims, bossAnims, npcAnims, sounds, animTiles, animGroups, setScreen, refresh, toast } = useApp();
+  const [tab, setTab] = useState<'anims' | 'atokens' | 'tokens' | 'bosses' | 'npcs'>('anims');
 
   /* ---------- пиксель-арт редактор ОБЫЧНОЙ фишки: создание И правка существующей.
      srcDataUrl — откуда взята картинка (тайл левой панели / прежняя фишка):
@@ -206,6 +219,9 @@ export default function TokenEditor() {
   const [animDraft, setAnimDraft] = useState<AnimDraft | null>(null); // свободная анимация для карт
   const [tokDraft, setTokDraft] = useState<TokDraft | null>(null); // анимированная фишка
   const [bossDraft, setBossDraft] = useState<BossDraft | null>(null); // босс (idle + победа + поражение + гибель)
+  const [npcDraft, setNpcDraft] = useState<NpcDraft | null>(null); // NPC QUEST (idle + «квест выполнен»)
+  const [activeNpcClip, setActiveNpcClip] = useState<NpcClipKey>('idle'); // клип NPC, куда падают кадры
+  const [npcSndTarget, setNpcSndTarget] = useState<NpcClipKey>('idle');
   const [activeClip, setActiveClip] = useState<ClipKey>('idle'); // клип фишки, куда падают кадры
   const [activeBossClip, setActiveBossClip] = useState<BossClipKey>('idle'); // клип босса, куда падают кадры
   /* куда прилипает ЗВУК по клику в левой панели: у фишки три слота (ход/победа/поражение),
@@ -512,13 +528,23 @@ export default function TokenEditor() {
    Открыт создатель анимации/фишки/босса → клик по звуку прикрепляет его
    к выбранному слоту (у фишки и босса слотов три), повторный клик по тому же —
    отвязывает. Нет открытого создателя → клик просто прослушивает. */
-  const draftSndId = bossDraft
+  const draftSndId = npcDraft
+    ? (npcDraft.sndIds?.[npcSndTarget] ?? null)
+    : bossDraft
     ? (bossDraft.sndIds?.[bossSndTarget] ?? null)
     : tokDraft
       ? (sndTarget === 'snd' ? tokDraft.sndId ?? null : sndTarget === 'win' ? tokDraft.winSndId ?? null : tokDraft.loseSndId ?? null)
       : animDraft?.sndId ?? null;
   const pickSound = (s: SoundDef) => {
-    if (bossDraft) {
+    if (npcDraft) {
+      setNpcDraft((d) => {
+        if (!d) return d;
+        const cur = d.sndIds ?? {};
+        const next = { ...cur, [npcSndTarget]: cur[npcSndTarget] === s.id ? undefined : s.id };
+        return { ...d, sndIds: next };
+      });
+      sfx.hover();
+    } else if (bossDraft) {
       setBossDraft((d) => {
         if (!d) return d;
         const cur = d.sndIds ?? {};
@@ -544,7 +570,7 @@ export default function TokenEditor() {
 
   const soundRow = (s: SoundDef) => {
     const sel = draftSndId === s.id;
-    const draftOpen = !!(animDraft || tokDraft || bossDraft);
+    const draftOpen = !!(animDraft || tokDraft || bossDraft || npcDraft);
     return (
       <div key={s.id} className={`flex items-center gap-1.5 border-2 px-1.5 py-1 transition-colors ${sel ? 'border-gold bg-gold/10' : 'border-edge bg-panel'}`}>
         <button
@@ -587,7 +613,7 @@ export default function TokenEditor() {
   /* ---------- клик по тайлу левой панели = ДОБАВИТЬ КАДР в открытый черновик,
      а на вкладке «Обычные фишки» (без черновика) — открыть тайл в пиксель-редакторе ---------- */
   const onTileClick = (t: TileImg) => {
-    if (!animDraft && !tokDraft && !bossDraft && tab === 'tokens') {
+    if (!animDraft && !tokDraft && !bossDraft && !npcDraft && tab === 'tokens') {
       openTileAsToken(t);
       return;
     }
@@ -595,6 +621,11 @@ export default function TokenEditor() {
       let src = t.dataUrl;
       if (mirrorMode) src = await flipDataUrl(src); // ЗЕРКАЛО по горизонтали
       const url = await shrinkFrame(src);
+      if (npcDraft) {
+        setNpcDraft((d) => (d ? { ...d, clips: { ...d.clips, [activeNpcClip]: { ...d.clips[activeNpcClip], frames: [...d.clips[activeNpcClip].frames, url] } } } : d));
+        sfx.coin();
+        return;
+      }
       if (bossDraft) {
         setBossDraft((d) => (d ? { ...d, clips: { ...d.clips, [activeBossClip]: { ...d.clips[activeBossClip], frames: [...d.clips[activeBossClip].frames, url] } } } : d));
         sfx.coin();
@@ -610,7 +641,7 @@ export default function TokenEditor() {
         sfx.coin();
         return;
       }
-      toast('Сначала откройте «Новая анимация», «Новая анимированная фишка» или «Новый босс» — тайлы станут кадрами', 'info');
+      toast('Сначала откройте «Новая анимация», «Новая анимированная фишка», «Новый босс» или «Новый NPC» — тайлы станут кадрами', 'info');
     };
     void add();
   };
@@ -856,6 +887,74 @@ export default function TokenEditor() {
     toast(`Босс «${b.name}» удалён — также убран из всех карт, где был вшит (Ctrl+Z вернёт)`, 'err');
   };
 
+  /* ---------- NPC режима QUEST: сохранение, синк в карты, удаление ---------- */
+  const saveNpc = async () => {
+    if (!npcDraft) return;
+    if (!npcDraft.clips.idle.frames.length) { toast('Клип IDLE обязателен — добавьте кадры (NPC стоит на карте)', 'err'); sfx.fail(); return; }
+    const sndUrl = (sid?: string) => (sid ? sounds.find((x) => x.id === sid)?.dataUrl : undefined);
+    const clipOf = (k: NpcClipKey) => ({ fps: Math.max(1, Math.min(24, npcDraft.clips[k].fps)), frames: npcDraft.clips[k].frames });
+    const n: NpcAnimDef = {
+      id: npcDraft.id ?? uid('npc'),
+      name: npcDraft.name.trim().toUpperCase() || 'NPC',
+      idle: clipOf('idle'),
+      ...(sndUrl(npcDraft.sndIds?.idle) ? { idleSnd: sndUrl(npcDraft.sndIds?.idle) } : {}),
+      ...(npcDraft.clips.done.frames.length ? { done: clipOf('done') } : {}), // клип «квест выполнен» — необязательный
+      ...(npcDraft.clips.done.frames.length && sndUrl(npcDraft.sndIds?.done) ? { doneSnd: sndUrl(npcDraft.sndIds?.done) } : {}),
+      createdAt: npcDraft.createdAt ?? Date.now(),
+    };
+    await idbPut('npcAnims', n.id, n);
+    const touchedMaps = (await syncNpcToMaps(n)).length; // свежая версия NPC — сразу во все карты, где он вшит
+    await refresh();
+    setNpcDraft(null);
+    sfx.success();
+    toast(`NPC «${n.name}» сохранён${n.done ? ' · с клипом «КВЕСТ ВЫПОЛНЕН»' : ''}${touchedMaps ? ` · обновлён в ${touchedMaps} ${touchedMaps === 1 ? 'карте' : 'картах'}` : ' — вшивайте его в карты в редакторе карт'}`, 'ok');
+  };
+
+  const syncNpcToMaps = async (n: NpcAnimDef): Promise<Array<{ key: string; npcLib: unknown[] }>> => {
+    const all = await idbAll<GameMap>('maps');
+    const snapshots: Array<{ key: string; npcLib: unknown[] }> = [];
+    for (const { key, value: mp } of all) {
+      const cur = mp.npcLib ?? [];
+      if (!cur.some((x) => x.id === n.id)) continue;
+      const next = cur.map((x) => (x.id === n.id ? npcLibEntryOf(n) : x));
+      snapshots.push({ key, npcLib: JSON.parse(JSON.stringify(cur)) });
+      await idbPut('maps', key, { ...mp, npcLib: next, updatedAt: Date.now() });
+    }
+    return snapshots;
+  };
+
+  const purgeNpcFromMaps = async (npcId: string): Promise<Array<{ key: string; npcLib: unknown[]; npcs: unknown[] }>> => {
+    const all = await idbAll<GameMap>('maps');
+    const snapshots: Array<{ key: string; npcLib: unknown[]; npcs: unknown[] }> = [];
+    for (const { key, value: mp } of all) {
+      const lib = (mp.npcLib ?? []).filter((x) => x.id !== npcId);
+      const placed = (mp.npcs ?? []).filter((x) => x.nid !== npcId);
+      if (lib.length !== (mp.npcLib ?? []).length || placed.length !== (mp.npcs ?? []).length) {
+        snapshots.push({ key, npcLib: mp.npcLib ?? [], npcs: mp.npcs ?? [] });
+        await idbPut('maps', key, { ...mp, npcLib: lib, npcs: placed, updatedAt: Date.now() });
+      }
+    }
+    return snapshots;
+  };
+
+  const removeNpc = async (n: NpcAnimDef) => {
+    const snaps = await purgeNpcFromMaps(n.id);
+    await idbDel('npcAnims', n.id);
+    rememberDeleted({
+      label: `NPC «${n.name}»`,
+      restore: async () => {
+        await idbPut('npcAnims', n.id, JSON.parse(JSON.stringify(n)));
+        for (const sn of snaps) {
+          const cur = await idbGet<GameMap>('maps', sn.key);
+          if (cur) await idbPut('maps', cur.id, { ...cur, npcLib: sn.npcLib as GameMap['npcLib'], npcs: sn.npcs as GameMap['npcs'], updatedAt: Date.now() });
+        }
+        await refresh();
+      },
+    });
+    await refresh();
+    toast(`NPC «${n.name}» удалён — также убран из всех карт, где был вшит (Ctrl+Z вернёт)`, 'err');
+  };
+
   const removeTok = async (t: TokenDef) => {
     const snaps = await purgeTokFromMaps(t.id);
     await idbDel('tokens', t.id);
@@ -933,6 +1032,7 @@ export default function TokenEditor() {
           {tab === 'anims' && <PxBtn color="sky" onClick={() => { setAnimDraft({ name: '', fps: 6, frames: [] }); sfx.click(); }}>{Ic.plus(14)} Новая анимация</PxBtn>}
           {tab === 'atokens' && <PxBtn color="sky" onClick={() => { setTokDraft({ name: '', size: DEF_TOKEN_SIZE, clips: emptyClips() }); setActiveClip('idle'); setSndTarget('snd'); sfx.click(); }}>{Ic.plus(14)} Новая анимированная фишка</PxBtn>}
           {tab === 'bosses' && <PxBtn color="sky" onClick={() => { setBossDraft({ name: '', clips: emptyBossClips() }); setActiveBossClip('idle'); setBossSndTarget('idle'); sfx.click(); }}>{Ic.plus(14)} Новый босс</PxBtn>}
+          {tab === 'npcs' && <PxBtn color="sky" onClick={() => { setNpcDraft({ name: '', clips: emptyNpcClips() }); setActiveNpcClip('idle'); setNpcSndTarget('idle'); sfx.click(); }}>{Ic.plus(14)} Новый NPC</PxBtn>}
         </div>
       </div>
 
@@ -974,7 +1074,7 @@ export default function TokenEditor() {
                         key={t.id}
                         title={`${t.name} — клик: добавить кадром (или открыть в пикс-редакторе на вкладке «Обычные фишки»)`}
                         onClick={() => onTileClick(t)}
-                        className={`relative aspect-square border-2 border-gold/40 overflow-hidden cursor-pointer transition-transform hover:scale-105 ${(animDraft || tokDraft || bossDraft) ? 'hover:border-gold' : ''}`}
+                        className={`relative aspect-square border-2 border-gold/40 overflow-hidden cursor-pointer transition-transform hover:scale-105 ${(animDraft || tokDraft || bossDraft || npcDraft) ? 'hover:border-gold' : ''}`}
                       >
                         <img src={t.dataUrl} alt={t.name} className="w-full h-full object-cover" style={{ imageRendering: 'pixelated' }} />
                         <HoldDeleteButton as="span" onFire={() => void delTile(t.id)} label={t.name} ariaLabel="удалить тайл" title="Удалить тайл" className="absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center opacity-0 hover:opacity-100 cursor-pointer">×</HoldDeleteButton>
@@ -1013,7 +1113,7 @@ export default function TokenEditor() {
                           key={t.id}
                           title={`${t.name} — клик: добавить кадром`}
                           onClick={() => onTileClick(t)}
-                          className={`relative aspect-square border-2 overflow-hidden cursor-pointer transition-transform hover:scale-105 ${(animDraft || tokDraft || bossDraft) ? 'border-edge hover:border-gold' : 'border-edge'}`}
+                          className={`relative aspect-square border-2 overflow-hidden cursor-pointer transition-transform hover:scale-105 ${(animDraft || tokDraft || bossDraft || npcDraft) ? 'border-edge hover:border-gold' : 'border-edge'}`}
                         >
                           <img src={t.dataUrl} alt={t.name} className="w-full h-full object-cover" style={{ imageRendering: 'pixelated' }} />
                           <HoldDeleteButton as="span" onFire={() => void delTile(t.id)} label={t.name} ariaLabel="удалить тайл" title="Удалить тайл" className="absolute top-0 right-0 w-4 h-4 bg-coral text-abyss font-pixel text-[8px] flex items-center justify-center opacity-0 hover:opacity-100 cursor-pointer">×</HoldDeleteButton>
@@ -1037,8 +1137,8 @@ export default function TokenEditor() {
               <div className="tick-label">🔊 Звуки · {sounds.length}</div>
               <button onClick={() => sndFilesRef.current?.click()} className="text-[10px] text-sky hover:text-paper cursor-pointer">+ файлы</button>
             </div>
-            {(animDraft || tokDraft || bossDraft) && (
-              <p className="text-[10px] text-gold leading-tight mb-2 border-2 border-gold/40 px-1.5 py-1">Создатель открыт: КЛИКНИТЕ звук — он прикрепится к выбранному слоту {(bossDraft ? 'босса' : tokDraft ? 'фишки' : 'анимации')}. Повторный клик по тому же — отвяжет.</p>
+            {(animDraft || tokDraft || bossDraft || npcDraft) && (
+              <p className="text-[10px] text-gold leading-tight mb-2 border-2 border-gold/40 px-1.5 py-1">Создатель открыт: КЛИКНИТЕ звук — он прикрепится к выбранному слоту {(npcDraft ? 'NPC' : bossDraft ? 'босса' : tokDraft ? 'фишки' : 'анимации')}. Повторный клик по тому же — отвяжет.</p>
             )}
             <GhostBtn small className="w-full mb-2" onClick={() => sndFolderRef.current?.click()}>{Ic.upload(12)} Папка со звуками</GhostBtn>
             {soundFolders.map((f) => {
@@ -1189,6 +1289,78 @@ export default function TokenEditor() {
                 </div>
               </div>
             </div>
+          ) : npcDraft ? (
+            /* ---------- создатель NPC: idle + «квест выполнен» ---------- */
+            <div className="max-w-3xl mx-auto p-4 space-y-4">
+              <div className="flex items-center gap-2">
+                <GhostBtn onClick={() => setNpcDraft(null)}>← К списку</GhostBtn>
+                <span className="font-display uppercase text-paper text-sm">NPC · персонаж с диалогами (QUEST)</span>
+              </div>
+              <div className="pixel-panel pixel-corners p-4 space-y-3">
+                <div className="flex items-end gap-3 flex-wrap">
+                  <div className="flex-1 min-w-[180px]">
+                    <Field label="Название">
+                      <input className="field-in w-full px-3 py-2 text-sm" maxLength={20} value={npcDraft.name} onChange={(e) => setNpcDraft({ ...npcDraft, name: e.target.value.toUpperCase() })} placeholder="СТАРИК" />
+                    </Field>
+                  </div>
+                  <div>
+                    <span className="tick-label block mb-1.5">Превью idle</span>
+                    <div className="w-16 h-16 border-2 border-edge flex items-center justify-center" style={checker}>
+                      <AnimPreview frames={npcDraft.clips.idle.frames} fps={npcDraft.clips.idle.fps} size={56} />
+                    </div>
+                  </div>
+                </div>
+                <p className="text-[11px] text-teal leading-tight">NPC вшивается в карту и размещается инструментом «NPC» в редакторе карт. В радиусе NPC игрок слышит звук и может открыть ДИАЛОГ: дерево реплик с вариантами ответа, награды, флаги и выбор концовки задаются в редакторе карт. Квесты NPC (победить босса / N заданий / собрать ресурсы) выдают награду и могут СНИМАТЬ СТЕНЫ. Когда все квесты NPC сданы — NPC играет клип «✅ КВЕСТ ВЫПОЛНЕН» (прогресс у каждого игрока свой).</p>
+                {NPC_CLIPS.map((cm) => {
+                  const c = npcDraft.clips[cm.key];
+                  const on = activeNpcClip === cm.key;
+                  return (
+                    <div key={cm.key} className={`border-2 p-2.5 space-y-2 ${on ? 'border-gold bg-[rgba(255,207,63,0.06)]' : 'border-edge'}`}>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          onClick={() => { setActiveNpcClip(cm.key); sfx.hover(); }}
+                          title={on ? 'Кадры пойдут в этот клип' : 'Выбрать: кадры пойдут сюда'}
+                          className={`px-2 py-1 font-display text-[9px] uppercase border-2 cursor-pointer ${on ? 'border-gold text-gold' : 'border-edge text-dim hover:text-paper'}`}
+                        >{on ? '● СЮДА' : '○ СЮДА'}</button>
+                        <span className="font-display text-[11px] uppercase text-paper">{cm.label}</span>
+                        <span className="tick-label text-faint">{cm.hint} · {c.frames.length} кадр.</span>
+                        <div className="ml-auto flex items-center gap-2">
+                          <span className="tick-label text-faint">скорость</span>
+                          <Stepper value={c.fps} onChange={(v) => setNpcDraft({ ...npcDraft, clips: { ...npcDraft.clips, [cm.key]: { ...c, fps: v } } })} min={1} max={24} suffix=" кадр/с" />
+                          <div className="w-10 h-10 border-2 border-edge flex items-center justify-center" style={checker}>
+                            <AnimPreview frames={c.frames} fps={c.fps} size={34} />
+                          </div>
+                        </div>
+                      </div>
+                      <FrameStrip clip={c} onFrames={(frames) => setNpcDraft({ ...npcDraft, clips: { ...npcDraft.clips, [cm.key]: { ...c, frames } } })} size={44} />
+                    </div>
+                  );
+                })}
+                <div className="pt-1 border-t-2 border-edge space-y-2">
+                  <div className="tick-label">🔊 Звуки NPC — прикрепляются кликом по ЛЕВОЙ панели</div>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="tick-label text-faint shrink-0">Куда прикреплять клик:</span>
+                    {([
+                      { k: 'idle', label: 'СТОИТ (фон)' },
+                      { k: 'done', label: '✅ КВЕСТ ВЫПОЛНЕН' },
+                    ] as const).map((o) => (
+                      <button
+                        key={o.k}
+                        onClick={() => { setNpcSndTarget(o.k); sfx.hover(); }}
+                        className={`px-2 py-1 font-display text-[9px] uppercase border-2 cursor-pointer ${npcSndTarget === o.k ? 'border-gold text-gold bg-gold/10' : 'border-edge text-dim hover:text-paper'}`}
+                      >{npcSndTarget === o.k ? '● ' : ''}{o.label}</button>
+                    ))}
+                  </div>
+                  <SoundAttach sounds={sounds} value={npcDraft.sndIds?.idle} onDetach={() => setNpcDraft((d) => (d ? { ...d, sndIds: { ...d.sndIds, idle: undefined } } : d))} />
+                  <SoundAttach sounds={sounds} value={npcDraft.sndIds?.done} onDetach={() => setNpcDraft((d) => (d ? { ...d, sndIds: { ...d.sndIds, done: undefined } } : d))} />
+                  <p className="text-[10px] text-faint leading-tight">«СТОИТ» — фоновый звук NPC в радиусе (радиус задаётся на экземпляре в редакторе карт). «✅» — звучит, когда игрок сдал последний квест NPC. Все звуки вшиваются КОПИЕЙ.</p>
+                </div>
+                <div className="flex justify-end gap-2">
+                  <GhostBtn onClick={() => { stopOneShot(); setNpcDraft(null); }}>Отмена</GhostBtn>
+                  <PxBtn color="sky" onClick={() => void saveNpc()}>{Ic.check(14)} Сохранить NPC</PxBtn>
+                </div>
+              </div>
+            </div>
           ) : bossDraft ? (
             /* ---------- создатель босса: idle + победа игрока + поражение игрока ---------- */
             <div className="max-w-3xl mx-auto p-4 space-y-4">
@@ -1273,6 +1445,7 @@ export default function TokenEditor() {
                   { k: 'anims', label: `Анимации для карт · ${anims.length}` },
                   { k: 'atokens', label: `Анимированные фишки · ${animToks.length}` },
                   { k: 'bosses', label: `👹 Боссы · ${bossAnims.length}` },
+                  { k: 'npcs', label: `🧑 NPC · ${npcAnims.length}` },
                   { k: 'tokens', label: `Обычные фишки · ${staticToks.length}` },
                 ] as const).map((t) => (
                   <button
@@ -1368,6 +1541,40 @@ export default function TokenEditor() {
                     {bossAnims.length === 0 && (
                       <div className="pixel-corners border-[3px] border-dashed border-edge p-6 text-center text-dim text-sm col-span-full">
                         Боссов пока нет. Нажмите «Новый босс»: соберите IDLE и реакции победы/поражения из тайлов левой панели, прикрепите звуки.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {tab === 'npcs' && (
+                <div>
+                  <p className="text-[12px] text-dim mb-3 max-w-2xl">
+                    NPC — интерактивный персонаж режима QUEST. Соберите клип IDLE (NPC стоит на карте) и, по желанию, клип «✅ КВЕСТ ВЫПОЛНЕН» — NPC играет его, когда ВСЕ его квесты сданы игроком (прогресс у каждого свой). Диалоговое дерево, квесты с наградами, снятие стен и радиус звука задаются на экземпляре NPC в редакторе карт (инструмент «NPC»).
+                  </p>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+                    {npcAnims.map((n) => (
+                      <div key={n.id} className="pixel-panel pixel-corners p-3 text-center">
+                        <div className="mx-auto w-20 h-20 flex items-center justify-center border-2 border-edge" style={checker}>
+                          <AnimPreview frames={n.idle.frames} fps={n.idle.fps} size={72} />
+                        </div>
+                        <div className="font-display text-[11px] uppercase text-paper truncate mt-2">{n.idleSnd ? '🔊 ' : ''}{n.name}</div>
+                        <div className="tick-label text-faint">{n.done ? `✅ ${n.done.frames.length} к.` : 'без клипа «выполнен»'} · {n.idle.frames.length} кадр. idle</div>
+                        <div className="flex justify-center gap-2 mt-2">
+                          <GhostBtn small onClick={() => {
+                            const findSnd = (url?: string) => sounds.find((x) => x.dataUrl === url)?.id;
+                            setNpcDraft({ id: n.id, name: n.name, createdAt: n.createdAt, clips: { idle: JSON.parse(JSON.stringify(n.idle)), done: JSON.parse(JSON.stringify(n.done ?? { fps: 6, frames: [] })) }, sndIds: { idle: findSnd(n.idleSnd), done: findSnd(n.doneSnd) } });
+                            setActiveNpcClip('idle');
+                            setNpcSndTarget('idle');
+                            sfx.hover();
+                          }} className="!px-2">Изменить</GhostBtn>
+                          <HoldDeleteButton onFire={() => void removeNpc(n)} label={n.name} ariaLabel="Удалить NPC">{Ic.trash(15)}</HoldDeleteButton>
+                        </div>
+                      </div>
+                    ))}
+                    {npcAnims.length === 0 && (
+                      <div className="pixel-corners border-[3px] border-dashed border-edge p-6 text-center text-dim text-sm col-span-full">
+                        NPC пока нет. Нажмите «Новый NPC»: соберите IDLE и клип «КВЕСТ ВЫПОЛНЕН» из тайлов левой панели, прикрепите звуки.
                       </div>
                     )}
                   </div>

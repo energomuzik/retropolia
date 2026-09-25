@@ -1,5 +1,5 @@
-import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, PlayerState, RubgItemKind, RubgZonePhasePlan, TaskDef, TradeOffer, TokenDir } from './types';
-import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, tileAt, tileRectOf, coinsStr, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, RUBG_ZONE_DEFAULT_SEC, rubgFmtZone, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx } from './types';
+import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, NpcReward, PlayerState, QuestGoal, RubgItemKind, RubgZonePhasePlan, TaskDef, TradeOffer, TokenDir } from './types';
+import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, isQuestMode, questGoalText, tileAt, tileRectOf, coinsStr, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, RUBG_ZONE_DEFAULT_SEC, rubgFmtZone, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx } from './types';
 import type { RubgItem } from './types';
 import type { JoyId } from './types';
 import { CELL, cellAtPoint, cellCenter, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
@@ -74,6 +74,11 @@ export type Action =
   | { t: 'rubgStopThief'; id: string } // RUBG: жертва нажала «Остановить вора» (кулаул 15 с)
   | { t: 'rubgStealth'; id: string } // RUBG: активировать стелс (сгорает карта стелса)
   | { t: 'rubgBelt'; id: string; itemId: string; on: boolean } // RUBG: надеть/снять предмет с ПОЯСА (на поясе макс. 3 — только они имеют кнопки действий; пояс не воруется)
+  | { t: 'qJobDone'; id: string; cellIdx: number; win: boolean } // QUEST: игрок закрыл ЛИЧНОЕ задание (доверие): победа — награда и прогресс, поражение — плата и счётчик провалов
+  | { t: 'qJobLeave'; id: string; cellIdx: number } // QUEST: игрок ушёл из личного задания без последствий
+  | { t: 'qCardAck'; id: string } // QUEST: игрок подтвердил выпавшую карточку бонуса/ловушки
+  | { t: 'dialogPick'; id: string; npcId: string; nodeId: string; optIdx: number } // QUEST: выбор игрока в диалоге NPC (награда/флаг/переход/концовка)
+  | { t: 'npcClaim'; id: string; npcId: string; questId: string } // QUEST: сдача квеста NPC — награда + снятие стен
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const rnd6 = () => 1 + Math.floor(Math.random() * 6);
@@ -116,8 +121,9 @@ export function cellRectOf(map: GameMap, idx: number) {
 
 /* НЕВИДИМЫЕ СТЕНЫ (JOURNEY): точка (центр фишки) внутри стены?
    Стены хранятся углом (x,y — левый верх) + размер; ходить можно везде, кроме них. */
-function pointInWall(map: GameMap, x: number, y: number): boolean {
+function pointInWall(map: GameMap, x: number, y: number, removed?: string[]): boolean {
   for (const w of map.walls ?? []) {
+    if (w.id && removed?.includes(w.id)) continue; // стена СНЯТА выполнением квеста NPC
     if (x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h) return true;
   }
   return false;
@@ -208,6 +214,14 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     base.fxs = Array.isArray(base.fxs) ? base.fxs : [];
     base.broken = base.broken ?? {};
     base.bossDown = base.bossDown ?? {};
+    base.qJobs = base.qJobs ?? {};
+    base.qDone = base.qDone ?? {};
+    base.qBossDown = base.qBossDown ?? {};
+    base.qFlags = base.qFlags ?? {};
+    base.qFails = base.qFails ?? {};
+    base.qCards = base.qCards ?? {};
+    base.wallsRemoved = Array.isArray(base.wallsRemoved) ? base.wallsRemoved : [];
+    base.ending = base.ending ?? null;
     for (const pl of base.players) normPlayer(pl);
     base.log = [`♻️ Партия восстановлена из сохранения (игроков: ${base.players.length})`, ...(Array.isArray(base.log) ? base.log : [])].slice(0, 50);
     return base;
@@ -232,6 +246,14 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   if (!Array.isArray(s.fxs)) s.fxs = [];
   if (!s.broken) s.broken = {};
   if (!s.bossDown) s.bossDown = {};
+  if (!s.qJobs) s.qJobs = {};
+  if (!s.qDone) s.qDone = {};
+  if (!s.qBossDown) s.qBossDown = {};
+  if (!s.qFlags) s.qFlags = {};
+  if (!s.qFails) s.qFails = {};
+  if (!s.qCards) s.qCards = {};
+  if (!Array.isArray(s.wallsRemoved)) s.wallsRemoved = [];
+  if (s.ending === undefined) s.ending = null;
   if (s.rubg !== undefined) {
     // старые сессии RUBG без части полей
     s.rubg.jobs = s.rubg.jobs ?? {};
@@ -286,22 +308,32 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     const coinsFatal = map.coinsOnly === true && map.startCoins !== undefined;
     const isRubg = map.mode === 'rubg';
     const hpRes = isRubg || map.resMode === 'hp'; // ресурс «полоска HP» — вылет по нулю HP (RUBG и карты с выбором «HP»)
+    const resM = map.resMode ?? 'std';
+    const failsLimit = map.questDefeatFails && map.questDefeatFails > 0 ? Math.floor(map.questDefeatFails) : 0; // QUEST: поражение при N провалах
     for (const p of s.players) {
       const out = hpRes
         ? (p.hp ?? RUBG_HP_MAX) <= 0 // HP-ресурс: единственный ресурс — полоска HP
+        : resM === 'time' ? p.secLeft <= 0 // ОДИН ресурс «время» (мастер челленджа) — попытки не считаются
+        : resM === 'tries' ? p.triesLeft <= 0 // ОДИН ресурс «попытки»
         : coinsFatal ? (p.coinsLeft ?? 0) <= 0 : (p.secLeft <= 0 && p.triesLeft <= 0 && (!coinsFatal || (p.coinsLeft ?? 0) <= 0));
-      if (p.alive && !p.spect && out) {
+      const failedOut = !out && failsLimit > 0 && isQuestMode(map.mode) && (s.qFails?.[p.id] ?? 0) >= failsLimit;
+      if (p.alive && !p.spect && (out || failedOut)) {
         p.alive = false;
         if (s.challenge && current().id === p.id) s.challenge = null;
         if (s.pendingCard && s.pendingCard.player === p.id) s.pendingCard = null;
         if (s.rubg?.jobs) delete s.rubg.jobs[p.id]; // личное задание мёртвого закрывается
+        if (s.qJobs) delete s.qJobs[p.id]; // QUEST: личное задание мёртвого закрывается
+        if (s.qCards) delete s.qCards[p.id];
         s.awaitPost = false;
         s.moving = null;
-        log(hpRes ? `💀 ${p.name} ВЫБЫВАЕТ — полоска HP на нуле!` : `💀 ${p.name} выбывает — ${coinsFatal ? 'монеты исчерпаны' : 'ресурсы исчерпаны'}`);
+        log(failedOut
+          ? `💀 ${p.name} выбывает — провалов заданий ${s.qFails?.[p.id] ?? 0} из допускаемых ${failsLimit}`
+          : hpRes ? `💀 ${p.name} ВЫБЫВАЕТ — полоска HP на нуле!` : `💀 ${p.name} выбывает — ${coinsFatal ? 'монеты исчерпаны' : 'ресурсы исчерпаны'}`);
         if (map.mode === 'skill' && p.isHost) log(`❌ SKILL CHALLENGE ПРОВАЛЕН: ресурсы исчерпаны до ${SKILL_TURNS} ходов`);
         if (map.mapless && p.isHost) log(`❌ ЧЕЛЛЕНДЖ ПРОВАЛЕН: ресурсы исчерпаны на матче ${(s.mapless?.done ?? 0) + 1} из ${s.mapless?.total ?? '?'}`);
       }
     }
+    questWinCheck();
     const al = alive();
     /* В ОДИНОЧНЫХ режимах (JOURNEY-на-одного, SKILL CHALLENGE) один живой игрок —
        НОРМА: партия не заканчивается после каждого задания. Финал одинокой партии:
@@ -315,6 +347,77 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       return;
     }
     if (!current().alive && s.phase === 'playing') nextTurn();
+  };
+
+  /* ---------- QUEST / QUEST SOLO: цели, концовки, награды ----------
+     questGoalsDone — выполнена ли ЦЕЛЬ (квеста NPC или концовки) У КОНКРЕТНОГО игрока;
+     soloTasksWin — RETROPOLIA SOLO / JOURNEY SOLO: победа = пройти ВСЕ задания карты;
+     questWinCheck — вызывается после каждого изменения прогресса/ресурсов. */
+  const questGoalsDone = (p: PlayerState, g: QuestGoal): boolean => {
+    switch (g.kind) {
+      case 'boss': return !!g.bossId && (s.qBossDown?.[p.id] ?? []).includes(g.bossId);
+      case 'tasks': return (s.qDone?.[p.id] ?? []).length >= Math.max(1, Math.floor(g.count ?? 1));
+      case 'coins': return (p.coinsLeft ?? 0) >= Math.max(1, Math.floor(g.count ?? 1));
+      case 'hp': return (p.hp ?? RUBG_HP_MAX) >= Math.max(1, Math.floor(g.count ?? 1));
+      case 'time': return p.secLeft >= Math.max(60, Math.floor(g.count ?? 60));
+      case 'tries': return p.triesLeft >= Math.max(1, Math.floor(g.count ?? 1));
+      default: return false;
+    }
+  };
+  const soloTasksWin = (p: PlayerState): boolean => {
+    if (map.mode !== 'classic1p' && map.mode !== 'journey1p') return false;
+    if (s.mapless) return false; // безкартовый челлендж завершается своим счётчиком матчей
+    const idxs: number[] = [];
+    map.cells.forEach((c, i) => { if (c.type === 'task') idxs.push(i); });
+    if (!idxs.length) return false;
+    return idxs.every((i) => (s.qDone?.[p.id] ?? []).includes(i) || s.captured[i] === p.id);
+  };
+  const questWinCheck = () => {
+    if (s.phase !== 'playing') return;
+    if (isQuestMode(map.mode)) {
+      const ends = map.endings ?? [];
+      if (ends.length) {
+        for (const p of alive()) {
+          /* выбранная в диалоге концовка проверяется ПЕРВОЙ, остальные — по порядку карты */
+          const chosen = Object.keys(s.qFlags?.[p.id] ?? {}).filter((f) => f.startsWith('ending:')).map((f) => f.slice(7));
+          const order = chosen.length ? ends.filter((e) => chosen.includes(e.id)).concat(ends.filter((e) => !chosen.includes(e.id))) : ends;
+          for (const e of order) {
+            if (!e.goal || e.goal.kind === 'none') continue;
+            if (questGoalsDone(p, e.goal)) {
+              s.phase = 'over';
+              s.winner = p.id;
+              s.ending = { playerId: p.id, endingId: e.id };
+              log(`🎬 КОНЦОВКА «${e.name}»! ${p.name} выполнил финальное условие — ПОБЕДА!`);
+              return;
+            }
+          }
+        }
+      }
+    }
+    if ((map.mode === 'classic1p' || map.mode === 'journey1p') && !s.mapless) {
+      for (const p of alive()) {
+        if (soloTasksWin(p)) {
+          s.phase = 'over';
+          s.winner = p.id;
+          log(`🏆 ${p.name} прошёл ВСЕ задания карты — ПОБЕДА!`);
+          return;
+        }
+      }
+    }
+  };
+  /* «/N» для логов провалов (QUEST: доп. условие поражения создателя карты) */
+  const failsLimitText = (m: GameMap): string => (m.questDefeatFails && m.questDefeatFails > 0 ? `/${Math.floor(m.questDefeatFails)}` : '');
+  /* Награда (квест NPC / выбор в диалоге): только включённые на карте ресурсы */
+  const giveReward = (p: PlayerState, r: NpcReward, what: string): string => {
+    const parts: string[] = [];
+    const coins = Math.max(0, Math.floor(r.coins ?? 0));
+    const min = Math.max(0, Math.floor(r.min ?? 0));
+    const tries = Math.max(0, Math.floor(r.tries ?? 0));
+    if (coins > 0 && map.startCoins !== undefined) { p.coinsLeft = Math.min(COINS_MAX, (p.coinsLeft ?? 0) + coins); parts.push(`+${coins} бронзы`); }
+    if (min > 0) { p.secLeft += min * 60; parts.push(`+${min} мин`); }
+    if (tries > 0) { p.triesLeft += tries; parts.push(`+${tries} поп.`); }
+    if (parts.length) log(`🎁 ${p.name}: ${what} — ${parts.join(' ')}`);
+    return parts.join(' ');
   };
 
   /* RUBG: масштаб времени ЗОНЫ из настройки карты (минуты и секунды в редакторе).
@@ -478,11 +581,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         delete s.broken![idx];
       }
     }
-    /* JOURNEY (новый): очередь ходов ОТСУТСТВУЕТ — после задания все фишки снова
-       ходят одновременно. turn остаётся на игроке только что сыгранного задания
-       (его камера, боссы, окно), передавать ход никому не нужно.
-       RUBG: очередь ходов тоже отсутствует (все ходят всегда) — передавать нечего. */
-    if (map.mode === 'journey' || map.mode === 'rubg') return;
+    /* JOURNEY/QUEST/RUBG: очереди ходов нет — после задания фишки снова ходят одновременно */
+    if (isJourneyLike(map.mode)) return;
     nextTurn();
     /* SKILL CHALLENGE: хост выдержал лимит ходов с ресурсами — челлендж пройден */
     if (map.mode === 'skill' && s.phase === 'playing' && (s.turnNo ?? 1) > SKILL_TURNS) {
@@ -518,7 +618,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         };
         log(`✔ ${winner.name}: верный ответ! +${wc} бронзы — капитал ${coinsStr(w?.coinsLeft ?? 0)}`);
       } else {
-        const kind = Math.random() < 0.5 ? 'time' : 'tries';
+        const kind = map.resMode === 'time' ? 'time' : map.resMode === 'tries' ? 'tries' : Math.random() < 0.5 ? 'time' : 'tries';
         if (w) {
           if (kind === 'time') w.secLeft += 300;
           else w.triesLeft += 5;
@@ -873,6 +973,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       /* РЕСУРС «ПОЛОСКА HP»: выбора нет — задание сразу готово (плата по итогам: +10% победа / −5% поражение) */
       s.challenge.mode = 'hp';
       s.challenge.status = 'ready';
+    } else if (map.resMode === 'time' || map.resMode === 'tries') {
+      /* ОДИН РЕСУРС (мастер челленджа): выбора нет — задание сразу готово */
+      s.challenge.mode = map.resMode;
+      s.challenge.status = 'ready';
     }
     const owner = s.captured[p.pos] ? s.players.find((x) => x.id === s.captured[p.pos]) : null;
     log(`🎯 ${p.name}: задание на ячейке ${posName(p.pos)}${owner ? ` (хозяин ${owner.name})` : ''}`);
@@ -889,8 +993,14 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     return c ? (c.nonumber || c.n === 0 ? 'на круге' : `№${c.n}`) : `№${idx + 1}`;
   };
 
-  const applyCard = (p: PlayerState, card: CardDef) => {
+  const applyCard = (p: PlayerState, card: CardDef, questSafe = false) => {
     const e = card.effect;
+    /* QUEST: игра индивидуальная — эффекты переноски/очерёдности не имеют смысла
+       (они остановили бы всех). Ресурсные и складные эффекты работают как обычно. */
+    if (questSafe && ['move', 'teleport', 'wrongway', 'jail', 'extraTurn', 'skipTurn', 'playerExtra', 'playerSkip', 'diePlus'].includes(e.type)) {
+      log(`🎴 «${card.name}»: эффект не действует — в QUEST играют индивидуально`);
+      return;
+    }
     const N = map.cells.length;
     const norm = (v: number) => ((v % N) + N) % N;
     const stepsTo = (from: number, to: number, dir: 1 | -1) => {
@@ -1160,14 +1270,19 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       /* БЕЗ КАРТЫ (старые челленджи без карты): жеребьёвка не нужна —
          сразу панель готовности хоста (без кубиков). SKILL CHALLENGE — на карте, с жеребьёвкой. */
       if (map.mapless) s.rollOffWinner = s.players.find((p) => p.isHost)?.id ?? null;
+      const taskTotal = map.cells.filter((c) => c.type === 'task').length;
       log(map.mode === 'rubg'
         ? `🪂 RUBG! ${s.players.length} бойцов на борту. Самолёт летит — ПРЫГАЙТЕ, где хотите! Ресурс — полоска HP, у каждого ОТМЫЧКА 🔑 для ящиков. Побеждает последний живой!`
-        : soloMode && map.mode === 'skill'
+        : isQuestMode(map.mode)
+          ? `🗺 QUEST! ${isSoloMode(map.mode) ? 'Играет хост — зрители смотрят трансляцию. ' : 'Каждый играет ИНДИВИДУАНО, трансляции нет. '}Задания — на доверии: вошёл в ячейку, играй и жми «Победа/Поражение». Побеждает ПЕРВЫЙ, кто выполнит КОНЦОВКУ${(map.endings ?? []).length ? ` (концовок: ${(map.endings ?? []).length})` : ''}!`
+          : map.mode === 'classic1p'
+            ? `🎲 RETROPOLIA SOLO! Играет только хост (${sm} мин / ${st} поп.) — победа: пройти ВСЕ задания карты (заданий: ${taskTotal}).`
+            : soloMode && map.mode === 'skill'
           ? `🧨 SKILL CHALLENGE! Играет только хост — ${SKILL_TURNS} заданий на карте. Остальные — зрители.`
           : map.mapless
             ? `🎲 ЧЕЛЛЕНДЖ БЕЗ КАРТЫ! Матчей: ${mlTotal}${map.mapless.random ? ' (рандомайзер)' : ''} — играет только хост (${sm} мин / ${st} поп.${map.startCoins !== undefined ? `, монет: ${sc0}` : ''}).`
-            : soloMode
-              ? `🧭 JOURNEY! Играет только хост (${sm} мин / ${st} поп.) — все остальные подключаются зрителями.`
+            : soloMode && map.mode === 'journey1p'
+              ? `🧭 JOURNEY SOLO! Играет только хост (${sm} мин / ${st} поп.) — остальные зрители. Победа: пройти ВСЕ задания карты (заданий: ${taskTotal}).`
               : isJourneyLike(map.mode)
                 ? `🧭 JOURNEY! У каждого: ${sm} мин и ${st} поп. Все фишки стартуют ОДНОВРЕМЕННО — кто первый пересечёт ячейку задания, тот и играет.`
                 : `Игра начинается! У каждого: ${sm} мин и ${st} поп. Бросок за первый ход…`);
@@ -1332,7 +1447,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       }
       /* НЕВИДИМЫЕ СТЕНЫ: фишка не может зайти в стену (клиент скользит по стене сам —
          сюда точка внутри стены попадает только при рассинхроне) */
-      if (pointInWall(map, x, y)) break;
+      if (pointInWall(map, x, y, s.wallsRemoved)) break;
       /* защита от телепортаций: одно обновление не дальше 2.5 клеток от прошлой позиции.
          СТОП-обновление (mv=false) принимаем всегда — игрок реально стоит в этой точке,
          иначе при сетевом заторе цепочка отклонённых апдейтов «застревала» надолго. */
@@ -1367,6 +1482,41 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         }
         break;
       }
+      /* QUEST / QUEST SOLO: КАЖДЫЙ играет ИНДИВИДУАНО — вход в ячейку задания открывает
+         ЛИЧНОЕ задание (на доверие), НЕ останавливая других и БЕЗ трансляции. Одну и ту
+         же ячейку каждый победивает сам. Бонусы/ловушки выдают карточку вошедшему.
+         Квизовых ячеек в QUEST нет (запрещены редактором). */
+      if (isQuestMode(map.mode)) {
+        for (let i = 0; i < map.cells.length; i++) {
+          const c = map.cells[i];
+          const r = cellRectOf(map, i);
+          if (!r) continue;
+          const inNew = x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+          if (!inNew) continue;
+          const inOld = !!prev && prev.x >= r.x && prev.x < r.x + r.w && prev.y >= r.y && prev.y < r.y + r.h;
+          if (inOld) continue; // уже стоял в ней — вход был раньше
+          p.pos = i;
+          if (!s.revealed.includes(i)) s.revealed.push(i);
+          if (c.type === 'task') {
+            if ((s.qDone?.[p.id] ?? []).includes(i)) continue; // это задание игрок УЖЕ победил
+            if (s.qJobs?.[p.id]) continue; // уже играешь личное задание
+            const tk = cellTaskOf(s, map, i);
+            if (!tk) continue; // задания нет — передышка
+            s.qJobs = s.qJobs ?? {};
+            s.qJobs[p.id] = { cellIdx: i, startedAt: Date.now() };
+            log(`🎯 ${p.name} взял задание «${tk.title.slice(0, 30)}» — ЛИЧНО, остальные не ждут`);
+          } else if (c.type === 'bonus' || c.type === 'trap') {
+            const deck = c.type === 'bonus' ? map.bonusCards : map.trapCards;
+            if (!deck.length) continue;
+            const card = deck[Math.floor(Math.random() * deck.length)];
+            applyCard(p, card, true);
+            s.qCards = s.qCards ?? {};
+            s.qCards[p.id] = card;
+            log(`${c.type === 'bonus' ? '🌟 БОНУС' : '☠ ЛОВУШКА'} для ${p.name}: «${card.name}»`);
+          }
+        }
+        break;
+      }
       /* пересёк ячейку задания? вход = прошлый центр был ВНЕ прямоугольника, новый — ВНУТРИ.
         КТО ПЕРВЫЙ пересёк — у того и задание: turn = этот игрок (все фишки замирают,
         остальные смотрят трансляцию — «всё как всегда»); после задания все снова ходят. */
@@ -1396,6 +1546,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
             s.challenge.status = 'ready';
           } else if (map.resMode === 'hp') {
             s.challenge.mode = 'hp'; // ресурс «полоска HP» — плата по итогам
+            s.challenge.status = 'ready';
+          } else if (map.resMode === 'time' || map.resMode === 'tries') {
+            s.challenge.mode = map.resMode; // ОДИН ресурс — выбора нет
             s.challenge.status = 'ready';
           }
           const owner = s.captured[i] ? s.players.find((pl) => pl.id === s.captured[i]) : null;
@@ -1652,6 +1805,138 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (!p || !job || job.cellIdx !== a.cellIdx) break;
       delete rg.jobs[p.id];
       log(`🚶 ${p.name} отошёл от задания №${a.cellIdx + 1} — можно зайти снова`);
+      break;
+    }
+    /* ---------- QUEST / QUEST SOLO: задания на доверии, карточки, диалоги и квесты NPC ---------- */
+    case 'qJobDone': {
+      if (s.phase !== 'playing' || !isQuestMode(map.mode)) break;
+      const p = actor();
+      if (!p || !p.alive || p.spect) break;
+      const job = s.qJobs?.[p.id];
+      if (!job || job.cellIdx !== a.cellIdx) break;
+      delete s.qJobs![p.id];
+      /* ресурс партии: время списывается по факту (минуты за задание); монеты/HP — платёж по итогам; попытка — 1 за вход */
+      const resM = map.resMode ?? ((map.coinsOnly && map.startCoins !== undefined) ? 'coins' : 'std');
+      if (resM === 'time' || resM === 'std') {
+        const mins = Math.max(0, Math.ceil((Date.now() - job.startedAt) / 60000));
+        const spend = Math.min(mins, Math.floor(p.secLeft / 60)) * 60;
+        if (spend > 0) p.secLeft -= spend;
+        if (resM === 'std') p.triesLeft = Math.max(0, p.triesLeft - 1); // вход в задание = 1 попытка
+      } else if (resM === 'tries') {
+        p.triesLeft = Math.max(0, p.triesLeft - 1);
+      }
+      if (a.win) {
+        s.qDone = s.qDone ?? {};
+        const done = s.qDone[p.id] ?? [];
+        if (!done.includes(a.cellIdx)) done.push(a.cellIdx);
+        s.qDone[p.id] = done;
+        s.captured[a.cellIdx] = p.id; // визуальная отметка ячейки (прогресс у каждого свой)
+        if (resM === 'coins') {
+          const wc = Math.max(0, Math.floor(map.taskWinCoins ?? 0));
+          if (wc > 0) { p.coinsLeft = Math.min(COINS_MAX, (p.coinsLeft ?? 0) + wc); log(`🪙 Награда: +${wc} бронзы — капитал ${coinsStr(p.coinsLeft)}`); }
+        }
+        if (resM === 'hp') { p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? RUBG_HP_MAX) + RUBG_WIN_HP); log(`❤️ +${RUBG_WIN_HP}% HP — полоска ${Math.round(p.hp)}%`); }
+        if (map.winMin) { p.secLeft += map.winMin * 60; }
+        if (map.winTries) { p.triesLeft += map.winTries; }
+        /* Боссы на этой ячейке ПОБЕЖДЕНЫ ЭТИМ ИГРОКОМ (у каждого свой прогресс — босс жив, пока не пал от его руки) */
+        for (const b of map.bosses ?? []) {
+          const bi = cellAtPoint(map, b.x, b.y);
+          if (bi !== a.cellIdx) continue;
+          s.qBossDown = s.qBossDown ?? {};
+          const lst = s.qBossDown[p.id] ?? [];
+          if (!lst.includes(b.id)) lst.push(b.id);
+          s.qBossDown[p.id] = lst;
+          const bdef = (map.bossLib ?? []).find((x) => x.id === b.bid);
+          const dms = bdef ? clipMs(bdef.defeated) : 0;
+          if (bdef && dms) pushFx({ kind: 'bossDef', player: p.id, cellIdx: a.cellIdx, bossId: b.id, ms: dms, after: 'none' });
+          if (bdef) log(`👹 Босс «${bdef.name}» ПОБЕЖДЕН игроком ${p.name}!`);
+        }
+        const tkw = cellTaskOf(s, map, a.cellIdx);
+        log(`🏆 ${p.name} ПРОШЁЛ задание «${(tkw?.title ?? `№${a.cellIdx + 1}`).slice(0, 30)}» — всего выполнено: ${done.length}`);
+      } else {
+        s.qFails = s.qFails ?? {};
+        s.qFails[p.id] = (s.qFails[p.id] ?? 0) + 1;
+        if (resM === 'coins') {
+          const sc = Math.max(0, Math.floor(map.skipCoins ?? SKIP_COINS_DEFAULT));
+          if (sc > 0) { p.coinsLeft = Math.max(0, (p.coinsLeft ?? 0) - sc); log(`🪙 Плата за поражение: −${sc} бронзы — капитал ${coinsStr(p.coinsLeft)}`); }
+        }
+        if (resM === 'hp') { p.hp = Math.max(0, (p.hp ?? RUBG_HP_MAX) - RUBG_LOSE_HP); log(`💔 −${RUBG_LOSE_HP}% HP — полоска ${Math.round(p.hp)}%`); }
+        log(`💢 ${p.name} проиграл задание №${a.cellIdx + 1}${failsLimitText(map) ? ` (провалов: ${s.qFails[p.id]}${failsLimitText(map)})` : ''}`);
+      }
+      checkElim();
+      break;
+    }
+    case 'qJobLeave': {
+      if (!isQuestMode(map.mode)) break;
+      const p = actor();
+      const job = p ? s.qJobs?.[p.id] : undefined;
+      if (!p || !job || job.cellIdx !== a.cellIdx) break;
+      delete s.qJobs![p.id];
+      log(`🚶 ${p.name} отошёл от задания — можно зайти снова`);
+      break;
+    }
+    case 'qCardAck': {
+      const p = actor();
+      if (!p) break;
+      if (s.qCards?.[p.id]) delete s.qCards[p.id];
+      break;
+    }
+    case 'dialogPick': {
+      if (s.phase !== 'playing') break;
+      const p = actor();
+      if (!p || !p.alive || p.spect) break;
+      const npc = (map.npcs ?? []).find((x) => x.id === a.npcId);
+      const node = npc?.dialog?.nodes.find((n) => n.id === a.nodeId);
+      const opt = node?.opts?.[Math.floor(a.optIdx)];
+      if (!npc || !node || !opt) break;
+      const flags = s.qFlags = s.qFlags ?? {};
+      const mine = flags[p.id] = flags[p.id] ?? {};
+      if (opt.reqFlag && !mine[opt.reqFlag]) break; // вариант недоступен без флага
+      if (opt.reqNotFlag && mine[opt.reqNotFlag]) break;
+      if (opt.give) giveReward(p, opt.give, 'награда от NPC');
+      if (opt.setFlag) mine[opt.setFlag] = true;
+      if (opt.ending) {
+        const e = (map.endings ?? []).find((x) => x.id === opt.ending);
+        if (e) {
+          if (!e.goal || e.goal.kind === 'none') {
+            /* концовка БЕЗ условия: выбор в диалоге немедленно завершает игру победой */
+            s.phase = 'over';
+            s.winner = p.id;
+            s.ending = { playerId: p.id, endingId: e.id };
+            log(`🎬 ${p.name} сделал финальный выбор — КОНЦОВКА «${e.name}»!`);
+            break;
+          }
+          mine[`ending:${e.id}`] = true;
+          log(`🎬 ${p.name} выбрал путь концовки «${e.name}»: ${questGoalText(e.goal, map)}`);
+        }
+      }
+      checkElim();
+      break;
+    }
+    case 'npcClaim': {
+      if (s.phase !== 'playing') break;
+      const p = actor();
+      if (!p || !p.alive || p.spect) break;
+      const npc = (map.npcs ?? []).find((x) => x.id === a.npcId);
+      const q = npc?.quests?.find((x) => x.id === a.questId);
+      if (!npc || !q) break;
+      const flags = s.qFlags = s.qFlags ?? {};
+      const mine = flags[p.id] = flags[p.id] ?? {};
+      if (mine[`quest:${q.id}`]) break; // уже сдан
+      if (!questGoalsDone(p, q.goal)) { log(`⏳ Квест «${q.title}» ещё не выполнен: ${questGoalText(q.goal, map)}`); break; }
+      mine[`quest:${q.id}`] = true;
+      giveReward(p, q.reward, `квест «${q.title}» сдан`);
+      /* Снятие стен: выполненный квест убирает назначенные ему стены — путь открыт ВСЕМ */
+      if (q.removeWalls?.length) {
+        const ids = (map.walls ?? []).map((w) => w.id).filter((id): id is string => !!id && q.removeWalls!.includes(id));
+        const before = s.wallsRemoved ?? [];
+        s.wallsRemoved = [...new Set([...before, ...ids])];
+        if (s.wallsRemoved.length > before.length) log(`🧱 Стены ИСЧЕЗЛИ (${s.wallsRemoved.length - before.length} шт.) — путь открыт!`);
+      }
+      const left = (npc.quests ?? []).filter((x) => !mine[`quest:${x.id}`]).length;
+      const npcName = (map.npcLib ?? []).find((x) => x.id === npc.nid)?.name ?? '?';
+      if (!left) log(`🗣 NPC «${npcName}»: все его квесты выполнены ${p.name}!`);
+      checkElim();
       break;
     }
     case 'rubgUseItem': {
@@ -1911,6 +2196,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (a.mode === 'time' && p.secLeft <= 0) break;
       if (a.mode === 'tries' && p.triesLeft <= 0) break;
       if (a.mode === 'coins' && map.startCoins === undefined) break;
+      /* ОДИН РЕСУРС (мастер челленджа): «время» недоступно при ресурсе «попытки» и наоборот */
+      const resM = map.resMode ?? 'std';
+      if (a.mode === 'time' && resM === 'tries') break;
+      if (a.mode === 'tries' && resM === 'time') break;
       ch.mode = a.mode;
       // пакость «Штраф ×2» удваивает цену пропуска
       const need = SKIP_COST * (cellTaskOf(s, map, ch.cellIdx)?.chaos === 'skipX2' ? 2 : 1);
@@ -2192,6 +2481,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       // когда на столе пусто (до броска кубиков)
       if (s.phase !== 'playing') break;
       if (map.mode === 'journey') { log('✖ В JOURNEY карточки не действуют — игроки ходят напрямую'); break; }
+      if (isQuestMode(map.mode)) { log('✖ В QUEST карточки из инвентаря не применяются — игра индивидуальная'); break; }
       if (gatingFx()) break; // идёт анимация победы/поражения — ждём её
       const p = actor();
       if (!p || !p.alive || p.id !== current().id) break;
@@ -2226,6 +2516,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     case 'tradeOffer': {
       if (s.phase !== 'playing') break;
       if (map.mode === 'journey') { log('✖ В JOURNEY торги недоступны'); break; }
+      if (isQuestMode(map.mode)) { log('✖ В QUEST торги недоступны — каждый играет сам за себя'); break; }
       const p = actor();
       if (!p || !p.alive) break;
       // торгуются те, кто сейчас не в процессе хода; текущий игрок — только ДО броска
@@ -2387,7 +2678,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
             answerer.coinsLeft = Math.max(0, (answerer.coinsLeft ?? 0) - lc);
             log(`✖ ${answerer.name}: неверно (−${lc} бронзы) — капитал ${coinsStr(answerer.coinsLeft)}`);
           } else {
-            const kind = Math.random() < 0.5 ? 'time' : 'tries';
+            const kind = map.resMode === 'time' ? 'time' : map.resMode === 'tries' ? 'tries' : Math.random() < 0.5 ? 'time' : 'tries';
             if (kind === 'time') answerer.secLeft = Math.max(0, answerer.secLeft - 300);
             else answerer.triesLeft = Math.max(0, answerer.triesLeft - 5);
             log(`✖ ${answerer.name}: неверно (−5 ${kind === 'time' ? 'мин' : 'попыток'})`);
@@ -2408,7 +2699,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           answerer.coinsLeft = Math.min(COINS_MAX, (answerer.coinsLeft ?? 0) + wc);
           log(`✔ ${answerer.name}: верно! +${wc} бронзы — капитал ${coinsStr(answerer.coinsLeft)}`);
         } else {
-          const kind = Math.random() < 0.5 ? 'time' : 'tries';
+          const kind = map.resMode === 'time' ? 'time' : map.resMode === 'tries' ? 'tries' : Math.random() < 0.5 ? 'time' : 'tries';
           if (kind === 'time') answerer.secLeft += 300;
           else answerer.triesLeft += 5;
           log(`✔ ${answerer.name}: верно! +5 ${kind === 'time' ? 'мин' : 'попыток'} — квиз продолжается`);
@@ -2464,7 +2755,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         q.result = { correct: false, deltaMin: 0, deltaTries: 0, targetName: loser.name, reason: 'timeout' };
         log(`⏰ Время вышло! ${loser.name}: −${lc} бронзы — капитал ${coinsStr(loser.coinsLeft)}`);
       } else {
-        const kind = Math.random() < 0.5 ? 'time' : 'tries';
+        const kind = map.resMode === 'time' ? 'time' : map.resMode === 'tries' ? 'tries' : Math.random() < 0.5 ? 'time' : 'tries';
         if (kind === 'time') { loser.secLeft = Math.max(0, loser.secLeft - 300); deltaMin = -5; }
         else { loser.triesLeft = Math.max(0, loser.triesLeft - 5); deltaTries = -5; }
         q.result = { correct: false, deltaMin, deltaTries, targetName: loser.name, reason: 'timeout' };

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { AnimDef, BossAnimDef, CustomChallenge, GameMap, GameOptions, GameSession, RomDef, SaveDef, SessionSnapshot, SoundDef, TileDef, TileGroup, TileImg, TokenDef } from './types';
+import type { AnimDef, BossAnimDef, CustomChallenge, GameMap, GameOptions, GameSession, NpcAnimDef, RomDef, SaveDef, SessionSnapshot, SoundDef, TileDef, TileGroup, TileImg, TokenDef } from './types';
 import type { NetInfo, Room } from './net';
 import { idbAll, idbGet, idbPut } from './db';
 import { builtinTiles } from './assets';
@@ -26,6 +26,7 @@ interface AppState {
   tokens: TokenDef[];
   anims: AnimDef[]; // свободные анимации автора (для карт)
   bossAnims: BossAnimDef[]; // боссы (idle + реакции на победу/поражение)
+  npcAnims: NpcAnimDef[]; // NPC режима QUEST (idle + клип «квест выполнен»)
   sounds: SoundDef[]; // звуковая библиотека (для анимаций и фишек)
   challenges: CustomChallenge[]; // СВОИ челленджи (мастер «Создать челлендж»)
   animTiles: TileImg[]; // библиотека тайлов редактора анимаций (глобальная)
@@ -98,12 +99,13 @@ export const useApp = create<AppState>()((set, get) => ({
   tokens: [],
   anims: [],
   bossAnims: [],
+  npcAnims: [],
   sounds: [],
   challenges: [],
   animTiles: [],
   animGroups: [],
   refresh: async () => {
-    const [tiles, maps, roms, saves, tokens, anims, bossAnims, sounds, challenges, animTiles, animGroups] = await Promise.all([
+    const [tiles, maps, roms, saves, tokens, anims, bossAnims, npcAnims, sounds, challenges, animTiles, animGroups] = await Promise.all([
       idbAll<TileDef>('tiles'),
       idbAll<GameMap>('maps'),
       idbAll<RomDef>('roms'),
@@ -111,6 +113,7 @@ export const useApp = create<AppState>()((set, get) => ({
       idbAll<TokenDef>('tokens'),
       idbAll<AnimDef>('anims'),
       idbAll<BossAnimDef>('bossAnims'),
+      idbAll<NpcAnimDef>('npcAnims'),
       idbAll<SoundDef>('sounds'),
       idbAll<CustomChallenge>('challenges'),
       idbAll<TileImg>('animTiles'),
@@ -131,6 +134,7 @@ export const useApp = create<AppState>()((set, get) => ({
       tokens: tokens.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
       anims: anims.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
       bossAnims: bossAnims.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
+      npcAnims: npcAnims.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
       sounds: sounds.map((e) => e.value).sort((a, b) => a.createdAt - b.createdAt),
       challenges: challenges.map((e) => e.value).sort((a, b) => b.createdAt - a.createdAt),
       animTiles: animTiles.map((e) => e.value),

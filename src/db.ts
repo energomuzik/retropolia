@@ -5,8 +5,9 @@ import type { GameMap, RomDef, SaveDef } from './types';
 // v4: добавлено 'sounds' (звуковая библиотека для анимаций карт и фишек)
 // v5: добавлено 'bossAnims' (боссы: idle + реакции на победу/поражение со звуками)
 // v6: добавлено 'challenges' (свои челленджи из мастера «Создать челлендж»)
-const DB_VERSION = 6;
-export const STORES = ['tiles', 'maps', 'roms', 'saves', 'blobs', 'sessions', 'tokens', 'anims', 'animTiles', 'animGroups', 'sounds', 'bossAnims', 'challenges'] as const;
+// v7: добавлено 'npcAnims' (NPC режима QUEST: клип IDLE + клип «квест выполнен»)
+const DB_VERSION = 7;
+export const STORES = ['tiles', 'maps', 'roms', 'saves', 'blobs', 'sessions', 'tokens', 'anims', 'animTiles', 'animGroups', 'sounds', 'bossAnims', 'challenges', 'npcAnims'] as const;
 export type StoreName = (typeof STORES)[number];
 
 let dbPromise: Promise<IDBDatabase> | null = null;

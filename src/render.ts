@@ -1,4 +1,4 @@
-import type { AnimClip, CellDef, GameMap, TileDef, TileImg, TokenAnim, TokenDir } from './types';
+import type { AnimClip, CellDef, GameMap, NpcLibEntry, PlacedNpc, TileDef, TileImg, TokenAnim, TokenDir } from './types';
 import { getImage } from './assets';
 
 export const CELL = 64;
@@ -292,6 +292,8 @@ export interface BoardDrawOpts {
   bossDown?: Record<string, boolean>; // повержённые боссы: статичный кадр побеждённого
   /* разовые реакции боссов (fx): клип играется ОДИН раз от start (rAF-мс), дойдя до последнего кадра — замирает */
   bossFx?: Record<string, { frames: string[]; fps: number; start: number }>;
+  /* QUEST: NPC на карте — рисуются с клипом done, если ВСЕ их квесты сданы ЭТИМ игроком (done считает клиент) */
+  npcs?: { npc: PlacedNpc; def: NpcLibEntry; done: boolean }[];
 }
 
 function px(ctx: CanvasRenderingContext2D, x: number, y: number, s: number, pattern: string[], color: string) {
@@ -965,6 +967,55 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     ctx.imageSmoothingEnabled = true;
     if (o.bossDown?.[pb.id] && !fxC) ctx.globalAlpha = 0.85; // побеждённый — чуть приглушён
     ctx.drawImage(img, -pb.w / 2, -pb.h / 2, pb.w, pb.h);
+    ctx.restore();
+  }
+
+  // NPC (QUEST): интерактивные персонажи с диалогами и квестами. Стоят с клипом IDLE;
+  // когда ВСЕ квесты NPC сданы ИМЕННО ЭТИМ игроком — играет клип «квест выполнен»
+  // (done считает КЛИЕНТ по своим флагам — у каждого игрока свой прогресс).
+  // Круг радиуса (звук + диалог) — только в редакторе карт.
+  for (const it of o.npcs ?? []) {
+    const { npc, def, done } = it;
+    if (o.sndRadii && npc.r && npc.r > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(npc.x, npc.y, npc.r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(46,230,168,0.05)';
+      ctx.fill();
+      ctx.setLineDash([9, 7]);
+      ctx.strokeStyle = 'rgba(46,230,168,0.75)';
+      ctx.lineWidth = 2 / Math.max(0.05, view.zoom);
+      ctx.stroke();
+      ctx.restore();
+    }
+    const clip = done && def.done && def.done.frames.length ? def.done : def.idle;
+    if (!clip.frames.length) continue;
+    const idx = clipFrameIdx(clip, o.time);
+    const img = getImage(clip.frames[idx]);
+    if (!img) continue;
+    ctx.save();
+    ctx.translate(npc.x, npc.y);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(img, -npc.w / 2, -npc.h / 2, npc.w, npc.h);
+    // значок диалога над NPC с диалогом (в игре и в редакторе — видно, что с ним можно говорить)
+    if (npc.dialog && npc.dialog.nodes.length) {
+      ctx.save();
+      ctx.translate(0, -npc.h / 2 - 14);
+      ctx.scale(1 / Math.max(0.05, view.zoom), 1 / Math.max(0.05, view.zoom));
+      ctx.fillStyle = done ? '#35d46f' : '#2ee6a8';
+      ctx.beginPath();
+      ctx.roundRect(-11, -10, 22, 16, 4);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-4, 6); ctx.lineTo(0, 12); ctx.lineTo(4, 6);
+      ctx.fill();
+      ctx.fillStyle = '#0b0e1c';
+      ctx.font = 'bold 12px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(done ? '✓' : '…', 0, -2);
+      ctx.restore();
+    }
     ctx.restore();
   }
 

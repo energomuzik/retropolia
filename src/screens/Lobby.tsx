@@ -7,9 +7,9 @@ import { newSession, fmtClock } from '../engine';
 import { exportGame, importGame, idbAll, idbDel, idbGet, idbPut, uid } from '../db';
 import { downloadHostBat } from '../host/hostPackage';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
-import type { BossAnimDef, CustomChallenge, GameMap, MapMode, SessionSnapshot, TokenDef } from '../types';
+import type { BossAnimDef, CustomChallenge, GameMap, MapMode, NpcAnimDef, SessionSnapshot, TokenDef } from '../types';
 import { mapModeModified } from '../types';
-import { bossLibEntryOf, challengeSummaryLines, coinsStr, isSoloMode, PLAYER_COLORS, PLAYER_NAMES } from '../types';
+import { bossLibEntryOf, npcLibEntryOf, challengeSummaryLines, coinsStr, isSoloMode, PLAYER_COLORS, PLAYER_NAMES } from '../types';
 import { sfx } from '../sound';
 
 /* ---------- создание игры ---------- */
@@ -30,13 +30,18 @@ const freshMapWithTokens = async (mapId: string): Promise<GameMap | null> => {
     const bossLib = (await idbAll<BossAnimDef>('bossAnims')).map((e) => e.value);
     const bossById = new Map(bossLib.map((b) => [b.id, b]));
     const blib = fresh.bossLib ?? [];
+    const npcLibAll = (await idbAll<NpcAnimDef>('npcAnims')).map((e) => e.value);
+    const npcById = new Map(npcLibAll.map((n) => [n.id, n]));
+    const nlib = fresh.npcLib ?? [];
     const toksChanged = toks.some((t) => libById.has(t.id));
     const bossChanged = blib.some((b) => bossById.has(b.id));
-    if (!toksChanged && !bossChanged) return fresh;
+    const npcChanged = nlib.some((n) => npcById.has(n.id));
+    if (!toksChanged && !bossChanged && !npcChanged) return fresh;
     return {
       ...fresh,
       mapTokens: toksChanged ? toks.map((t) => (libById.has(t.id) ? (JSON.parse(JSON.stringify(libById.get(t.id))) as TokenDef) : t)) : toks,
       bossLib: bossChanged ? blib.map((b) => (bossById.has(b.id) ? bossLibEntryOf(bossById.get(b.id)!) : b)) : blib,
+      npcLib: npcChanged ? nlib.map((n) => (npcById.has(n.id) ? npcLibEntryOf(npcById.get(n.id)!) : n)) : nlib,
     };
   } catch { return null; }
 };
@@ -79,6 +84,9 @@ export function CreateScreen() {
     journey: { label: 'JOURNEY', cls: 'border-teal/60 text-teal' },
     journey1p: { label: 'JOURNEY SOLO', cls: 'border-sky/60 text-sky' },
     rubg: { label: 'RUBG', cls: 'border-[#ff8b3f]/70 text-[#ff8b3f]' },
+    classic1p: { label: 'RETROPOLIA SOLO', cls: 'border-sky/60 text-sky' },
+    quest: { label: 'QUEST', cls: 'border-teal/60 text-teal' },
+    quest1p: { label: 'QUEST SOLO', cls: 'border-sky/60 text-sky' },
   };
 
   const shown = ready
@@ -95,7 +103,7 @@ export function CreateScreen() {
     .sort((a, b) => {
       if (sortBy === 'name') return a.name.localeCompare(b.name, 'ru');
       if (sortBy === 'mode') {
-        const order: MapMode[] = ['classic', 'skill', 'journey', 'journey1p', 'rubg'];
+        const order: MapMode[] = ['classic', 'classic1p', 'skill', 'journey', 'journey1p', 'quest', 'quest1p', 'rubg'];
         const d = order.indexOf(mapFacts(a).mode) - order.indexOf(mapFacts(b).mode);
         return d !== 0 ? d : a.name.localeCompare(b.name, 'ru');
       }
@@ -205,6 +213,9 @@ export function CreateScreen() {
               {chip(fMode === 'skill', 'Skill Challenge', () => setFMode('skill'), 'magma')}
               {chip(fMode === 'journey', 'Journey', () => setFMode('journey'), 'teal')}
               {chip(fMode === 'journey1p', 'Journey Solo', () => setFMode('journey1p'), 'sky')}
+              {chip(fMode === 'quest', 'Quest', () => setFMode('quest'), 'teal')}
+              {chip(fMode === 'quest1p', 'Quest Solo', () => setFMode('quest1p'), 'sky')}
+              {chip(fMode === 'classic1p', 'Retropolia Solo', () => setFMode('classic1p'), 'sky')}
               {chip(fMode === 'rubg', 'RUBG', () => setFMode('rubg'), 'magma')}
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
@@ -276,6 +287,10 @@ export function CreateScreen() {
               <div className="mt-2.5 pt-2 border-t-2 border-edge flex items-center gap-2 flex-wrap">
                 {(m.resMode === 'hp' || m.mode === 'rubg') ? (
                   <span className="font-display text-[11px] uppercase text-coral">ресурс: полоска HP</span>
+                ) : m.resMode === 'time' ? (
+                  <span className="font-display text-[11px] uppercase text-gold">ресурс: только время ({m.startMin ?? 60} мин)</span>
+                ) : m.resMode === 'tries' ? (
+                  <span className="font-display text-[11px] uppercase text-sky">ресурс: только попытки ({m.startTries ?? 60})</span>
                 ) : m.coinsOnly && m.startCoins !== undefined ? (
                   <span className="font-display text-[11px] uppercase text-teal">ресурс: монеты ({coinsStr(m.startCoins)})</span>
                 ) : (

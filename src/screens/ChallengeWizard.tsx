@@ -99,6 +99,7 @@ export default function ChallengeWizard() {
       startTries: clampMin(a.startTries),
       resCoins: coinsOn,
       resHp: a.resHp === true,
+      resMode: a.resHp ? 'hp' : a.resCoins ? 'coins' : a.resTries ? 'tries' : 'time', // ЕДИНСТВЕННЫЙ ресурс: «время» и «попытки» больше не дают оба сразу
       startCoins: coinsOn ? clampCoin(a.startCoins) : 0,
       coinsOnly: coinsOn, // монеты всегда единственный ресурс
       taskWinCoins: coinsOn ? clampCoin(a.taskWinCoins) : 0,

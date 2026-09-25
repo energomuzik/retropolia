@@ -15,8 +15,8 @@ import {
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
-import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, tileAt, tileRectOf, tileNumOf, coinsShort, coinsStr, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS } from '../types';
-import type { AnimClip, CardDef, ChaosKind, GameMap, GameSession, PortalZone, TaskDef, TokenDir, RubgItem } from '../types';
+import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, isQuestMode, isSoloMode, questGoalText, tileAt, tileRectOf, tileNumOf, coinsShort, coinsStr, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS } from '../types';
+import type { AnimClip, CardDef, ChaosKind, GameMap, GameSession, NpcLibEntry, PlacedNpc, PortalZone, PlayerState, QuestGoal, TaskDef, TokenDir, RubgItem } from '../types';
 import Randomizer from './Randomizer';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
@@ -27,8 +27,22 @@ const DIRV: Record<TokenDir, [number, number]> = { up: [0, -1], down: [0, 1], le
 
 /* НЕВИДИМЫЕ СТЕНЫ (JOURNEY): точка (центр фишки) внутри прямоугольника стены?
    Стены в игре НЕ рисуются — фишка просто не проходит сквозь них, скользя по краю. */
-const inWall = (m: GameMap, x: number, y: number): boolean =>
-  (m.walls ?? []).some((w) => x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h);
+const inWall = (m: GameMap, x: number, y: number, removed?: string[]): boolean =>
+  (m.walls ?? []).some((w) => !(w.id && removed?.includes(w.id)) && x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h);
+
+/* QUEST: выполнена ли цель квеста/концовки У ИГРОКА (клиентская копия движка — для UI) */
+const questGoalDoneFor = (sess: GameSession, p: PlayerState, g: QuestGoal | undefined): boolean => {
+  if (!g || g.kind === 'none') return false;
+  switch (g.kind) {
+    case 'boss': return !!g.bossId && (sess.qBossDown?.[p.id] ?? []).includes(g.bossId);
+    case 'tasks': return (sess.qDone?.[p.id] ?? []).length >= Math.max(1, Math.floor(g.count ?? 1));
+    case 'coins': return (p.coinsLeft ?? 0) >= Math.max(1, Math.floor(g.count ?? 1));
+    case 'hp': return (p.hp ?? RUBG_HP_MAX) >= Math.max(1, Math.floor(g.count ?? 1));
+    case 'time': return p.secLeft >= Math.max(60, Math.floor(g.count ?? 60));
+    case 'tries': return p.triesLeft >= Math.max(1, Math.floor(g.count ?? 1));
+    default: return false;
+  }
+};
 
 export default function GameScreen() {
   const st = useApp();
@@ -178,6 +192,11 @@ export default function GameScreen() {
   const myRubgTask = s && map && myJob !== undefined ? cellTaskOf(s, map, myJob.cellIdx) : null;
   const mySteal = isRubg && rubg ? rubg.steals?.[me] : undefined; // воруется У МЕНЯ из кармана
   const myStealing = isRubg && rubg ? Object.values(rubg.steals ?? {}).find((x) => x.thief === me) : undefined; // я ворую
+  /* ---------- QUEST / QUEST SOLO: индивидуальная игра ---------- */
+  const isQuest = isQuestMode(map?.mode);
+  const isQuestSolo = map?.mode === 'quest1p';
+  const myQJob = isQuest && s ? s.qJobs?.[me] : undefined;
+  const myQTask = s && map && myQJob !== undefined ? cellTaskOf(s, map, myQJob.cellIdx) : null;
   const inStealth = !!mePlayer?.stealth;
   const coinsActive = map?.startCoins !== undefined; // монеты включены на карте
   const coinsOnly = coinsActive && !!map?.coinsOnly; // только монеты — время/попытки не предлагаются
@@ -229,6 +248,8 @@ export default function GameScreen() {
   const taskImg = useBlobImage(task?.imageId);
   const cardImg = useBlobImage(s?.pendingCard?.card.imageId);
   const rTaskImg = useBlobImage(myRubgTask?.imageId); // картинка ЛИЧНОГО задания RUBG
+  const qTaskImg = useBlobImage(myQTask?.imageId); // картинка ЛИЧНОГО задания QUEST
+  const qCardImg = useBlobImage(s?.qCards?.[me]?.imageId); // картинка выпавшей карточки QUEST
 
   /* ---------- загрузка рома и сохранения под челлендж ----------
      Гость сначала смотрит in-memory кэш (полученный по сети от хоста), затем свою
@@ -306,6 +327,40 @@ export default function GameScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [myJob?.cellIdx, romReadyTick]);
 
+  /* ---------- QUEST: загрузка рома ЛИЧНОГО задания (эмулятор у самого игрока) ---------- */
+  const [qRomBuf, setQRomBuf] = useState<ArrayBuffer | null>(null);
+  const [qSaveState, setQSaveState] = useState<unknown>(null);
+  const [qEmuKey, setQEmuKey] = useState(0);
+  const qRomDef = myQTask ? st.roms.find((r) => r.id === myQTask.romId) : undefined;
+  useEffect(() => {
+    let on = true;
+    setQRomBuf(null); setQSaveState(null);
+    if (!myQTask) return;
+    void (async () => {
+      const cache = useApp.getState();
+      let buf: ArrayBuffer | null = cache.romCache[myQTask.romId] ?? null;
+      if (!buf) buf = (await getRomData(myQTask.romId)) ?? null;
+      if (!on) return;
+      if (!buf) {
+        if (!isHost) room?.send('needRom', { romId: myQTask.romId, saveId: myQTask.saveId });
+        return;
+      }
+      const sv = myQTask.saveId
+        ? (cache.saveCache[myQTask.saveId] ?? st.saves.find((x) => x.id === myQTask.saveId)?.state ?? null)
+        : null;
+      if (!on) return;
+      setQRomBuf(buf); setQSaveState(sv); setQEmuKey((k) => k + 1);
+    })();
+    return () => { on = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myQJob?.cellIdx, romReadyTick]);
+
+  /* ---------- QUEST: «СТАРТ ИГРЫ» — эмулятор на паузе до нажатия; локальные паузы ---------- */
+  const [qArmed, setQArmed] = useState(false);
+  useEffect(() => { setQArmed(false); }, [myQJob?.cellIdx]);
+  const [qPaused, setQPaused] = useState(false);
+  useEffect(() => { setQPaused(false); }, [myQJob?.cellIdx, qArmed]);
+
   /* ---------- RUBG: «СТАРТ ИГРЫ» в личном задании — эмулятор на паузе до нажатия,
      чтобы игрок мог подготовиться (прочитать задание, настроить управление).
      Сброс при входе в новую ячейку задания. ---------- */
@@ -374,6 +429,51 @@ export default function GameScreen() {
     });
     return best as { idx: number; d: number } | null;
   }, [isRubg, s, map, me, s?.journeyPos?.[me ?? '']?.x, s?.journeyPos?.[me ?? '']?.y]);
+  /* ---------- QUEST: NPC в радиусе (звук + диалог) — ближайший к моей фишке ---------- */
+  const myJourneyPos = s?.journeyPos?.[me];
+  const nearNpc = useMemo(() => {
+    if (!isQuest || !s || s.phase !== 'playing' || !map || !mePlayer || !mePlayer.alive || mePlayer.spect) return null;
+    if (!myJourneyPos) return null;
+    let best: { npc: PlacedNpc; def: NpcLibEntry } | null = null;
+    let bestD = 0;
+    for (const n of map.npcs ?? []) {
+      const def = (map.npcLib ?? []).find((x) => x.id === n.nid);
+      if (!def || !n.r || n.r <= 0) continue;
+      if (!n.dialog && !(n.quests ?? []).length) continue; // ни диалога, ни квестов — не интерактивен
+      const d = Math.hypot(myJourneyPos.x - n.x, myJourneyPos.y - n.y);
+      if (d > n.r) continue;
+      if (!best || d < bestD) { best = { npc: n, def }; bestD = d; }
+    }
+    return best;
+  }, [isQuest, s, map, mePlayer, myJourneyPos?.x, myJourneyPos?.y]);
+  const [dlgNpcId, setDlgNpcId] = useState<string | null>(null);
+  const [dlgNode, setDlgNode] = useState<string | null>(null);
+  const dlgNpc = nearNpc && dlgNpcId === nearNpc.npc.id ? nearNpc : (dlgNpcId ? (() => {
+    const n = (map?.npcs ?? []).find((x) => x.id === dlgNpcId);
+    const def = n ? (map?.npcLib ?? []).find((x) => x.id === n.nid) : undefined;
+    return n && def ? { npc: n, def } : null;
+  })() : null);
+  const openDialog = (npcId: string) => {
+    const n = (map?.npcs ?? []).find((x) => x.id === npcId);
+    if (!n?.dialog) { useApp.getState().toast('У этого NPC нет диалога', 'info'); return; }
+    setDlgNpcId(npcId);
+    setDlgNode(n.dialog.root);
+    sfx.click();
+  };
+  const closeDialog = () => { setDlgNpcId(null); setDlgNode(null); };
+  /* клавиша E — поговорить с NPC в радиусе; ESC — закрыть диалог */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === 'e' || e.key.toLowerCase() === 'у') {
+        const cur = nearNpc;
+        if (cur && !dlgNpcId) { e.preventDefault(); openDialog(cur.npc.id); }
+      }
+      if (e.key === 'Escape' && dlgNpcId) closeDialog();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [nearNpc, dlgNpcId]);
+
   const beltLockpick = (mePlayer?.items ?? []).find((x) => x.kind === 'lockpick' && x.belt);
   const openHack = (cellIdx: number) => {
     const lp = (useApp.getState().session?.players.find((x) => x.id === me)?.items ?? []).find((x) => x.kind === 'lockpick' && x.belt);
@@ -390,7 +490,9 @@ export default function GameScreen() {
   }, [isRubg, s?.phase, !!myStealing, !!mySteal]);
 
   /* ---------- трансляция (NES — canvas напрямую, SEGA — снимок кадра из iframe) ---------- */
-  const streaming = options.broadcast && myTurn && ch?.status === 'playing';
+  const streaming = options.broadcast && (isQuest
+    ? (isQuestSolo ? isHost && !!myQJob && qArmed && !qPaused : false) // мульти-QUEST: трансляции НЕТ; QUEST SOLO: хост стримит зрителям
+    : myTurn && ch?.status === 'playing');
   const streamMs = Math.round(1000 / Math.min(30, Math.max(2, options.streamFps || 10)));
   useEffect(() => {
     if (!streaming || !room) return;
@@ -447,6 +549,15 @@ export default function GameScreen() {
           const def = blib.get(pb.bid);
           if (!def?.idleSnd || !pb.r || pb.r <= 0) continue;
           if (Math.hypot(d.x - pb.x, d.y - pb.y) <= pb.r) wanted.set('boss-' + pb.id, def.idleSnd);
+        }
+        /* NPC (QUEST): звук ожидания — по СВОЕЙ фишке (все ходят одновременно, у каждого свой радиус) */
+        const myPosN = sess.journeyPos?.[cur.selfId];
+        if (myPosN && !emuRunning) {
+          for (const n of m.npcs ?? []) {
+            const ndef = (m.npcLib ?? []).find((x) => x.id === n.nid);
+            if (!ndef?.idleSnd || !n.r || n.r <= 0) continue;
+            if (Math.hypot(myPosN.x - n.x, myPosN.y - n.y) <= n.r) wanted.set('npc-' + n.id, ndef.idleSnd);
+          }
         }
       }
       syncLoops('amb-', wanted);
@@ -740,7 +851,7 @@ export default function GameScreen() {
                 }
               }
               let vx = 0, vy = 0;
-              const canWalk = sess.phase === 'playing' && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate);
+              const canWalk = sess.phase === 'playing' && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate) && !(sess.qCards && me && sess.qCards[me]);
               if (canWalk) {
                 for (const kd of [...journeyKeys.current, ...journeyPadRef.current]) {
                   if (kd === 'up') vy -= 1; else if (kd === 'down') vy += 1;
@@ -766,8 +877,9 @@ export default function GameScreen() {
                     ny = Math.max(tr.y + 8, Math.min(tr.y + tr.h - 8, ny));
                   }
                 }
-                if (!inWall(m, nx, self.y)) self.x = nx;
-                if (!inWall(m, self.x, ny)) self.y = ny;
+                const removedWalls = sess.wallsRemoved ?? [];
+                if (!inWall(m, nx, self.y, removedWalls)) self.x = nx;
+                if (!inWall(m, self.x, ny, removedWalls)) self.y = ny;
                 self.dir = Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? 'right' : 'left') : (vy > 0 ? 'down' : 'up');
                 self.moving = true;
                 self.dirty = true;
@@ -1089,10 +1201,20 @@ export default function GameScreen() {
           if (!brkNow[Number(k)]) delete brokenAtRef.current[Number(k)];
         }
 
+        const npcDrawList: { npc: PlacedNpc; def: NpcLibEntry; done: boolean }[] = [];
+        for (const n of m.npcs ?? []) {
+          const defN = (m.npcLib ?? []).find((x) => x.id === n.nid);
+          if (defN) {
+            const fl = (me ? sess.qFlags?.[me] : undefined) ?? {};
+            const done = (n.quests ?? []).length > 0 && n.quests!.every((q) => !!fl[`quest:${q.id}`]);
+            npcDrawList.push({ npc: n, def: defN, done });
+          }
+        }
         drawBoard(ctx, m, {
           view: v, width: w, height: h,
           tileById: tileMapRef.current,
           captured: sess.captured, colorById,
+          npcs: npcDrawList,
           currentCell: sess.phase === 'playing' && act && !(journeyMode && journeyFree) ? act.pos : null,
           showNumbers: options.showCellNumbers,
           tokens, time: t, hoverCell: null,
@@ -1685,6 +1807,20 @@ export default function GameScreen() {
         )}
         {map?.mode === 'journey' && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal">JOURNEY</span>}
         {isSoloJourney && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-sky">JOURNEY SOLO</span>}
+        {map?.mode === 'classic1p' && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-sky" title="RETROPOLIA на одного: победа — пройти ВСЕ задания карты">RETROPOLIA SOLO</span>}
+        {map?.mode === 'quest' && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal">QUEST</span>}
+        {isQuestSolo && <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-sky">QUEST SOLO</span>}
+        {isQuest && s?.phase === 'playing' && map && (() => {
+          const total = map.cells.filter((c) => c.type === 'task').length;
+          const done = (s.qDone?.[me] ?? []).length;
+          const ends = map.endings ?? [];
+          return (
+            <span
+              className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-gold"
+              title={`Выполнено заданий: ${done} из ${total}${ends.length ? `. Концовок на карте: ${ends.length} — ${ends.map((e) => e.name).join(', ')}` : ''}`}
+            >🎯 {done}/{total}{ends.length ? ` · 🎬 ${ends.length}` : ''}</span>
+          );
+        })()}
         {(() => {
           /* плиточный режим: номер карты-локации, за которой сейчас камера
              (в свободном хождении — своя фишка, иначе — игрок текущего хода/задания) */
@@ -1730,6 +1866,16 @@ export default function GameScreen() {
                         </span>
                         {Math.round(p.hp ?? 100)}%
                       </span>
+                      <span>№{p.pos + 1}</span>
+                    </>
+                  ) : map?.resMode === 'time' ? (
+                    <>
+                      <span className="text-sky" title="Единственный ресурс — ВРЕМЯ">{fmtClock(p.secLeft)}</span>
+                      <span>№{p.pos + 1}</span>
+                    </>
+                  ) : map?.resMode === 'tries' ? (
+                    <>
+                      <span className="text-gold" title="Единственный ресурс — ПОПЫТКИ">{p.triesLeft} поп.</span>
                       <span>№{p.pos + 1}</span>
                     </>
                   ) : coinsRes ? (
@@ -2322,7 +2468,7 @@ export default function GameScreen() {
                 {isRubg ? (
                   <p className="text-[11px] text-dim mt-2">Фолбэк: сессия без самолёта. Ищите личные задания и ящики, следите за сжимающейся зоной. Побеждает ПОСЛЕДНИЙ ЖИВОЙ!</p>
                 ) : isJourney ? (
-                  <p className="text-[11px] text-dim mt-2">{isSoloJourney ? 'Играет ТОЛЬКО ХОСТ — все подключившиеся смотрят трансляцию. Жеребьёвки нет: фишка хоста идёт свободно от старта.' : 'Жеребьёвки нет — каждый ведёт СВОЮ фишку со старта. Кто ПЕРВЫМ пересечёт ячейку задания — у того оно и откроется, остальные будут смотреть.'}</p>
+                  <p className="text-[11px] text-dim mt-2">{isSoloJourney ? 'Играет ТОЛЬКО ХОСТ — все подключившиеся смотрят трансляцию. Жеребьёвки нет: фишка хоста идёт свободно от старта.' : isQuest ? 'Каждый играет ИНДИВИДУАНО и в СВОЁМ ТЕМПЕ: фишка идёт от общего старта свободно, вошёл в ячейку задания — играй лично (трансляции нет, другие не ждут). Побеждает первый, кто выполнит КОНЦОВКУ.' : 'Жеребьёвки нет — каждый ведёт СВОЮ фишку со старта. Кто ПЕРВЫМ пересечёт ячейку задания — у того оно и откроется, остальные будут смотреть.'}</p>
                 ) : (
                   <div
                     className="font-display uppercase text-3xl mt-2"
@@ -2433,7 +2579,22 @@ export default function GameScreen() {
                       : `Ресурсы исчерпаны раньше, чем сыграны все ${s.mapless?.total ?? SKILL_TURNS} игр.`}
                   </p>
                 </>
-              ) : isMapless ? (
+              ) : s.ending ? (() => {
+                const e = (map.endings ?? []).find((x) => x.id === s.ending!.endingId);
+                const ep = s.players.find((x) => x.id === s.ending!.playerId);
+                return (
+                  <>
+                    <div className={`font-pixel text-sm mt-3 title-glow ${winner ? 'text-teal' : 'text-coral'}`}>
+                      {winner ? `КОНЦОВКА: ${e?.name ?? '?'}` : 'QUEST ПРОВАЛЕН'}
+                    </div>
+                    <div className="font-display uppercase text-2xl text-paper mt-2" style={{ color: ep ? PLAYER_COLORS[ep.color] : undefined }}>
+                      {ep?.name ?? 'РЕСУРСЫ ИСЧЕРПАНЫ'}
+                    </div>
+                    {e?.desc && <p className="text-[12px] text-dim mt-2">{e.desc}</p>}
+                    {!winner && <p className="text-[12px] text-dim mt-2">Ресурсы исчерпаны — квест остался незавершённым.</p>}
+                  </>
+                );
+              })() : isMapless ? (
                 <>
                   <div className={`font-pixel text-sm mt-3 title-glow ${winner ? 'text-teal' : 'text-coral'}`}>
                     {winner ? 'ЧЕЛЛЕНДЖ ПРОЙДЕН!' : 'ЧЕЛЛЕНДЖ ПРОВАЛЕН'}
@@ -2941,8 +3102,215 @@ export default function GameScreen() {
         );
       })()}
 
+      {/* ---------- ДИАЛОГ С NPC (QUEST): дерево реплик, награды, флаги, сдача квестов ---------- */}
+      {dlgNpc && s?.phase === 'playing' && (() => {
+        const dlg = dlgNpc.npc.dialog;
+        const node = dlg ? dlg.nodes.find((n) => n.id === (dlgNode ?? dlg.root)) : null;
+        if (!dlg || !node) return null;
+        const fl = s.qFlags?.[me] ?? {};
+        const opts = (node.opts ?? []).filter((o) => (!o.reqFlag || fl[o.reqFlag]) && (!o.reqNotFlag || !fl[o.reqNotFlag]));
+        const quests = dlgNpc.npc.quests ?? [];
+        return (
+          <div className="fixed inset-0 z-[74] flex items-end sm:items-center justify-center p-3 sm:p-6">
+            <div className="absolute inset-0 bg-[rgba(4,6,14,0.7)]" onClick={closeDialog} />
+            <div className="relative pixel-panel pixel-corners pop-in w-full max-w-xl max-h-[88vh] overflow-y-auto p-4 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-display uppercase text-sm text-teal">💬 {dlgNpc.def.name}</span>
+                <button onClick={closeDialog} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
+              </div>
+
+              {quests.length > 0 && (
+                <div className="space-y-1.5 border-2 border-edge px-2.5 py-2">
+                  <div className="tick-label text-gold">📜 Квесты NPC</div>
+                  {quests.map((q) => {
+                    const claimed = !!fl[`quest:${q.id}`];
+                    const ready = !claimed && questGoalDoneFor(s, mePlayer!, q.goal);
+                    return (
+                      <div key={q.id} className="flex items-center gap-2 justify-between">
+                        <div className="min-w-0">
+                          <div className={`font-display text-[11px] uppercase truncate ${claimed ? 'text-teal' : 'text-paper'}`}>{claimed ? '✅ ' : ready ? '❗ ' : '▫ '}{q.title}</div>
+                          <div className="tick-label text-faint truncate">{claimed ? 'квест сдан — награда получена' : questGoalText(q.goal, map!)}</div>
+                        </div>
+                        {ready && (
+                          <PxBtn small color="gold" onClick={() => { sfx.coin(); dispatch({ t: 'npcClaim', id: me, npcId: dlgNpc.npc.id, questId: q.id }); }}>
+                            Сдать квест
+                          </PxBtn>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div className="border-2 border-teal/40 bg-teal/5 px-3 py-2.5">
+                <div className="text-[13px] text-paper leading-snug">{node.text || '…'}</div>
+              </div>
+
+              <div className="space-y-1.5">
+                {opts.map((o, oi) => (
+                  <button
+                    key={oi}
+                    onClick={() => {
+                      sfx.click();
+                      dispatch({ t: 'dialogPick', id: me, npcId: dlgNpc.npc.id, nodeId: node.id, optIdx: (node.opts ?? []).indexOf(o) });
+                      const fl2 = useApp.getState().session?.qFlags?.[me] ?? {};
+                      const allowed = (!o.reqFlag || fl2[o.reqFlag]) && (!o.reqNotFlag || !fl2[o.reqNotFlag]);
+                      if (!allowed) { closeDialog(); return; }
+                      if (o.next && dlg.nodes.some((n) => n.id === o.next)) setDlgNode(o.next);
+                      else if (o.ending) {
+                        const e = (map?.endings ?? []).find((x) => x.id === o.ending);
+                        if (e && e.goal && e.goal.kind !== 'none') { /* путь выбран — цель ещё предстоит выполнить */ closeDialog(); }
+                        else closeDialog(); // концовка без условия — партия завершится сама
+                      } else closeDialog();
+                    }}
+                    className="w-full text-left px-3 py-2 border-2 border-edge hover:border-teal hover:bg-teal/5 transition-colors cursor-pointer"
+                  >
+                    <span className="text-[12px] text-paper">▸ {o.text || '…'}</span>
+                    {o.give && (o.give.coins || o.give.min || o.give.tries) ? (
+                      <span className="ml-1.5 text-[10px] text-gold">
+                        [награда: {o.give.coins ? `+${o.give.coins} бр ` : ''}{o.give.min ? `+${o.give.min} мин ` : ''}{o.give.tries ? `+${o.give.tries} поп.` : ''}]
+                      </span>
+                    ) : null}
+                  </button>
+                ))}
+                {opts.length === 0 && (
+                  <GhostBtn className="w-full" onClick={closeDialog}>Закрыть</GhostBtn>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ---------- карточка бонуса/ловушки QUEST (индивидуальная) ---------- */}
+      {s?.qCards && me && s.qCards[me] && !peekMap && !dlgNpcId && (
+        <Modal title={s.qCards[me].kind === 'bonus' ? 'Карточка бонуса' : 'Карточка ловушки'} icon={s.qCards[me].kind === 'bonus' ? Ic.star(16) : Ic.skull(16)} w="max-w-md" locked>
+          <div className="text-center">
+            <img
+              src={qCardImg ?? cardArt(s.qCards[me].kind === 'bonus' ? 'bonus' : 'trap', s.qCards[me].name)}
+              alt={s.qCards[me].name}
+              className="w-full border-[3px] border-edge object-cover"
+            />
+            <div className="font-display uppercase text-paper text-sm mt-3">{s.qCards[me].name}</div>
+            <p className="text-[12px] text-dim mt-1.5">{s.qCards[me].desc}</p>
+            {s.qCards[me].effect && (
+              <p className="text-[11px] text-gold mt-1">{effectLabel(s.qCards[me].effect)}</p>
+            )}
+            <PxBtn className="mt-4 w-full" onClick={() => dispatch({ t: 'qCardAck', id: me })}>Понятно</PxBtn>
+          </div>
+        </Modal>
+      )}
+
       {/* ---------- осмотр ячейки на карте ---------- */}
       {inspectIdx !== null && <CellInspectModal idx={inspectIdx} onClose={() => setInspectIdx(null)} />}
+
+      {/* ==================== QUEST: интерфейс режима ==================== */}
+      {isQuest && s.phase === 'playing' && mePlayer && mePlayer.alive && !mePlayer.spect && (
+        <>
+          {/* ЛИЧНОЕ ЗАДАНИЕ (на доверии, как в RUBG): вошёл в ячейку — играй ИНДИВИДУАНО.
+              Других не останавливает, трансляции нет (в QUEST SOLO хост стримит зрителям). */}
+          {myQJob !== undefined && myQTask && (() => {
+            const qName = qRomDef?.name ?? myQTask.romId;
+            return (
+              <div className={peekMap ? 'hidden' : undefined}>
+              <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(4,6,14,0.78)] p-3">
+                <div className="pixel-panel pixel-corners p-4 max-w-3xl w-full max-h-[93vh] overflow-y-auto">
+                  <div className="flex items-center justify-between gap-3 flex-wrap min-w-0">
+                    <div className="font-display uppercase text-lg text-teal break-words min-w-0">🧭 ЗАДАНИЕ · {myQTask.title}</div>
+                    <span className="font-pixel text-[8px] text-faint shrink-0">Задание №{myQJob.cellIdx + 1} · играешь ТОЛЬКО ты</span>
+                  </div>
+                  <div className="grid md:grid-cols-[220px_1fr] gap-4 mt-2">
+                    <div className="space-y-3 min-w-0">
+                      <img
+                        src={qTaskImg ?? cartridgeArt(myQTask.title, qName, myQJob.cellIdx)}
+                        alt={myQTask.title}
+                        className="w-full border-[3px] border-edge object-cover"
+                      />
+                      {myQTask.desc && <TaskDesc text={myQTask.desc} label="Задание" />}
+                      <div className="tick-label text-faint">Ром: {qName} · {qRomDef?.ext === 'nes' ? 'NES' : 'SEGA'}</div>
+                      <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
+                      <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
+                      <EmuVolumeChip />
+                      <GhostBtn small onClick={rubgToggleFs}>{isFs ? Ic.cross(12) : Ic.map(12)} {isFs ? 'Свернуть' : 'Во весь экран'}</GhostBtn>
+                    </div>
+                    <div className="min-w-0 space-y-3">
+                      <div ref={rubgEmuWrapRef} className={isFs ? 'bg-[#05070f] h-full w-full flex items-center justify-center p-4' : ''}>
+                        <div style={isFs ? { width: qRomDef?.ext === 'nes' ? 'min(92vw, calc(88vh * 1.0667))' : 'min(92vw, calc(88vh * 1.3333))' } : undefined}>
+                  {qRomBuf ? (
+                    <SegaBox
+                      key={qEmuKey}
+                      romData={qRomBuf}
+                      ext={(qRomDef?.fileName.split('.').pop() ?? 'md').toLowerCase()}
+                      core={qRomDef?.ext === 'nes' ? 'nes' : undefined}
+                      remapSpec={remapSpec}
+                      chaos={[]}
+                      initialState={(qSaveState as string | null) ?? null}
+                      paused={!qArmed || peekMap || qPaused}
+                      pausedHint={!qArmed ? 'Нажмите «Старт игры»' : qPaused && !peekMap ? 'ПАУЗА — нажмите «Продолжить»' : undefined}
+                      onApi={(a) => { ejsApiRef.current = a; }}
+                    />
+                  ) : (
+                    <div className="aspect-[256/240] max-h-[46vh] bg-black border-[3px] border-edge flex items-center justify-center">
+                      <span className="font-pixel text-[8px] text-faint blink-hard">ЗАГРУЗКА РОМА…</span>
+                    </div>
+                  )}
+                        </div>
+                      </div>
+                      <p className="text-[10px] text-faint">Режим доверия — победа и поражение на твоей совести. Каждый игрок проходит задания САМ: выполненные засчитываются только тебе (цели концовок и квестов — личные).</p>
+                      {!qArmed ? (
+                        <>
+                          <PxBtn big color="gold" className="w-full pulse-ring" onClick={() => { sfx.start(); setQArmed(true); }}>
+                            {Ic.play(16)} Старт игры
+                          </PxBtn>
+                          <p className="text-[10px] text-dim leading-tight">Эмулятор загружен и стоит НА ПАУЗЕ — прочитайте задание, настройте управление. Игра начнётся по кнопке «Старт игры».</p>
+                        </>
+                      ) : (
+                        <>
+                          <div className="grid grid-cols-2 gap-2">
+                            <PxBtn color="teal" onClick={() => { sfx.success(); dispatch({ t: 'qJobDone', id: me, cellIdx: myQJob.cellIdx, win: true }); }}>
+                              🏆 ПОБЕДА
+                            </PxBtn>
+                            <PxBtn color="coral" onClick={() => { sfx.fail(); dispatch({ t: 'qJobDone', id: me, cellIdx: myQJob.cellIdx, win: false }); }}>
+                              💀 ПОРАЖЕНИЕ
+                            </PxBtn>
+                          </div>
+                          <div className="grid grid-cols-3 gap-2 mt-2">
+                            <GhostBtn onClick={() => setQPaused((x) => !x)} title="Пауза эмулятора без сброса прогресса">
+                              {qPaused ? Ic.play(13) : Ic.pause(13)} {qPaused ? 'Продолжить' : 'Пауза'}
+                            </GhostBtn>
+                            <GhostBtn
+                              title="Перезапустить игру с сохранения (или с начала)"
+                              onClick={() => { ejsApiRef.current?.loadSaveReliable((qSaveState as string | null) ?? null); sfx.alarm(); }}
+                            >
+                              {Ic.rotate(13)} Перезапуск
+                            </GhostBtn>
+                            <GhostBtn
+                              title="Отойти от задания без последствий — можно зайти снова"
+                              onClick={() => { dispatch({ t: 'qJobLeave', id: me, cellIdx: myQJob.cellIdx }); setQArmed(false); }}
+                            >
+                              🚪 Уйти
+                            </GhostBtn>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+              </div>
+            );
+          })()}
+
+          {/* КНОПКА ДИАЛОГА: NPC в радиусе (или клавиша E) */}
+          {nearNpc && !dlgNpcId && !myQJob && (
+            <div className="fixed left-1/2 -translate-x-1/2 bottom-24 z-[60]">
+              <PxBtn color="teal" onClick={() => openDialog(nearNpc.npc.id)}>
+                💬 ГОВОРИТЬ С «{nearNpc.def.name}» [E]
+              </PxBtn>
+            </div>
+          )}
+        </>
+      )}
 
       {/* ==================== RUBG: интерфейс режима ==================== */}
       {isRubg && s.phase === 'playing' && mePlayer && mePlayer.alive && !mePlayer.spect && (

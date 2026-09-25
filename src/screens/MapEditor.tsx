@@ -8,8 +8,8 @@ import {
 import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, GameMap, PlacedAnim, PlacedBoss, PlateBg, PortalZone, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
-import { bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, MAP_MODES, mapModeModified, MAX_FIELD, MODE_PRESETS, PLATE_SIZES, tileRectOf, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
+import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, DialogNode, DialogOption, GameMap, MapEnding, NpcAnimDef, NpcLibEntry, NpcQuest, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
+import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileRectOf, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
 import type { MapMode } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
@@ -97,7 +97,7 @@ function migrateMap(m: GameMap, libTiles: { id: string; dataUrl: string; gw: num
 
 /* ---------- инструменты ---------- */
 
-type Tool = 'select' | 'tile' | 'cell' | 'link' | 'hop' | 'anim' | 'boss' | 'wall' | 'portal' | 'erase' | 'pan';
+type Tool = 'select' | 'tile' | 'cell' | 'link' | 'hop' | 'anim' | 'boss' | 'npc' | 'wall' | 'portal' | 'erase' | 'pan';
 
 const TOOLS: { key: Tool; label: string; hint: string }[] = [
   { key: 'select', label: 'Выбор', hint: 'клик — выбрать тайл/ячейку/анимацию и тянуть мышью · пустое место — двигать камеру' },
@@ -107,7 +107,8 @@ const TOOLS: { key: Tool; label: string; hint: string }[] = [
   { key: 'hop', label: 'Переход', hint: 'ВТОРАЯ стрелка: клик по ячейке А, затем по Б — когда фишка ОСТАНОВИТСЯ на А, она прыгнет на Б (выход из круга, штраф-телепорт). Клик по той же ячейке — убрать' },
   { key: 'anim', label: 'Анимация', hint: 'выберите анимацию в левой панели, кликните по карте — поставится проигрыватель анимации. Клик по уже стоящей — выбрать и тянуть' },
   { key: 'boss', label: 'Босс', hint: 'вшейте босса в карту (спойлер «Боссы» слева), выберите его и кликните по карте — босс встанет на ячейку: живёт (idle), реагирует на победы/поражения игроков в радиусе' },
-  { key: 'wall', label: 'Стена', hint: 'НЕВИДИМАЯ стена (JOURNEY, JOURNEY SOLO и RUBG): протяните прямоугольник — фишка не сможет зайти внутрь. Клик по стене — выбрать и тянуть. В игре стены НЕ видны' },
+  { key: 'wall', label: 'Стена', hint: 'НЕВИДИМАЯ стена (JOURNEY, JOURNEY SOLO, QUEST, QUEST SOLO и RUBG): протяните прямоугольник — фишка не сможет зайти внутрь. Клик по стене — выбрать и тянуть. В игре стены НЕ видны; выполненный квест NPC может СНЯТЬ стену' },
+  { key: 'npc', label: 'NPC', hint: 'вшейте NPC в карту (спойлер «🧑 NPC» слева), выберите его и кликните по карте — интерактивный персонаж режима QUEST: диалоговое дерево, квесты с наградами, снятие стен, радиус звука. Клик по уже стоящему — выбрать и тянуть' },
   { key: 'portal', label: 'Портал', hint: 'ТЕЛЕПОРТ между плитками: протяните зону входа, затем кликните по карте (можно на другой плитке — переключите её в панели «Плитки и порталы») — куда переносить. В JOURNEY фишка, войдя в зону, мгновенно переносится. Клик по порталу — выбрать и тянуть' },
   { key: 'erase', label: 'Ластик', hint: 'клик или протяни с зажатой кнопкой — убирает ТАЙЛЫ под курсором. Ячейки, анимации и стены ластик не трогает: выдели и нажми Delete' },
   { key: 'pan', label: 'Рука', hint: 'двигать камеру (колесо — зум под курсором)' },
@@ -134,7 +135,7 @@ const CELL_TYPES: { key: CellType; label: string; cls: string }[] = [
 const LOOT_CELL_TYPE: { key: CellType; label: string; cls: string } = { key: 'loot', label: 'Ящ.', cls: 'border-[#ff8b3f] text-[#ff8b3f] bg-[#ff8b3f]/10' }; // ЯЩИК с лутом — только в режиме RUBG
 
 export default function MapEditor() {
-  const { maps, tiles, tokens, anims, bossAnims, challenges, setScreen, refresh, toast } = useApp();
+  const { maps, tiles, tokens, anims, bossAnims, npcAnims, challenges, setScreen, refresh, toast } = useApp();
   const [map, setMap] = useState<GameMap | null>(null);
   const [tool, setTool] = useState<Tool>('select');
   const [tileId, setTileId] = useState('');
@@ -150,11 +151,15 @@ export default function MapEditor() {
   const [tokOpen, setTokOpen] = useState(true); // спойлер «Фишки партии» в левой панели
   const [animOpen, setAnimOpen] = useState(false); // спойлер «Анимации» в левой панели
   const [bossOpen, setBossOpen] = useState(false); // спойлер «Боссы» в левой панели
+  const [npcOpen, setNpcOpen] = useState(false); // спойлер «🧑 NPC» в левой панели
+  const [endOpen, setEndOpen] = useState(false); // спойлер «🎬 Концовки» в левой панели
   const [modeDescOpen, setModeDescOpen] = useState(false); // спойлер «Описания режимов» в панели «Режим игры»
   const [layersOpen, setLayersOpen] = useState(true); // спойлер «Слои» в левой панели
   const [activeLayer, setActiveLayer] = useState(0); // слой, на который ставятся НОВЫЕ тайлы (0 — нижний)
   const [placeAnimId, setPlaceAnimId] = useState(''); // вшитая анимация, выбранная для размещения
   const [selAnim, setSelAnim] = useState<string | null>(null); // выбранная размещённая анимация
+  const [placeNpcId, setPlaceNpcId] = useState(''); // вшитый NPC, выбранный для размещения
+  const [selNpc, setSelNpc] = useState<string | null>(null); // выбранный размещённый NPC
   const [placeBossId, setPlaceBossId] = useState(''); // вшитый босс, выбранный для размещения
   const [selBoss, setSelBoss] = useState<string | null>(null); // выбранный размещённый босс
   const [selWall, setSelWall] = useState<number | null>(null); // выбранная стена (индекс)
@@ -175,13 +180,14 @@ export default function MapEditor() {
   const ghostRef = useRef<HTMLImageElement | null>(null);
   const ghostAnimRef = useRef<HTMLImageElement | null>(null); // первый кадр выбранной для размещения анимации (натуральный размер)
   const ghostBossRef = useRef<HTMLImageElement | null>(null); // первый кадр idle выбранного босса
+  const ghostNpcRef = useRef<HTMLImageElement | null>(null); // первый кадр idle выбранного NPC
   const viewRef = useRef(view); viewRef.current = view;
   const mapRef = useRef(map); mapRef.current = map;
   const dragRef = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
-  const objDragRef = useRef<{ kind: 'cell' | 'stamp' | 'anim' | 'boss' | 'wall' | 'portal'; idx: number; dx: number; dy: number; moved: boolean } | null>(null);
+  const objDragRef = useRef<{ kind: 'cell' | 'stamp' | 'anim' | 'boss' | 'npc' | 'wall' | 'portal'; idx: number; dx: number; dy: number; moved: boolean } | null>(null);
   const wallDragRef = useRef<{ sx: number; sy: number; ex: number; ey: number } | null>(null); // протягивание НОВОЙ стены
   const portalDragRef = useRef<{ sx: number; sy: number; ex: number; ey: number } | null>(null); // протягивание НОВОГО портала
-  const resizeRef = useRef<{ kind: 'stamp' | 'anim' | 'boss'; idx: number } | null>(null); // ресайз тайла/анимации/босса за уголок
+  const resizeRef = useRef<{ kind: 'stamp' | 'anim' | 'boss' | 'npc'; idx: number } | null>(null); // ресайз тайла/анимации/босса/NPC за уголок
   const downRef = useRef<{ x: number; y: number } | null>(null);
   const lastPlaceRef = useRef<{ x: number; y: number } | null>(null);
   const lastCellSize = useRef({ w: CELL, h: CELL }); // размер новых ячеек (запоминается при изменении)
@@ -224,6 +230,13 @@ export default function MapEditor() {
     img.onload = () => { ghostBossRef.current = img; };
     img.src = e.idle.frames[0];
   }, [placeBossId, map?.bossLib]);
+  useEffect(() => {
+    const e = (map?.npcLib ?? []).find((x) => x.id === placeNpcId);
+    if (!e || !e.idle.frames.length) { ghostNpcRef.current = null; return; }
+    const img = new Image();
+    img.onload = () => { ghostNpcRef.current = img; };
+    img.src = e.idle.frames[0];
+  }, [placeNpcId, map?.npcLib]);
 
   /* ---------- точка в мировых координатах ---------- */
   const toWorld = (e: { clientX: number; clientY: number }) => {
@@ -342,6 +355,44 @@ export default function MapEditor() {
     setSelBoss(null);
     dirtyRef.current = true;
     sfx.fail();
+  };
+
+  const npcAtPoint = (mm: GameMap, x: number, y: number): number =>
+    (mm.npcs ?? []).findIndex((n) => Math.abs(x - n.x) <= n.w / 2 && Math.abs(y - n.y) <= n.h / 2);
+  const updNpc = (idx: number, patch: Partial<PlacedNpc>) =>
+    setMap((mm) => (mm ? { ...mm, npcs: (mm.npcs ?? []).map((n, i) => (i === idx ? { ...n, ...patch } : n)) } : mm));
+  const removeNpcAt = (nid: string) => {
+    if (!mapRef.current) return;
+    const inst = (mapRef.current.npcs ?? []).find((x) => x.id === nid);
+    const def = inst ? (mapRef.current.npcLib ?? []).find((x) => x.id === inst.nid) : undefined;
+    setMap((mm) => (mm ? { ...mm, npcs: (mm.npcs ?? []).filter((x) => x.id !== nid) } : mm));
+    setSelNpc(null);
+    dirtyRef.current = true;
+    sfx.fail();
+    if (def) rememberDeleted({
+      label: `NPC «${def.name}» с карты`,
+      restore: async () => {
+        /* экземпляр возвращается без диалога/квестов — их вернёт синк из библиотеки при сохранении */
+      },
+    });
+  };
+  const toggleMapNpc = (n: NpcAnimDef) => {
+    const lib = mapRef.current?.npcLib ?? [];
+    const on = lib.some((x) => x.id === n.id);
+    if (on) {
+      /* убираем из карты вместе с экземплярами */
+      setMap((mm) => (mm ? { ...mm, npcLib: (mm.npcLib ?? []).filter((x) => x.id !== n.id), npcs: (mm.npcs ?? []).filter((x) => x.nid !== n.id) } : mm));
+      if (placeNpcId === n.id) setPlaceNpcId('');
+      if (selNpc && (mapRef.current?.npcs ?? []).some((x) => x.id === selNpc && x.nid === n.id)) setSelNpc(null);
+      sfx.fail();
+    } else {
+      /* вшиваем СНИМОК NPC (клипы + звуки) — уедет всем игрокам; правки в TokenEditor обновят вшитые копии */
+      setMap((mm) => (mm ? { ...mm, npcLib: [...(mm.npcLib ?? []), npcLibEntryOf(n)] } : mm));
+      setPlaceNpcId(n.id);
+      setTool('npc');
+      sfx.coin();
+    }
+    dirtyRef.current = true;
   };
   const removeAnim = (aid: string) => {
     const m = mapRef.current;
@@ -1238,7 +1289,7 @@ export default function MapEditor() {
     downRef.current = { x: e.clientX, y: e.clientY };
     const w = toWorld(e);
     // ресайз тайла/анимации/босса за жёлтый уголок — работает в «Выборе», «Тайле», «Анимации» и «Боссе»
-    if ((tool === 'select' || tool === 'tile' || tool === 'anim' || tool === 'boss') && (selStamp || selAnim || selBoss)) {
+    if ((tool === 'select' || tool === 'tile' || tool === 'anim' || tool === 'boss' || tool === 'npc') && (selStamp || selAnim || selBoss || selNpc)) {
       if (selStamp) {
         const si = (m.stamps ?? []).findIndex((s) => s.id === selStamp);
         if (si >= 0) {
@@ -1283,6 +1334,20 @@ export default function MapEditor() {
           }
         }
       }
+      if (selNpc) {
+        const bi = (m.npcs ?? []).findIndex((n) => n.id === selNpc);
+        if (bi >= 0) {
+          const b = m.npcs![bi];
+          const grab = 11 / viewRef.current.zoom;
+          const cs: [number, number][] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+          for (const [ox, oy] of cs) {
+            if (Math.abs(w.x - (b.x + (ox * b.w) / 2)) <= grab && Math.abs(w.y - (b.y + (oy * b.h) / 2)) <= grab) {
+              resizeRef.current = { kind: 'npc', idx: bi };
+              return;
+            }
+          }
+        }
+      }
     }
     // средняя/правая кнопка — всегда камера
     if (tool === 'pan' || e.button === 1 || e.button === 2) {
@@ -1295,6 +1360,18 @@ export default function MapEditor() {
         const pb = (m.bosses ?? [])[bi];
         objDragRef.current = { kind: 'boss', idx: bi, dx: w.x - pb.x, dy: w.y - pb.y, moved: false };
         setSelBoss(pb.id);
+        setSelAnim(null);
+        setSelCell(null);
+        setSelStamp(null);
+        sfx.hover();
+        return;
+      }
+      const ni = npcAtPoint(m, w.x, w.y);
+      if (ni >= 0) {
+        const pn = (m.npcs ?? [])[ni];
+        objDragRef.current = { kind: 'npc', idx: ni, dx: w.x - pn.x, dy: w.y - pn.y, moved: false };
+        setSelNpc(pn.id);
+        setSelBoss(null);
         setSelAnim(null);
         setSelCell(null);
         setSelStamp(null);
@@ -1333,6 +1410,7 @@ export default function MapEditor() {
       setSelStamp(null);
       setSelAnim(null);
       setSelBoss(null);
+      setSelNpc(null);
       dragRef.current = { sx: e.clientX, sy: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
       return;
     }
@@ -1445,6 +1523,40 @@ export default function MapEditor() {
       }
       return;
     }
+    if (tool === 'npc') {
+      // клик по уже стоящему NPC — выбрать и тянуть; иначе ставим выбранного в панели
+      const ni = npcAtPoint(m, w.x, w.y);
+      if (ni >= 0) {
+        const pn = (m.npcs ?? [])[ni];
+        objDragRef.current = { kind: 'npc', idx: ni, dx: w.x - pn.x, dy: w.y - pn.y, moved: false };
+        setSelNpc(pn.id);
+        setSelBoss(null);
+        setSelAnim(null);
+        setSelCell(null);
+        setSelStamp(null);
+        sfx.hover();
+        return;
+      }
+      if (placeNpcId && (m.npcLib ?? []).some((x) => x.id === placeNpcId)) {
+        const img = ghostNpcRef.current;
+        const natW = img?.width || 64, natH = img?.height || 64;
+        const maxSide = Math.max(natW, natH);
+        const k = maxSide < 64 ? 64 / maxSide : maxSide > 128 ? 128 / maxSide : 1;
+        const p = snapPt(w.x, w.y);
+        const pn: PlacedNpc = { id: uid('pnpc'), nid: placeNpcId, x: Math.round(p.x), y: Math.round(p.y), w: Math.round(natW * k), h: Math.round(natH * k), r: 160 };
+        setMap((mm) => (mm ? { ...mm, npcs: [...(mm.npcs ?? []), pn] } : mm));
+        setSelNpc(pn.id);
+        setSelBoss(null);
+        setSelAnim(null);
+        setSelCell(null);
+        setSelStamp(null);
+        dirtyRef.current = true;
+        sfx.step();
+      } else {
+        toast('Сначала вшейте NPC в карту и выберите его в левой панели (спойлер «🧑 NPC»)', 'info');
+      }
+      return;
+    }
     if (tool === 'erase') {
       const si = stampAtPoint(m, w.x, w.y);
       if (si >= 0) {
@@ -1546,9 +1658,17 @@ export default function MapEditor() {
       } else if (resizeRef.current.kind === 'boss') {
         const b = (m.bosses ?? [])[resizeRef.current.idx];
         if (b) {
-          let vw = Math.max(12, Math.abs(w.x - b.x) * 2);
-          let vh = Math.max(12, Math.abs(w.y - b.y) * 2);
+          const vw = Math.max(12, Math.abs(w.x - b.x) * 2);
+          const vh = Math.max(12, Math.abs(w.y - b.y) * 2);
           updBoss(resizeRef.current.idx, { w: Math.round(vw / 2) * 2, h: Math.round(vh / 2) * 2 });
+          dirtyRef.current = true;
+        }
+      } else if (resizeRef.current.kind === 'npc') {
+        const b = (m.npcs ?? [])[resizeRef.current.idx];
+        if (b) {
+          const vw = Math.max(12, Math.abs(w.x - b.x) * 2);
+          const vh = Math.max(12, Math.abs(w.y - b.y) * 2);
+          updNpc(resizeRef.current.idx, { w: Math.round(vw / 2) * 2, h: Math.round(vh / 2) * 2 });
           dirtyRef.current = true;
         }
       } else {
@@ -1570,6 +1690,7 @@ export default function MapEditor() {
       if (od.kind === 'cell') updCell(od.idx, { cx: Math.round(p.x), cy: Math.round(p.y) });
       else if (od.kind === 'anim') updAnim(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
       else if (od.kind === 'boss') updBoss(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
+      else if (od.kind === 'npc') updNpc(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
       else if (od.kind === 'wall') updWall(od.idx, { x: Math.round(w.x - od.dx), y: Math.round(w.y - od.dy) }); // стены — без привязки к сетке
       else if (od.kind === 'portal') updPortal(od.idx, { x: Math.round(w.x - od.dx), y: Math.round(w.y - od.dy) }); // порталы — без привязки к сетке (точка перехода остаётся на месте)
       else updStamp(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
@@ -1621,7 +1742,7 @@ export default function MapEditor() {
       const wh = Math.round(Math.abs(wd.ey - wd.sy));
       if (ww >= 12 && wh >= 12 && mapRef.current) {
         const newIdx = (mapRef.current.walls ?? []).length;
-        const wl: WallRect = { x: wx, y: wy, w: ww, h: wh };
+        const wl: WallRect = { id: uid('wall'), x: wx, y: wy, w: ww, h: wh };
         setMap((mm) => (mm ? { ...mm, walls: [...(mm.walls ?? []), wl] } : mm));
         setSelWall(newIdx);
         dirtyRef.current = true;
@@ -1680,6 +1801,9 @@ export default function MapEditor() {
         } else if (selBoss) {
           const b = (map.bosses ?? []).find((x) => x.id === selBoss);
           keyDel.keyDeleteStart(`босса «${(map.bossLib ?? []).find((x) => x.id === b?.bid)?.name ?? 'с карты'}»`, () => removeBossAt(selBoss));
+        } else if (selNpc) {
+          const n = (map.npcs ?? []).find((x) => x.id === selNpc);
+          keyDel.keyDeleteStart(`NPC «${(map.npcLib ?? []).find((x) => x.id === n?.nid)?.name ?? 'с карты'}»`, () => removeNpcAt(selNpc));
         } else if (selWall !== null && (map.walls ?? [])[selWall]) {
           keyDel.keyDeleteStart('стену с карты', () => removeWall(selWall));
         } else if (selPortal !== null && (map.portals ?? [])[selPortal]) {
@@ -1738,6 +1862,7 @@ export default function MapEditor() {
           showNumbers: true, tokens: [], time: t,
           hoverCell: null,
           sndRadii: true, // пунктирные круги радиусов звука — только в редакторе
+          npcs: (m.npcs ?? []).map((n) => ({ npc: n, def: (m.npcLib ?? []).find((x) => x.id === n.nid), done: false })).filter((x): x is { npc: PlacedNpc; def: NpcLibEntry; done: boolean } => !!x.def),
         });
         const v = viewRef.current;
         ctx.save();
@@ -2007,6 +2132,13 @@ export default function MapEditor() {
           ctx.drawImage(gi, hoverW.x - gi.width / 2, hoverW.y - gi.height / 2, gi.width, gi.height);
           ctx.globalAlpha = 1;
         }
+        // призрак NPC под курсором (первый кадр idle)
+        if (hoverW && toolRef.current === 'npc' && ghostNpcRef.current && npcAtPoint(m, hoverW.x, hoverW.y) < 0) {
+          const gi = ghostNpcRef.current;
+          ctx.globalAlpha = 0.5;
+          ctx.drawImage(gi, hoverW.x - gi.width / 2, hoverW.y - gi.height / 2, gi.width, gi.height);
+          ctx.globalAlpha = 1;
+        }
         // курсор-ластик: крестик под мышью
         if (hoverW && toolRef.current === 'erase') {
           const r = 14 / v.zoom;
@@ -2054,7 +2186,7 @@ export default function MapEditor() {
       smoothMove: true, // ход фишек плавный — стандарт всех режимов с v0.43.0
       customId: cc.id,
       customName: cc.name,
-      resMode: r.resHp ? 'hp' : r.resCoins ? 'coins' : 'std',
+      resMode: r.resMode ?? (r.resHp ? 'hp' : r.resCoins ? 'coins' : 'std'),
       startCoins: r.resCoins ? Math.max(0, r.startCoins) : undefined,
       coinsOnly: r.resCoins && r.coinsOnly ? true : undefined,
       taskWinCoins: r.resCoins ? r.taskWinCoins : undefined,
@@ -2179,12 +2311,29 @@ export default function MapEditor() {
       toast('Ячейки-ящики работают только в режиме RUBG — измените тип ячеек или включите режим RUBG', 'err');
       return;
     }
-    /* НЕВИДИМЫЕ СТЕНЫ работают в JOURNEY, JOURNEY SOLO и RUBG: карта со стенами в другом режиме не завершается.
-     Удалить все стены разом — кнопка в левой панели «Невидимые стены» */
+    /* QUEST/QUEST SOLO: квизы ЗАПРЕЩЕНЫ (задания на доверие, квесты NPC и концовки вместо викторин) */
+    if (isQuestMode(map.mode)) {
+      const bad = map.cells.filter((c) => c.type === 'quiz').length;
+      if (bad > 0) {
+        sfx.fail();
+        toast(`QUEST: ячейки-квизы запрещены — на карте ${bad} таких. Уберите их или измените режим (кнопки вверху)`, 'err');
+        return;
+      }
+    }
+    /* SOLO-версии RETROPOLIA/JOURNEY: победа = пройти ВСЕ задания карты — без заданий победа недостижима */
+    if ((map.mode === 'classic1p' || map.mode === 'journey1p') && !map.mapless) {
+      const tasks = map.cells.filter((c) => c.type === 'task').length;
+      if (tasks === 0) {
+        sfx.fail();
+        toast('SOLO-режим: победа — пройти ВСЕ задания карты, но заданий на карте нет. Поставьте хотя бы одну ячейку «Зад.»', 'err');
+        return;
+      }
+    }
+    /* НЕВИДИМЫЕ СТЕНЫ работают в JOURNEY, JOURNEY SOLO, QUEST, QUEST SOLO и RUBG */
     const wallCnt = (map.walls ?? []).length;
     if (wallCnt > 0 && !isJourneyLike(map.mode)) {
       sfx.fail();
-      toast(`На карте ${wallCnt} невидимых стен, но они работают только в JOURNEY, JOURNEY SOLO и RUBG. Измените режим игры (кнопки вверху) или удалите все стены (кнопка «Удалить все стены разом» в панели слева)`, 'err');
+      toast(`На карте ${wallCnt} невидимых стен, но они работают только в JOURNEY, JOURNEY SOLO, QUEST, QUEST SOLO и RUBG. Измените режим игры (кнопки вверху) или удалите все стены (кнопка «Удалить все стены разом» в панели слева)`, 'err');
       return;
     }
     /* ПЛИТОЧНЫЙ РЕЖИМ: ячейки ВНЕ карт-плиток недостижимы в игре — карта не завершается */
@@ -2268,6 +2417,33 @@ export default function MapEditor() {
   const selBossIdx = map ? (map.bosses ?? []).findIndex((b) => b.id === selBoss) : -1;
   const selBossDef = map && selBossIdx >= 0 ? map.bosses![selBossIdx] : null;
   const selBossLib = map && selBossDef ? (map.bossLib ?? []).find((x) => x.id === selBossDef.bid) : null;
+  const selNpcIdx = map && selNpc ? (map.npcs ?? []).findIndex((x) => x.id === selNpc) : -1;
+  const selNpcDef = map && selNpcIdx >= 0 ? map.npcs![selNpcIdx] : null;
+  const selNpcLib = map && selNpcDef ? (map.npcLib ?? []).find((x) => x.id === selNpcDef.nid) : null;
+  const updNpcDialog = (patch: Partial<NonNullable<PlacedNpc['dialog']>>) => {
+    const d = selNpcDef?.dialog;
+    if (!selNpcDef) return;
+    updNpc(selNpcIdx, { dialog: { root: d?.root ?? '', nodes: d?.nodes ?? [], ...patch } });
+    dirtyRef.current = true;
+  };
+  const updNpcNode = (nid: string, patch: Partial<DialogNode>) => {
+    const d = selNpcDef?.dialog;
+    if (!d) return;
+    updNpc(selNpcIdx, { dialog: { ...d, nodes: d.nodes.map((n) => (n.id === nid ? { ...n, ...patch } : n)) } });
+    dirtyRef.current = true;
+  };
+  const updNpcOpt = (nid: string, oi: number, patch: Partial<DialogOption>) => {
+    const d = selNpcDef?.dialog;
+    if (!d) return;
+    updNpc(selNpcIdx, { dialog: { ...d, nodes: d.nodes.map((n) => (n.id === nid ? { ...n, opts: (n.opts ?? []).map((o, i) => (i === oi ? { ...o, ...patch } : o)) } : n)) } });
+    dirtyRef.current = true;
+  };
+  const updNpcQuest = (qid: string, patch: Partial<NpcQuest>) => {
+    const qs = selNpcDef?.quests;
+    if (!qs) return;
+    updNpc(selNpcIdx, { quests: qs.map((x) => (x.id === qid ? { ...x, ...patch } : x)) });
+    dirtyRef.current = true;
+  };
   const startsCount = map?.cells.filter((c) => c.type === 'start').length ?? 0;
   const taskCells = map?.cells.filter((c) => c.type === 'task').length ?? 0;
   const noTask = map?.cells.filter((c) => c.type === 'task' && !c.task).length ?? 0;
@@ -2290,26 +2466,49 @@ export default function MapEditor() {
           {Ic.map(18)} Редактор карт
         </h1>
         {map && <span className="hud-chip pixel-corners px-3 py-1 font-display text-xs text-gold uppercase">{map.name}</span>}
-        {/* ВЫБОР РЕЖИМА — в ВЕРХНЕЙ панели (переехал из левой панели): клик по режиму =
-            его КЛАССИЧЕСКИЙ ПРЕСЕТ (JOURNEY 30/30, JOURNEY SOLO 60/60, RUBG — HP и зона 4 ч,
-            ход фишек плавный). Поменяли параметры после этого — режим «ИЗМЕНЕННЫЙ». */}
+        {/* ВЫБОР РЕЖИМА — в ВЕРХНЕЙ панели: кнопки БАЗОВЫХ режимов + галочка SOLO (QUEST, JOURNEY
+            и RETROPOLIA умеют играть solo; SKILL CHALLENGE всегда solo; RUBG — solo нельзя).
+            Клик по режиму = его КЛАССИЧЕСКИЙ ПРЕСЕТ; изменённые параметры — «ИЗМЕНЕННЫЙ». */}
         {map && (
           <div className="flex items-center gap-1 flex-wrap">
-            {MAP_MODES.map((md) => {
-              const on = (map.mode ?? 'classic') === md.id;
+            {MAP_MODES_TOP.map((id) => {
+              const md = MAP_MODES.find((x) => x.id === id)!;
+              const base = baseModeOf(map.mode ?? 'classic');
+              const on = base === id;
               const modified = on && mapModeModified(map);
               return (
                 <button
-                  key={md.id}
-                  onClick={() => { sfx.hover(); if (!on || modified) applyModePreset(md.id); }}
+                  key={id}
+                  onClick={() => { sfx.hover(); if (!on || modified) applyModePreset(id); }}
                   title={`${md.hint}${modified ? '\n\nПараметры карты отличаются от пресета — клик вернёт классический пресет.' : on ? '\n\nКлассический пресет уже применён.' : ''}`}
                   className={`px-2.5 py-1 border-2 font-display text-[9px] uppercase cursor-pointer transition-colors whitespace-nowrap ${on ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}
                 >{on ? '✓ ' : ''}{md.name}{modified && <span className="ml-1 font-pixel text-[8px] text-magma">· ИЗМЕНЕННЫЙ</span>}</button>
               );
             })}
+            {/* ГАЛОЧКА SOLO: один клик переключает RETROPOLIA/JOURNEY/QUEST на одиночную версию
+                (играет только хост, остальные — зрители; победа = пройти ВСЕ задания карты).
+                SKILL всегда solo; RUBG — нельзя. */}
+            {(() => {
+              const id = baseModeOf(map.mode ?? 'classic');
+              const solo = isSoloMode(map.mode ?? 'classic');
+              const soloLocked = id === 'skill' || id === 'rubg';
+              const sv = soloVariantOf(id);
+              return (
+                <button
+                  onClick={() => { sfx.hover(); if (!soloLocked && sv) applyModePreset(solo ? id : sv); }}
+                  disabled={soloLocked}
+                  title={id === 'skill'
+                    ? 'SKILL CHALLENGE всегда соло — играет только хост, остальные зрители'
+                    : id === 'rubg'
+                      ? 'В RUBG галочка SOLO недоступна'
+                      : 'SOLO: играет только хост, остальные — зрители трансляции. В RETROPOLIA/JOURNEY меняется условие победы: пройти ВСЕ задания карты'}
+                  className={`px-2.5 py-1 border-2 font-display text-[9px] uppercase transition-colors whitespace-nowrap ${solo ? 'border-sky text-sky bg-sky/10 cursor-pointer' : soloLocked ? 'border-edge text-faint/50 cursor-not-allowed' : 'border-edge text-faint hover:text-sky cursor-pointer'}`}
+                >{solo ? '☑ ' : '☐ '}SOLO</button>
+              );
+            })()}
           </div>
         )}
-        <div className="ml-auto flex gap-2 flex-wrap">
+                <div className="ml-auto flex gap-2 flex-wrap">
           {map && (
             <>
               <GhostBtn onClick={() => void saveMap()}>{Ic.save(14)} Сохранить</GhostBtn>
@@ -2615,6 +2814,8 @@ export default function MapEditor() {
                     {/* ТРИ взаимоисключающих варианта — как в мастере «Создать челлендж» */}
                     {([
                       { id: 'std', title: '⏱ 🎯 Время и попытки', desc: 'Классика: таймер и попытки у каждого. Кнопки «Время/Попытки» в окне задания.' },
+                      { id: 'time', title: '⏱ Только время', desc: 'ОДИН ресурс — минуты: попытки не считаются и в игре не показываются. Вылет на нуле минут.' },
+                      { id: 'tries', title: '🎯 Только попытки', desc: 'ОДИН ресурс — попытки: таймер не тикает и не показывается. Вылет на нуле попыток.' },
                       { id: 'coins', title: '🪙 Монеты', desc: 'Единственный ресурс — монеты (старт/награды/плата за пропуск). 0 монет = вылет.' },
                       { id: 'hp', title: '❤ Полоска HP', desc: 'Единственный ресурс — HP: победа +10%, поражение/пропуск −5%. На нуле — вылет.' },
                     ] as const).map((r) => {
@@ -2628,6 +2829,10 @@ export default function MapEditor() {
                               updMap({ resMode: 'coins', coinsOnly: true, startCoins: map.startCoins ?? 100, taskWinCoins: map.taskWinCoins ?? 10, skipCoins: map.skipCoins ?? 5, quizWinCoins: map.quizWinCoins ?? 5, quizLoseCoins: map.quizLoseCoins ?? 5 });
                             } else if (r.id === 'hp') {
                               updMap({ resMode: 'hp', coinsOnly: undefined, startCoins: undefined });
+                            } else if (r.id === 'time') {
+                              updMap({ resMode: 'time', coinsOnly: undefined, startCoins: undefined });
+                            } else if (r.id === 'tries') {
+                              updMap({ resMode: 'tries', coinsOnly: undefined, startCoins: undefined });
                             } else {
                               updMap({ resMode: 'std', coinsOnly: undefined, startCoins: undefined });
                             }
@@ -2644,6 +2849,18 @@ export default function MapEditor() {
                       <div className="space-y-2 pt-1">
                         <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Минут у каждого</span><Stepper value={map.startMin ?? 60} onChange={(v) => updMap({ startMin: v })} min={5} max={180} step={5} /></div>
                         <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><Stepper value={map.startTries ?? 60} onChange={(v) => updMap({ startTries: v })} min={5} max={180} step={5} /></div>
+                      </div>
+                    )}
+                    {map.resMode === 'time' && (
+                      <div className="space-y-2 pt-1">
+                        <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Минут у каждого</span><Stepper value={map.startMin ?? 60} onChange={(v) => updMap({ startMin: v })} min={5} max={180} step={5} /></div>
+                        <p className="text-[9px] text-faint leading-tight">Единственный ресурс — ВРЕМЯ: попытки не тратятся и не показываются. Победа в задании списывает фактические минуты.</p>
+                      </div>
+                    )}
+                    {map.resMode === 'tries' && (
+                      <div className="space-y-2 pt-1">
+                        <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><Stepper value={map.startTries ?? 60} onChange={(v) => updMap({ startTries: v })} min={5} max={180} step={5} /></div>
+                        <p className="text-[9px] text-faint leading-tight">Единственный ресурс — ПОПЫТКИ: вход в задание тратит одну попытку, таймер не идёт.</p>
                       </div>
                     )}
                     {map.resMode === 'coins' && (
@@ -3131,6 +3348,132 @@ export default function MapEditor() {
                   </div>
                 )}
               </div>
+
+              <div>
+                <button
+                  onClick={() => setNpcOpen((v) => !v)}
+                  className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(46,230,168,0.08)] px-1 py-0.5"
+                  title={npcOpen ? 'Свернуть' : 'Развернуть'}
+                >
+                  <span className={`text-[10px] shrink-0 ${npcOpen ? 'text-gold' : 'text-faint'}`}>{npcOpen ? '▾' : '▸'}</span>
+                  <span className="tick-label">🧑 NPC · вшито {(map.npcLib ?? []).length}</span>
+                </button>
+                {npcOpen && (
+                  <div>
+                    {npcAnims.length > 0 ? (
+                      <div className="space-y-1 mb-2">
+                        {npcAnims.map((n) => {
+                          const on = (map.npcLib ?? []).some((x) => x.id === n.id);
+                          return (
+                            <div key={n.id} className={`flex items-center gap-1.5 border-2 px-1.5 py-1 ${on ? 'border-gold bg-[rgba(255,207,63,0.08)]' : 'border-edge'}`}>
+                              <div className="w-8 h-8 shrink-0 flex items-center justify-center" style={{ background: 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 8px 8px' }}>
+                                <AnimPreview frames={n.idle.frames} fps={n.idle.fps} size={28} />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="font-display text-[10px] uppercase text-paper truncate">{n.idleSnd ? '🔊 ' : ''}{n.name}</div>
+                                <div className="tick-label text-faint">{n.done ? `✅ ${n.done.frames.length} к.` : 'без клипа «выполнен»'}</div>
+                              </div>
+                              <button
+                                onClick={() => toggleMapNpc(n)}
+                                title={on ? 'Убрать из карты (вместе с экземплярами на поле)' : 'Вшить в карту и размещать на поле'}
+                                className={`shrink-0 w-6 h-6 border-2 font-pixel text-[10px] cursor-pointer ${on ? 'border-gold text-gold' : 'border-edge text-dim hover:text-paper'}`}
+                              >{on ? '✓' : '+'}</button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="text-[10px] text-faint leading-tight mb-1.5">NPC пока нет — создайте их в «Редакторе анимаций и фишек» (вкладка «🧑 NPC»): клип IDLE и клип «КВЕСТ ВЫПОЛНЕН», затем вернитесь сюда.</p>
+                    )}
+                    {(map.npcLib ?? []).length > 0 && (
+                      <div>
+                        <div className="tick-label mb-1">Разместить (выбери, затем инструмент «NPC»):</div>
+                        <div className="flex flex-wrap gap-1">
+                          {(map.npcLib ?? []).map((e) => (
+                            <button
+                              key={e.id}
+                              onClick={() => { setPlaceNpcId(e.id); setTool('npc'); setSelNpc(null); sfx.hover(); }}
+                              title={`Размещать «${e.name}» на карте`}
+                              className={`px-1.5 py-1 border-2 font-display text-[8px] uppercase cursor-pointer ${placeNpcId === e.id ? 'border-gold text-gold' : 'border-edge text-dim hover:text-paper'}`}
+                            >{e.idleSnd ? '🔊 ' : ''}{e.name.slice(0, 10)}</button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <p className="text-[10px] text-teal mt-1.5 leading-tight">NPC режима QUEST: в радиусе игрок слышит звук и может ГОВОРИТЬ (диалоговое дерево, выбор влияет на концовку). Квесты NPC — победить босса / N заданий / собрать ресурсы — дают награду и могут СНИМАТЬ СТЕНЫ. Когда все квесты NPC сданы игроку — NPC играет клип «КВЕСТ ВЫПОЛНЕН». Диалоги и квесты — в панели размещённого NPC.</p>
+                  </div>
+                )}
+              </div>
+
+              {isQuestMode(map.mode) && (
+              <div>
+                <button
+                  onClick={() => setEndOpen((v) => !v)}
+                  className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(255,207,63,0.08)] px-1 py-0.5"
+                  title={endOpen ? 'Свернуть' : 'Развернуть'}
+                >
+                  <span className={`text-[10px] shrink-0 ${endOpen ? 'text-gold' : 'text-faint'}`}>{endOpen ? '▾' : '▸'}</span>
+                  <span className="tick-label">🎬 Концовки · {(map.endings ?? []).length}</span>
+                </button>
+                {endOpen && (
+                  <div className="space-y-2">
+                    <p className="text-[10px] text-faint leading-tight">Финальные условия победы в QUEST: кто ПЕРВЫЙ выполнит условие любой концовки — тот победил (его концовка и показывается). Концовка БЕЗ условия достигается только ВЫБОРОМ игрока в диалоге NPC. Условие поражения по умолчанию — истощение ресурсов; можно добавить лимит провалов.</p>
+                    {(map.endings ?? []).map((e, ei) => (
+                      <div key={e.id} className="border-2 border-edge px-2 py-2 space-y-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-display text-[10px] text-gold shrink-0">#{ei + 1}</span>
+                          <input className="field-in flex-1 min-w-0 px-2 py-1 text-[11px]" maxLength={28} value={e.name} placeholder="НАЗВАНИЕ КОНЦОВКИ" onChange={(ev) => { const ends = [...(map.endings ?? [])]; ends[ei] = { ...e, name: ev.target.value.toUpperCase() }; updMap({ endings: ends }); }} />
+                          <button onClick={() => { updMap({ endings: (map.endings ?? []).filter((x) => x.id !== e.id) }); sfx.fail(); }} title="Удалить концовку" className="text-faint hover:text-coral cursor-pointer px-1">✕</button>
+                        </div>
+                        <input className="field-in w-full px-2 py-1 text-[11px]" maxLength={140} value={e.desc} placeholder="Описание концовки (покажется на экране победы)" onChange={(ev) => { const ends = [...(map.endings ?? [])]; ends[ei] = { ...e, desc: ev.target.value }; updMap({ endings: ends }); }} />
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="tick-label text-faint shrink-0">Условие:</span>
+                          <select
+                            className="field-in px-1.5 py-1 text-[10px]"
+                            value={e.goal?.kind ?? 'none'}
+                            onChange={(ev) => { const ends = [...(map.endings ?? [])]; const k = ev.target.value as QuestGoalKind; ends[ei] = { ...e, goal: k === 'none' ? undefined : { kind: k, count: k === 'tasks' ? 3 : k === 'coins' ? 500 : k === 'hp' ? 100 : k === 'time' ? 900 : 10, bossId: (map.bosses ?? [])[0]?.id } }; updMap({ endings: ends }); }}
+                          >
+                            <option value="none">только через диалог NPC</option>
+                            <option value="boss">победить босса</option>
+                            <option value="tasks">победить N заданий</option>
+                            <option value="coins">собрать монет</option>
+                            <option value="hp">иметь HP %</option>
+                            <option value="time">запас времени, сек</option>
+                            <option value="tries">запас попыток</option>
+                          </select>
+                          {e.goal && e.goal.kind === 'boss' && (
+                            <select
+                              className="field-in px-1.5 py-1 text-[10px]"
+                              value={e.goal.bossId ?? ''}
+                              onChange={(ev) => { const ends = [...(map.endings ?? [])]; ends[ei] = { ...e, goal: { ...e.goal!, bossId: ev.target.value } }; updMap({ endings: ends }); }}
+                            >
+                              {(map.bosses ?? []).length === 0 && <option value="">нет боссов на карте</option>}
+                              {(map.bosses ?? []).map((b) => {
+                                const bd = (map.bossLib ?? []).find((x) => x.id === b.bid);
+                                return <option key={b.id} value={b.id}>{bd?.name ?? b.id}</option>;
+                              })}
+                            </select>
+                          )}
+                          {e.goal && e.goal.kind !== 'boss' && (
+                            <Stepper value={e.goal.count ?? 1} onChange={(v) => { const ends = [...(map.endings ?? [])]; ends[ei] = { ...e, goal: { ...e.goal!, count: v } }; updMap({ endings: ends }); }} min={1} max={99999} step={e.goal.kind === 'coins' ? 25 : 1} />
+                          )}
+                        </div>
+                        <p className="text-[9px] text-faint leading-tight">{questGoalText(e.goal, map)}</p>
+                      </div>
+                    ))}
+                    <button
+                      onClick={() => { updMap({ endings: [...(map.endings ?? []), { id: uid('end'), name: `КОНЦОВКА ${(map.endings ?? []).length + 1}`, desc: '' }] }); sfx.coin(); }}
+                      className="w-full py-1.5 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
+                    >+ Добавить концовку</button>
+                    <div className="flex items-center justify-between border-2 border-edge px-2 py-1.5">
+                      <span className="text-[10px] text-dim">Поражение при N провалах заданий</span>
+                      <Stepper value={map.questDefeatFails ?? 0} onChange={(v) => updMap({ questDefeatFails: v })} min={0} max={99} />
+                    </div>
+                    <p className="text-[9px] text-faint leading-tight">0 — только истощение ресурсов. Иначе игрок вылетает, когда провалит (или проиграет) столько заданий.</p>
+                  </div>
+                )}
+              </div>
+              )}
             </>
           )}
         </div>
@@ -3627,6 +3970,225 @@ export default function MapEditor() {
                     className="w-full py-1.5 border-2 border-coral/60 text-coral font-display text-[10px] uppercase hover:bg-coral/10 transition-colors cursor-pointer"
                   >
                     Удалить босса
+                  </HoldDeleteButton>
+                </div>
+              )}
+
+              {/* панель размещённого NPC: радиус, дерево диалогов, квесты с наградами и стенами */}
+              {selNpcDef && !selCellDef && !selStampDef && !selAnimDef && !selBossDef && (
+                <div className="absolute top-14 right-3 w-[320px] max-h-[calc(100%-80px)] overflow-y-auto pixel-panel pixel-corners p-3.5 space-y-3 pop-in shadow-[0_14px_40px_rgba(0,0,0,0.6)]">
+                  <div className="flex items-center justify-between">
+                    <span className="font-display uppercase text-[12px] text-teal truncate">🧑 NPC · {selNpcLib?.name ?? '?'}</span>
+                    <button onClick={() => { setSelNpc(null); sfx.hover(); }} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <div className="w-14 h-14 shrink-0 flex items-center justify-center border-2 border-edge" style={{ background: 'repeating-conic-gradient(#1a2244 0 25%, #10142a 0 50%) 0 0 / 10px 10px' }}>
+                      <AnimPreview frames={selNpcLib?.idle.frames ?? []} fps={selNpcLib?.idle.fps} size={48} />
+                    </div>
+                    <div className="text-[10px] text-dim">
+                      IDLE {selNpcLib?.idle.frames.length ?? 0} к.{selNpcLib?.done ? ` · ✅ ${selNpcLib.done.frames.length} к.` : ' · без клипа «выполнен»'}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between"><span className="text-[10px] text-dim">Ширина</span><Stepper value={Math.round(selNpcDef.w)} onChange={(v) => { updNpc(selNpcIdx, { w: v }); dirtyRef.current = true; }} min={12} max={2048} step={8} /></div>
+                    <div className="flex items-center justify-between"><span className="text-[10px] text-dim">Высота</span><Stepper value={Math.round(selNpcDef.h)} onChange={(v) => { updNpc(selNpcIdx, { h: v }); dirtyRef.current = true; }} min={12} max={2048} step={8} /></div>
+                  </div>
+
+                  <div className="space-y-1 border-2 border-[rgba(46,230,168,0.4)] px-2 py-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-teal">💬 Радиус NPC (звук + диалог)</span>
+                      <Stepper value={selNpcDef.r ?? 0} onChange={(v) => { updNpc(selNpcIdx, { r: v }); dirtyRef.current = true; }} min={0} max={3000} step={10} suffix=" px" />
+                    </div>
+                    <p className="text-[10px] text-teal leading-tight">Внутри круга игрок слышит звук NPC и может открыть диалог (кнопка «ДИАЛОГ» или клавиша E). 0 = молчит и не говорит.</p>
+                  </div>
+
+                  {/* ---------- ДЕРЕВО ДИАЛОГОВ ---------- */}
+                  <div className="border-2 border-edge px-2 py-2 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="tick-label text-gold">💬 Дерево диалогов</span>
+                      {selNpcDef.dialog && (
+                        <button
+                          onClick={() => { updNpc(selNpcIdx, { dialog: undefined }); dirtyRef.current = true; sfx.fail(); }}
+                          title="Удалить диалог целиком"
+                          className="text-[10px] text-faint hover:text-coral cursor-pointer px-1"
+                        >удалить</button>
+                      )}
+                    </div>
+                    {!selNpcDef.dialog ? (
+                      <button
+                        onClick={() => { const nid = uid('dn'); updNpc(selNpcIdx, { dialog: { root: nid, nodes: [{ id: nid, text: 'Приветствую, путник…', opts: [] }] } }); dirtyRef.current = true; sfx.coin(); }}
+                        className="w-full py-1.5 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
+                      >+ Создать диалог</button>
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-1.5">
+                          <span className="tick-label text-faint shrink-0">Старт:</span>
+                          <select
+                            className="field-in flex-1 min-w-0 px-1.5 py-1 text-[10px]"
+                            value={selNpcDef.dialog.root}
+                            onChange={(ev) => updNpcDialog({ root: ev.target.value })}
+                          >
+                            {selNpcDef.dialog.nodes.map((n) => (
+                              <option key={n.id} value={n.id}>{(n.text || '(пусто)').slice(0, 30)}</option>
+                            ))}
+                          </select>
+                        </div>
+                        {selNpcDef.dialog.nodes.map((nd) => (
+                          <div key={nd.id} className="border-2 border-edge px-2 py-1.5 space-y-1.5">
+                            <div className="flex items-center justify-between">
+                              <span className="tick-label text-faint">Узел {nd.id.slice(-4)}{selNpcDef.dialog!.root === nd.id ? ' · СТАРТ' : ''}</span>
+                              {selNpcDef.dialog!.nodes.length > 1 && (
+                                <button
+                                  onClick={() => { const d = selNpcDef.dialog!; const nodes = d.nodes.filter((x) => x.id !== nd.id); updNpc(selNpcIdx, { dialog: { root: d.root === nd.id ? nodes[0].id : d.root, nodes } }); dirtyRef.current = true; sfx.fail(); }}
+                                  className="text-[10px] text-faint hover:text-coral cursor-pointer"
+                                >удалить</button>
+                              )}
+                            </div>
+                            <textarea
+                              className="field-in w-full px-2 py-1 text-[11px] min-h-[42px]"
+                              maxLength={280}
+                              placeholder="Реплика NPC…"
+                              value={nd.text}
+                              onChange={(ev) => updNpcNode(nd.id, { text: ev.target.value })}
+                            />
+                            {(nd.opts ?? []).map((o, oi) => (
+                              <div key={oi} className="border-2 border-edge px-1.5 py-1.5 space-y-1 bg-[rgba(7,9,18,0.5)]">
+                                <div className="flex items-center gap-1">
+                                  <span className="tick-label text-faint shrink-0">{oi + 1}.</span>
+                                  <input className="field-in flex-1 min-w-0 px-1.5 py-1 text-[11px]" maxLength={80} placeholder="Ответ игрока…" value={o.text} onChange={(ev) => updNpcOpt(nd.id, oi, { text: ev.target.value })} />
+                                  <button onClick={() => { const d = selNpcDef.dialog!; updNpcNode(nd.id, { opts: (nd.opts ?? []).filter((_, k) => k !== oi) }); dirtyRef.current = true; sfx.fail(); }} className="text-faint hover:text-coral cursor-pointer px-0.5 text-[10px]">✕</button>
+                                </div>
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  <span className="tick-label text-faint shrink-0">Далее:</span>
+                                  <select className="field-in px-1 py-1 text-[10px] flex-1 min-w-[120px]" value={o.next ?? ''} onChange={(ev) => updNpcOpt(nd.id, oi, { next: ev.target.value || undefined })}>
+                                    <option value="">— конец диалога —</option>
+                                    {selNpcDef.dialog!.nodes.filter((x) => x.id !== nd.id).map((x) => (
+                                      <option key={x.id} value={x.id}>{(x.text || '(пусто)').slice(0, 24)}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  <span className="tick-label text-faint shrink-0">Концовка:</span>
+                                  <select className="field-in px-1 py-1 text-[10px] flex-1 min-w-[120px]" value={o.ending ?? ''} onChange={(ev) => updNpcOpt(nd.id, oi, { ending: ev.target.value || undefined })}>
+                                    <option value="">— нет —</option>
+                                    {(map.endings ?? []).map((e) => <option key={e.id} value={e.id}>{e.name || '(без названия)'}</option>)}
+                                  </select>
+                                </div>
+                                <div className="grid grid-cols-3 gap-1">
+                                  <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: бронза (монетный режим)">🪙<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={o.give?.coins ?? 0} onChange={(ev) => updNpcOpt(nd.id, oi, { give: { ...o.give, coins: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
+                                  <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: минуты">⏱<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={o.give?.min ?? 0} onChange={(ev) => updNpcOpt(nd.id, oi, { give: { ...o.give, min: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
+                                  <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: попытки">🎯<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={o.give?.tries ?? 0} onChange={(ev) => updNpcOpt(nd.id, oi, { give: { ...o.give, tries: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
+                                </div>
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  <input className="field-in w-[86px] px-1 py-0.5 text-[9px]" placeholder="ставит флаг" value={o.setFlag ?? ''} onChange={(ev) => updNpcOpt(nd.id, oi, { setFlag: ev.target.value.trim() || undefined })} title="Флаг ставится игроку при выборе (влияет на другие ветки)" />
+                                  <input className="field-in w-[86px] px-1 py-0.5 text-[9px]" placeholder="нужен флаг" value={o.reqFlag ?? ''} onChange={(ev) => updNpcOpt(nd.id, oi, { reqFlag: ev.target.value.trim() || undefined })} title="Вариант виден ТОЛЬКО если флаг стоит" />
+                                  <input className="field-in w-[86px] px-1 py-0.5 text-[9px]" placeholder="без флага" value={o.reqNotFlag ?? ''} onChange={(ev) => updNpcOpt(nd.id, oi, { reqNotFlag: ev.target.value.trim() || undefined })} title="Вариант виден ТОЛЬКО если флага НЕТ" />
+                                </div>
+                              </div>
+                            ))}
+                            <button
+                              onClick={() => { updNpcNode(nd.id, { opts: [...(nd.opts ?? []), { text: '' }] }); dirtyRef.current = true; sfx.coin(); }}
+                              className="w-full py-1 border-2 border-dashed border-edge text-faint font-pixel text-[8px] uppercase hover:text-paper cursor-pointer"
+                            >+ вариант ответа</button>
+                          </div>
+                        ))}
+                        <button
+                          onClick={() => { const nid = uid('dn'); updNpcDialog({ nodes: [...selNpcDef.dialog!.nodes, { id: nid, text: '', opts: [] }] }); dirtyRef.current = true; sfx.coin(); }}
+                          className="w-full py-1 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
+                        >+ узел диалога</button>
+                      </>
+                    )}
+                  </div>
+
+                  {/* ---------- КВЕСТЫ NPC ---------- */}
+                  <div className="border-2 border-edge px-2 py-2 space-y-2">
+                    <span className="tick-label text-gold">📜 Квесты NPC ({(selNpcDef.quests ?? []).length})</span>
+                    {(selNpcDef.quests ?? []).map((q) => (
+                      <div key={q.id} className="border-2 border-edge px-2 py-1.5 space-y-1.5">
+                        <div className="flex items-center gap-1">
+                          <input className="field-in flex-1 min-w-0 px-1.5 py-1 text-[11px]" maxLength={40} placeholder="Название квеста" value={q.title} onChange={(ev) => updNpcQuest(q.id, { title: ev.target.value })} />
+                          <button onClick={() => { updNpc(selNpcIdx, { quests: (selNpcDef.quests ?? []).filter((x) => x.id !== q.id) }); dirtyRef.current = true; sfx.fail(); }} className="text-faint hover:text-coral cursor-pointer px-0.5 text-[10px]">✕</button>
+                        </div>
+                        <textarea className="field-in w-full px-2 py-1 text-[11px] min-h-[36px]" maxLength={200} placeholder="Описание квеста (что нужно сделать)" value={q.desc} onChange={(ev) => updNpcQuest(q.id, { desc: ev.target.value })} />
+                        <div className="flex items-center gap-1 flex-wrap">
+                          <span className="tick-label text-faint shrink-0">Условие:</span>
+                          <select
+                            className="field-in px-1 py-1 text-[10px]"
+                            value={q.goal.kind}
+                            onChange={(ev) => { const k = ev.target.value as QuestGoalKind; updNpcQuest(q.id, { goal: { kind: k, count: k === 'tasks' ? 3 : k === 'coins' ? 500 : k === 'hp' ? 100 : k === 'time' ? 900 : 10, bossId: (map.bosses ?? [])[0]?.id } }); }}
+                          >
+                            <option value="none">без условия</option>
+                            <option value="boss">победить босса</option>
+                            <option value="tasks">победить N заданий</option>
+                            <option value="coins">собрать монет</option>
+                            <option value="hp">иметь HP %</option>
+                            <option value="time">запас времени, сек</option>
+                            <option value="tries">запас попыток</option>
+                          </select>
+                          {q.goal.kind === 'boss' && (
+                            <select className="field-in px-1 py-1 text-[10px]" value={q.goal.bossId ?? ''} onChange={(ev) => updNpcQuest(q.id, { goal: { ...q.goal, bossId: ev.target.value } })}>
+                              {(map.bosses ?? []).length === 0 && <option value="">нет боссов</option>}
+                              {(map.bosses ?? []).map((b) => {
+                                const bd = (map.bossLib ?? []).find((x) => x.id === b.bid);
+                                return <option key={b.id} value={b.id}>{bd?.name ?? b.id}</option>;
+                              })}
+                            </select>
+                          )}
+                          {q.goal.kind !== 'boss' && q.goal.kind !== 'none' && (
+                            <Stepper value={q.goal.count ?? 1} onChange={(v) => updNpcQuest(q.id, { goal: { ...q.goal, count: v } })} min={1} max={99999} step={q.goal.kind === 'coins' ? 25 : 1} />
+                          )}
+                        </div>
+                        <p className="text-[9px] text-teal leading-tight">{questGoalText(q.goal, map)}</p>
+                        <div className="grid grid-cols-3 gap-1">
+                          <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: бронза">🪙<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.coins ?? 0} onChange={(ev) => updNpcQuest(q.id, { reward: { ...q.reward, coins: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
+                          <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: минуты">⏱<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.min ?? 0} onChange={(ev) => updNpcQuest(q.id, { reward: { ...q.reward, min: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
+                          <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: попытки">🎯<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.tries ?? 0} onChange={(ev) => updNpcQuest(q.id, { reward: { ...q.reward, tries: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
+                        </div>
+                        {(map.walls ?? []).filter((w) => w.id).length > 0 && (
+                          <div className="space-y-1">
+                            <span className="tick-label text-faint">Снять стены при выполнении:</span>
+                            {(map.walls ?? []).map((w, wi) => w.id && (
+                              <label key={w.id} className="flex items-center gap-1.5 text-[10px] text-dim cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={(q.removeWalls ?? []).includes(w.id!)}
+                                  onChange={(ev) => updNpcQuest(q.id, { removeWalls: ev.target.checked ? [...(q.removeWalls ?? []), w.id!] : (q.removeWalls ?? []).filter((x) => x !== w.id) })}
+                                />
+                                стена №{wi + 1} ({Math.round(w.w)}×{Math.round(w.h)})
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    <button
+                      onClick={() => { updNpc(selNpcIdx, { quests: [...(selNpcDef.quests ?? []), { id: uid('qst'), title: 'НОВЫЙ КВЕСТ', desc: '', goal: { kind: 'tasks', count: 3 }, reward: {} }] }); dirtyRef.current = true; sfx.coin(); }}
+                      className="w-full py-1.5 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
+                    >+ добавить квест</button>
+                    <p className="text-[10px] text-faint leading-tight">Выполнив условие, игрок приходит к NPC и сдаёт квест в диалоге: получает награду; назначенные стены ИСЧЕЗАЮТ с карты для всех. Когда ВСЕ квесты NPC сданы — он играет клип «✅ КВЕСТ ВЫПОЛНЕН».</p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <GhostBtn small onClick={() => {
+                      const copy: PlacedNpc = { ...selNpcDef, id: uid('pnpc'), x: selNpcDef.x + 16, y: selNpcDef.y + 16 };
+                      setMap((mm) => (mm ? { ...mm, npcs: [...(mm.npcs ?? []), copy] } : mm));
+                      setSelNpc(copy.id);
+                      dirtyRef.current = true;
+                      sfx.hover();
+                    }}>Дублировать</GhostBtn>
+                    <GhostBtn small onClick={() => { setPlaceNpcId(selNpcDef.nid); sfx.hover(); toast('Кликайте по полю — поставите ещё экземпляры этого NPC', 'info'); }}>Ставить ещё</GhostBtn>
+                  </div>
+
+                  <HoldDeleteButton
+                    onFire={() => removeNpcAt(selNpcDef.id)}
+                    label={`NPC «${selNpcLib?.name ?? '?'}» с карты`}
+                    ariaLabel="Удалить NPC с карты"
+                    title="Удалить NPC с карты"
+                    className="w-full py-1.5 border-2 border-coral/60 text-coral font-display text-[10px] uppercase hover:bg-coral/10 transition-colors cursor-pointer"
+                  >
+                    Удалить NPC
                   </HoldDeleteButton>
                 </div>
               )}
