@@ -11,6 +11,8 @@ import {
   loadEmuPrefs, PREFS_EVENT, codeToEjsKey, listGamepads,
   PAD_ACTIONS, SEGA_ACTIONS,
   NES_TO_RETRO, SEGA_TO_RETRO,
+  FAMILY_ACTIONS, FAMILY_KEYS_FIELD, FAMILY_KEY_KIND, FAMILY_RETRO, FAMILY_HINT,
+  padFamilyOf, consoleLabel, consoleAspect,
 } from '../input';
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
@@ -235,6 +237,8 @@ export default function GameScreen() {
   const incomingTrades = (s?.trades ?? []).filter((o) => o.to === me && (o.status === 'pending' || o.status === 'countered'));
   const taskRom = task ? st.roms.find((r) => r.id === task.romId) : undefined;
   const isSega = !!taskRom && taskRom.ext !== 'nes';
+  // семейство раскладки рома задания (NES/SEGA/SNES/GBA/PCE/Atari)
+  const padFam = padFamilyOf(taskRom?.ext, taskRom?.fileName);
 
   /* раскладка клавиш для слоя переназначения эмулятора; пересчитывается при
      сохранении в редакторе «Управление» (событие PREFS_EVENT) */
@@ -247,22 +251,30 @@ export default function GameScreen() {
   const remapSpec = useMemo(() => {
     const p = loadEmuPrefs();
     const spec: { idx: number; key: string }[] = [];
-    if (isSega) {
+    if (padFam === 'nes') {
+      for (const a of PAD_ACTIONS) {
+        const idx = NES_TO_RETRO[a];
+        const key = codeToEjsKey(p.keys[a] || '');
+        if (idx !== undefined && key) spec.push({ idx, key });
+      }
+    } else if (padFam === 'sega') {
       for (const a of SEGA_ACTIONS) {
         const idx = SEGA_TO_RETRO[a];
         const key = (p.segaKeys[a] || '').toLowerCase();
         if (idx !== undefined && key) spec.push({ idx, key });
       }
     } else {
-      for (const a of PAD_ACTIONS) {
-        const idx = NES_TO_RETRO[a];
-        const key = codeToEjsKey(p.keys[a] || '');
-        if (idx !== undefined && key) spec.push({ idx, key });
+      const keys = p[FAMILY_KEYS_FIELD[padFam]] as Record<string, string>;
+      const isCode = FAMILY_KEY_KIND[padFam] === 'code';
+      for (const a of FAMILY_ACTIONS[padFam]) {
+        const idx = FAMILY_RETRO[padFam][a];
+        const k = keys[a] ?? '';
+        if (idx !== undefined && k) spec.push({ idx, key: isCode ? codeToEjsKey(k) : k.toLowerCase() });
       }
     }
     return spec;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSega, emuKey, prefsTick]);
+  }, [padFam, emuKey, prefsTick]);
   const segExt = (taskRom?.fileName.split('.').pop() ?? 'md').toLowerCase();
   const romName = taskRom?.name ?? 'ROM';
   const taskImg = useBlobImage(task?.imageId);
@@ -2696,7 +2708,7 @@ export default function GameScreen() {
               <div className="min-w-0">
                 <TaskDesc text={task.desc} label="Задание" />
               </div>
-              <div className="tick-label text-faint">Ром: {romName} · {taskRom?.ext === 'nes' ? 'NES' : 'SEGA'}</div>
+              <div className="tick-label text-faint">Ром: {romName} · {consoleLabel(taskRom?.ext)}</div>
               {ownerName && owner !== active?.id && (
                 <div className="hud-chip pixel-corners px-3 py-2 text-[11px] text-magma border-magma">
                   Хозяин ячейки: {ownerName} — потраченные ресурсы уйдут ему
@@ -2849,7 +2861,7 @@ export default function GameScreen() {
                             </GhostBtn>
                           </div>
                           <div ref={emuWrapRef} className={isFs ? 'bg-[#05070f] h-full w-full flex items-center justify-center p-4' : ''}>
-                            <div style={isFs ? { width: isSega ? 'min(92vw, calc(88vh * 1.3333))' : 'min(92vw, calc(88vh * 1.0667))' } : undefined}>
+                            <div style={isFs ? { width: `min(92vw, calc(88vh * ${consoleAspect(taskRom?.ext).toFixed(4)}))` } : undefined}>
                         {romBuf ? (
                           <SegaBox
                             key={emuKey}
@@ -2894,9 +2906,7 @@ export default function GameScreen() {
                       )}
                       {myTurn && (
                         <div className="mt-1.5 tick-label text-faint">
-                          {isSega
-                            ? 'SEGA · Стрелки · Z=A · X=B · C=C · A=X · S=Y · D=Z · Enter=Start'
-                            : 'NES · Стрелки · Z=B · X=A · Enter=Start · Shift=Select'}
+                          {FAMILY_HINT[padFam]}
                         </div>
                       )}
                     </div>
@@ -3072,12 +3082,12 @@ export default function GameScreen() {
             <div className="flex items-center gap-2 mb-3">
               <span className="text-magma">{Ic.gear(18)}</span>
               <span className="font-display uppercase tracking-wider text-paper text-sm">
-                Управление · {isSega ? 'SEGA Genesis' : 'NES'}
+                Управление · {consoleLabel(taskRom?.ext)}
               </span>
               <span className="tick-label text-gold ml-2">применяется сразу</span>
               <GhostBtn small className="ml-auto" onClick={() => setControlsOpen(false)}>{Ic.cross(12)} Закрыть</GhostBtn>
             </div>
-            <KeyBinder compact mode={isSega ? 'sega' : 'nes'} />
+            <KeyBinder compact mode={padFam} />
           </div>
         </div>
       )}
@@ -3280,7 +3290,7 @@ export default function GameScreen() {
                         className="w-full border-[3px] border-edge object-cover"
                       />
                       {myQTask.desc && <TaskDesc text={myQTask.desc} label="Задание" />}
-                      <div className="tick-label text-faint">Ром: {qName} · {qRomDef?.ext === 'nes' ? 'NES' : 'SEGA'}</div>
+                      <div className="tick-label text-faint">Ром: {qName} · {consoleLabel(qRomDef?.ext)}</div>
                       <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
                       <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
                       <EmuVolumeChip />
@@ -3288,7 +3298,7 @@ export default function GameScreen() {
                     </div>
                     <div className="min-w-0 space-y-3">
                       <div ref={rubgEmuWrapRef} className={isFs ? 'bg-[#05070f] h-full w-full flex items-center justify-center p-4' : ''}>
-                        <div style={isFs ? { width: qRomDef?.ext === 'nes' ? 'min(92vw, calc(88vh * 1.0667))' : 'min(92vw, calc(88vh * 1.3333))' } : undefined}>
+                        <div style={isFs ? { width: `min(92vw, calc(88vh * ${consoleAspect(qRomDef?.ext).toFixed(4)}))` } : undefined}>
                   {qRomBuf ? (
                     <SegaBox
                       key={qEmuKey}
@@ -3391,7 +3401,7 @@ export default function GameScreen() {
                       className="w-full border-[3px] border-edge object-cover"
                     />
                     {myRubgTask.desc && <TaskDesc text={myRubgTask.desc} label="Задание" />}
-                    <div className="tick-label text-faint">Ром: {rName} · {rRomDef?.ext === 'nes' ? 'NES' : 'SEGA'}</div>
+                    <div className="tick-label text-faint">Ром: {rName} · {consoleLabel(rRomDef?.ext)}</div>
                     <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
                     <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
                     <EmuVolumeChip />
@@ -3400,7 +3410,7 @@ export default function GameScreen() {
                   {/* правая колонка: эмулятор + итоги */}
                   <div className="min-w-0 space-y-3">
                     <div ref={rubgEmuWrapRef} className={isFs ? 'bg-[#05070f] h-full w-full flex items-center justify-center p-4' : ''}>
-                      <div style={isFs ? { width: rRomDef?.ext === 'nes' ? 'min(92vw, calc(88vh * 1.0667))' : 'min(92vw, calc(88vh * 1.3333))' } : undefined}>
+                      <div style={isFs ? { width: `min(92vw, calc(88vh * ${consoleAspect(rRomDef?.ext).toFixed(4)}))` } : undefined}>
                   {rRomBuf ? (
                     <SegaBox
                       key={rEmuKey}
@@ -4512,7 +4522,7 @@ function CellInspectModal({ idx, onClose }: { idx: number; onClose: () => void }
               </div>
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[9px] text-faint">
-                  {rom ? (rom.ext === 'nes' ? 'NES' : 'SEGA') : 'РОМ'} · {rom?.name ?? task.romId}
+                  {rom ? consoleLabel(rom.ext) : 'РОМ'} · {rom?.name ?? task.romId}
                 </span>
                 {task.chaos && (
                   <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[9px] text-magma" title={CHAOS_LIST.find((c) => c.kind === task.chaos)?.desc}>

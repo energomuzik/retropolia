@@ -11,6 +11,9 @@ import {
   keyLabel, loadEmuPrefs, PREFS_EVENT, listGamepads,
   PAD_ACTIONS, NES_TO_RETRO, codeToEjsKey,
   SEGA_ACTIONS, SEGA_TO_RETRO,
+  FAMILY_ACTIONS, FAMILY_KEYS_FIELD, FAMILY_KEY_KIND, FAMILY_RETRO,
+  padFamilyOf, consoleLabel, consoleAspect,
+  type PadFamily,
 } from '../input';
 import { sfx } from '../sound';
 
@@ -81,6 +84,10 @@ export default function EmulatorLauncher() {
 
   const rom = roms.find((r) => r.id === romId) ?? null;
   const isNes = rom?.ext === 'nes';
+  // семейство раскладки текущего рома (NES/SEGA/SNES/GBA/PCE/Atari)
+  const padFam: PadFamily = padFamilyOf(rom?.ext, rom?.fileName);
+  // точное расширение для запуска (у legacy-SEGA добираем из имени файла)
+  const realExt = rom ? (rom.ext === 'sega' ? segExt(rom.fileName) : rom.ext) : 'md';
   const romSaves = saves.filter((s) => s.romId === romId).sort((a, b) => a.slot - b.slot);
 
   /* группировка ромов по папкам (спойлеры, как у тайлов в редакторах);
@@ -105,20 +112,24 @@ export default function EmulatorLauncher() {
   const remapSpec = useMemo(() => {
     const p = loadEmuPrefs();
     const spec: { idx: number; key: string }[] = [];
-    if (isNes) {
+    if (padFam === 'nes') {
       for (const a of PAD_ACTIONS) {
         const idx = NES_TO_RETRO[a];
         if (idx !== undefined && p.keys[a]) spec.push({ idx, key: codeToEjsKey(p.keys[a]) });
       }
     } else {
-      for (const a of SEGA_ACTIONS) {
-        const idx = SEGA_TO_RETRO[a];
-        if (idx !== undefined && p.segaKeys[a]) spec.push({ idx, key: p.segaKeys[a].toLowerCase() });
+      const acts = FAMILY_ACTIONS[padFam];
+      const keys = p[FAMILY_KEYS_FIELD[padFam]] as Record<string, string>;
+      const isCode = FAMILY_KEY_KIND[padFam] === 'code';
+      for (const a of acts) {
+        const idx = FAMILY_RETRO[padFam][a];
+        const k = keys[a] ?? '';
+        if (idx !== undefined && k) spec.push({ idx, key: isCode ? codeToEjsKey(k) : k.toLowerCase() });
       }
     }
     return spec;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isNes, prefsTick, runKey]);
+  }, [padFam, prefsTick, runKey]);
 
   useEffect(() => {
     const bump = () => forceUi((x) => x + 1);
@@ -143,13 +154,12 @@ export default function EmulatorLauncher() {
     let loaded = 0, skipped = 0;
     for (const f of list) {
       const ext = (f.name.split('.').pop() ?? '').toLowerCase();
-      const isNesFile = ext === 'nes';
-      const isSegaFile = ['md', 'gen', 'sms', 'gg', 'bin'].includes(ext);
-      if (!isNesFile && !isSegaFile) { skipped++; continue; }
+      const romExt = romFileExt(ext);
+      if (!romExt) { skipped++; continue; }
       const buf = await f.arrayBuffer();
       const r: RomDef = {
         id: uid('rom'), name: f.name.replace(/\.[^.]+$/, ''), fileName: f.name,
-        ext: isNesFile ? 'nes' : 'sega', size: f.size, createdAt: Date.now(),
+        ext: romExt, size: f.size, createdAt: Date.now(),
         ...(folder ? { folder } : {}),
       };
       await idbPut('roms', r.id, r);
@@ -157,7 +167,7 @@ export default function EmulatorLauncher() {
       lastId = r.id;
       loaded++;
     }
-    if (!loaded) { toast('Нет поддерживаемых файлов: .nes (NES) и .md/.gen/.sms/.gg/.bin (SEGA)', 'err'); return; }
+    if (!loaded) { toast('Нет поддерживаемых файлов: .nes · .md/.gen/.bin/.sms/.gg (SEGA) · .sfc/.smc (SNES) · .gb/.gbc (Game Boy) · .gba · .32x (SEGA 32X) · .a26 (Atari 2600) · .pce (PC Engine)', 'err'); return; }
     if (folder) removeEmptyRomFolder(folder); // папка больше не пустая
     await refresh();
     if (lastId) setRomId(lastId);
@@ -370,10 +380,10 @@ export default function EmulatorLauncher() {
             <span className="text-coral">{Ic.chip(22)}</span> Запуск эмулятора
           </h1>
           <PxBtn color="coral" className="ml-auto" onClick={() => fileRef.current?.click()}>{Ic.upload(15)} Загрузить ромы</PxBtn>
-          <input ref={fileRef} type="file" accept=".nes,.md,.gen,.sms,.gg,.bin" multiple className="hidden" onChange={(e) => { void onUpload(e.target.files); e.target.value = ''; }} />
+          <input ref={fileRef} type="file" accept=".nes,.md,.gen,.bin,.sms,.gg,.sfc,.smc,.fig,.gb,.gbc,.gba,.32x,.a26,.pce" multiple className="hidden" onChange={(e) => { void onUpload(e.target.files); e.target.value = ''; }} />
         </div>
         <p className="text-[13px] text-dim mb-6 max-w-3xl">
-          Тестовый стенд: гоняйте ромы (NES и SEGA), проходите до нужного места и записывайте состояние одной из ЧЕТЫРЁХ кнопок:
+          Тестовый стенд: гоняйте ромы (NES, SEGA, SNES, Game Boy/Color, GBA, SEGA 32X, Atari 2600, PC Engine), проходите до нужного места и записывайте состояние одной из ЧЕТЫРЁХ кнопок:
           <span className="text-gold font-display uppercase"> «Сохранить уровень»</span> (Уровень 1, 2, …),
           <span className="text-coral font-display uppercase"> «Сохранить босса»</span> (Босс 1, 2, …),
           <span className="text-teal font-display uppercase"> «Сохранить моё задание»</span> (одно на игру, перезаписывается) и
@@ -458,7 +468,7 @@ export default function EmulatorLauncher() {
               {roms.length === 0 && (
                 <div className="text-center py-8 px-3">
                   <span className="text-coral inline-block floaty">{Ic.cart(36)}</span>
-                  <p className="text-[12px] text-dim mt-3">Загрузите файл .nes или .md/.sms — и вперёд</p>
+                  <p className="text-[12px] text-dim mt-3">Загрузите файл .nes, .md, .sfc, .gb, .gba, .pce — и вперёд</p>
                   <p className="text-[10px] text-faint mt-2 leading-tight">Создайте папку («+ Папка»), выберите её в списке — и жмите «Загрузить ромы»: можно сразу несколько файлов</p>
                 </div>
               )}
@@ -466,7 +476,7 @@ export default function EmulatorLauncher() {
           </Panel>
 
           <div className="space-y-5">
-            <Panel title={rom ? `${rom.name} · ${rom.ext === 'nes' ? 'NES' : 'SEGA'}` : 'Экран'} icon={Ic.play(16)} accent="var(--color-teal)">
+            <Panel title={rom ? `${rom.name} · ${consoleLabel(rom.ext)}` : 'Экран'} icon={Ic.play(16)} accent="var(--color-teal)">
               <div className="p-4">
                 {!running || !romBuf ? (
                   <div className="aspect-[256/120] max-h-[220px] w-full bg-[#05070f] border-[3px] border-edge flex flex-col items-center justify-center gap-3 relative overflow-hidden">
@@ -483,11 +493,11 @@ export default function EmulatorLauncher() {
                 ) : (
                   <div className="max-w-[640px] mx-auto">
                     <div ref={fsWrapRef} className={`relative ${isFs ? 'bg-[#05070f] h-full w-full flex items-center justify-center p-4' : ''}`}>
-                      <div style={isFs ? { width: isNes ? 'min(92vw, calc(88vh * 1.0667))' : 'min(92vw, calc(88vh * 1.3333))' } : undefined}>
+                      <div style={isFs ? { width: `min(92vw, calc(88vh * ${consoleAspect(realExt).toFixed(4)}))` } : undefined}>
                         <SegaBox
                           key={runKey}
                           romData={romBuf}
-                          ext={isNes ? 'nes' : segExt(rom?.fileName ?? '')}
+                          ext={realExt}
                           core={isNes ? 'nes' : undefined}
                           remapSpec={remapSpec}
                           initialState={(runState as string | null) ?? null}
@@ -606,12 +616,12 @@ export default function EmulatorLauncher() {
             <div className="flex items-center gap-2 mb-3">
               <span className="text-magma">{Ic.gear(18)}</span>
               <span className="font-display uppercase tracking-wider text-paper text-sm">
-                Управление · {isNes ? 'NES' : 'SEGA Genesis'}
+                Управление · {consoleLabel(realExt)}
               </span>
               <span className="tick-label text-gold ml-2">применяется сразу</span>
               <GhostBtn small className="ml-auto" onClick={() => setControlsOpen(false)}>{Ic.cross(12)} Закрыть</GhostBtn>
             </div>
-            <KeyBinder compact mode={isNes ? 'nes' : 'sega'} />
+            <KeyBinder compact mode={padFam} />
           </div>
         </div>
       )}
@@ -621,5 +631,24 @@ export default function EmulatorLauncher() {
 
 function segExt(fileName: string): string {
   return (fileName.split('.').pop() ?? 'md').toLowerCase();
+}
+
+/* Расширение файла рома → система для хранения (RomDef.ext).
+   SEGA-файлы (md/gen/bin/sms/gg) по-прежнему храним как 'sega' — бейджи,
+   фильтры лобби и старые ромы остаются совместимы; точное ядро добирается
+   из fileName при запуске (segExt). Новые системы хранятся точно. */
+function romFileExt(ext: string): string | null {
+  switch (ext) {
+    case 'nes': return 'nes';
+    case 'md': case 'gen': case 'bin': case 'sms': case 'gg': return 'sega';
+    case 'sfc': case 'smc': case 'fig': case 'snes': return 'snes';
+    case 'gb': return 'gb';
+    case 'gbc': return 'gbc';
+    case 'gba': return 'gba';
+    case '32x': return '32x';
+    case 'a26': return 'a26';
+    case 'pce': return 'pce';
+    default: return null;
+  }
 }
 

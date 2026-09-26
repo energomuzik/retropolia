@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from './store';
-import { DEFAULT_GPAD, DEFAULT_SEGA_GPAD, NES_TO_RETRO, SEGA_TO_RETRO } from './input';
+import { FAMILY_RETRO, FAMILY_GPAD_DEFAULT, FAMILY_PAD_FIELD, FAMILY_ACTIONS,
+  type PadFamily } from './input';
 
 /* ЯДРА ВНУТРИ САЙТА: все файлы эмулятора (загрузчик, ядра, распаковщик,
    локализация) лежат в public/emulatorjs/data и отдаются с того же адреса,
@@ -36,16 +37,36 @@ export interface SegaApi {
 function coreFor(ext: string): string {
   if (ext === 'sms') return 'segaMS';
   if (ext === 'gg') return 'segaGG';
+  if (ext === 'nes') return 'nes';
+  if (ext === 'sfc' || ext === 'smc' || ext === 'fig' || ext === 'snes') return 'snes';
+  if (ext === 'gb' || ext === 'gbc') return 'gb';
+  if (ext === 'gba') return 'gba';
+  if (ext === '32x') return 'sega32x';
+  if (ext === 'a26') return 'atari2600';
+  if (ext === 'pce') return 'pce';
   return 'segaMD'; // md, gen, bin
 }
 
+/* Семейство раскладки по ядру EmulatorJS (см. FAMILY_* в input.ts).
+   Game Boy/Color использует NES-семейство (у gambatte те же RetroPad-индексы,
+   что и у fceumm), SEGA 32X — SEGA-семейство (picodrive следует той же
+   конвенции индексов, что и genesis_plus_gx). */
+const CORE_FAMILY: Record<string, PadFamily> = {
+  nes: 'nes', gb: 'nes',
+  segaMD: 'sega', segaMS: 'sega', segaGG: 'sega', sega32x: 'sega',
+  snes: 'snes', gba: 'gba', pce: 'pce', atari2600: 'a26',
+};
+
 /**
- * Эмулятор SEGA (Genesis Plus GX / EmulatorJS) в изолированном iframe.
+ * Эмулятор (EmulatorJS) в изолированном iframe — SEGA MD/MS/GG/32X, NES,
+ * SNES, Game Boy/Color, GBA, Atari 2600, PC Engine.
  *
  * — ЯДРА И ФАЙЛЫ ЭМУЛЯТОРА лежат ВНУТРИ САЙТА (public/emulatorjs/data; источник
  *   — официальный CDN EmulatorJS 4.2.3 stable, файлы не менялись): загрузчик,
  *   genesis_plus_gx (SEGA MD/Genesis + Game Gear), smsplus (Master System),
- *   fceumm (NES), распаковщик 7z/zip/rar и русская локализация. При сбое —
+ *   picodrive (SEGA 32X), fceumm (NES), snes9x (SNES), gambatte (Game
+ *   Boy/Color), mgba (GBA), stella2014 (Atari 2600), mednafen_pce (PC Engine),
+ *   распаковщик 7z/zip/rar и русская локализация. При сбое —
  *   автоперебор источников: свой сайт → CDN stable → CDN 4.2.3.
  * — Сохранения грузятся перезапуском ядра с EJS_loadStateURL (единственный
  *   надёжный путь в stable-версии EmulatorJS). Ядро при этом берётся из кэша
@@ -111,10 +132,17 @@ export default function SegaBox({
   const firstBootRef = useRef(false);
 
   const resolvedCore = core ?? coreFor(ext);
+  const padFamily = CORE_FAMILY[resolvedCore] ?? 'sega';
   const coreLabel =
     resolvedCore === 'nes' ? 'NES'
     : resolvedCore === 'segaMS' ? 'SEGA MASTER SYSTEM'
     : resolvedCore === 'segaGG' ? 'SEGA GAME GEAR'
+    : resolvedCore === 'snes' ? 'SNES'
+    : resolvedCore === 'gb' ? 'GAME BOY'
+    : resolvedCore === 'gba' ? 'GAME BOY ADVANCE'
+    : resolvedCore === 'sega32x' ? 'SEGA 32X'
+    : resolvedCore === 'atari2600' ? 'ATARI 2600'
+    : resolvedCore === 'pce' ? 'PC ENGINE'
     : 'SEGA';
 
   // Документ iframe строится СИНХРОННО — iframe получает srcDoc уже при первом
@@ -131,9 +159,9 @@ export default function SegaBox({
     const opts = useApp.getState().options;
     const volume = Math.max(0, Math.min(1, opts.emuVolume ?? 1));
     const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    return buildHtml(resolvedCore, volume, CORE_BASES, bootStateRef.current, nonce, remapJsonRef.current, chaosJsonRef.current);
+    return buildHtml(resolvedCore, padFamily, volume, CORE_BASES, bootStateRef.current, nonce, remapJsonRef.current, chaosJsonRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedCore, romData, bootTick]);
+  }, [resolvedCore, padFamily, romData, bootTick]);
 
   // живое применение пакостей — без перезапуска ядра
   useEffect(() => {
@@ -365,7 +393,7 @@ export default function SegaBox({
   );
 }
 
-function buildHtml(core: string, volume: number, bases: string[], bootStateB64: string | null, nonce: string, remapJson: string, chaosJson: string): string {
+function buildHtml(core: string, padFamily: PadFamily, volume: number, bases: string[], bootStateB64: string | null, nonce: string, remapJson: string, chaosJson: string): string {
   // Внутренний документ: чистое окно без тулбара, общается с хостом через postMessage.
   // Ром приходит сообщением 'boot' как ArrayBuffer; blob-URL создаётся ВНУТРИ iframe —
   // с именем и расширением файла (иначе ядро стартует «пустым» и показывает меню RetroArch).
@@ -396,12 +424,12 @@ function buildHtml(core: string, volume: number, bases: string[], bootStateB64: 
     `var remapSpec=${remapJson};`,
     // Геймпад: физическая кнопка (W3C-индекс из наших настроек) → действие → RetroPad-индекс ядра.
     // simulateInput принимает ИМЕННО RetroPad-индекс действия (4=вверх, 0=B…), а не номер кнопки падка.
-    `var PAD_ACTION_TO_RETRO=${JSON.stringify(core === 'nes' ? NES_TO_RETRO : SEGA_TO_RETRO)};`,
-    `var PAD_DEFAULT=${JSON.stringify(core === 'nes' ? DEFAULT_GPAD : DEFAULT_SEGA_GPAD)};`,
-    `var PAD_FIELD=${JSON.stringify(core === 'nes' ? 'gpad' : 'segaPad')};`,
+    `var PAD_ACTION_TO_RETRO=${JSON.stringify(FAMILY_RETRO[padFamily])};`,
+    `var PAD_DEFAULT=${JSON.stringify(FAMILY_GPAD_DEFAULT[padFamily])};`,
+    `var PAD_FIELD=${JSON.stringify(FAMILY_PAD_FIELD[padFamily])};`,
     // Фиксированный порядок действий — им разрешается конфликт «несколько действий
     // на одном физическом индексе» (первый по списку забирает кнопку себе)
-    `var PAD_ORDER=${JSON.stringify(Object.keys(core === 'nes' ? NES_TO_RETRO : SEGA_TO_RETRO))};`,
+    `var PAD_ORDER=${JSON.stringify(FAMILY_ACTIONS[padFamily])};`,
     'var keyToIdx={};',
     'var suppressKeys={};',
     // Пакости: активный список + единый путь ввода (инверсия крестовины + задержка кнопок)
