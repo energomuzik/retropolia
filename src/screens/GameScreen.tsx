@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp, getRomData, useBlobImage } from '../store';
 import { dispatch, streamBus, type StreamPacket } from '../useGame';
-import { CELL, cellAtPoint, cellCenter, drawBoard, drawRubgOverlay, fitView, mapSize, smoothPxPerFrame, jumpFrameFactor, DEF_MOVE_SPEED, clampMoveSpeed } from '../render';
+import { CELL, cellAtPoint, cellCenter, drawBoard, drawRubgOverlay, fitView, mapSize, plateMetrics, plateNumAt, plateRectOf, smoothPxPerFrame, jumpFrameFactor, DEF_MOVE_SPEED, clampMoveSpeed } from '../render';
 import { cellRectOf, cellTaskOf, fmtClock, spentInfo } from '../engine';
 import { effectLabel } from './TaskEditor';
 import { cardArt, cartridgeArt } from '../assets';
@@ -83,6 +83,17 @@ export default function GameScreen() {
   const lookPanRef = useRef({ x: 0, y: 0 });
   const lookZoomRef = useRef(1);
   const lookDragRef = useRef<{ sx: number; sy: number; px: number; py: number } | null>(null);
+  /* РЕЖИМ КОМНАТ (АЙЗЕК): roomNumRef — номер текущей плитки-комнаты наблюдаемого (для rAF:
+     маска темноты и зажим камеры), roomNumUi — его копия для HUD-бейджа; roomFlashTs — метка
+     смены комнаты (ключ вспышки затемнения); portalTpAt — момент последнего прыжка через
+     портал (его звук УЖЕ играет портал — при смене комнаты через портал звук не дублируем);
+     roomMapRef — защита от ложной вспышки при смене карты (первая комната не считается сменой). */
+  const roomNumRef = useRef<number | null>(null);
+  const prevRoomRef = useRef<number | null>(null);
+  const roomMapRef = useRef<GameMap | null>(null);
+  const portalTpAtRef = useRef(0);
+  const [roomNumUi, setRoomNumUi] = useState<number | null>(null);
+  const [roomFlashTs, setRoomFlashTs] = useState(0);
   const [isFs, setIsFs] = useState(false);
   const emuWrapRef = useRef<HTMLDivElement>(null);
   const prevPeekRef = useRef(false);
@@ -209,6 +220,9 @@ export default function GameScreen() {
   const isMapless = !!(map?.mapless);
   /* ---------- RUBG (Retro Ultimate Battle Ground) — «ретро-PUBG» ---------- */
   const isRubg = map?.mode === 'rubg';
+  /* РЕЖИМ КОМНАТ (АЙЗЕК) — для HUD и скрытия кнопок обзора: только при разбивке на плитки,
+   не в RUBG (нужны общий план и фаза самолёта) и при БОЛЕЕ чем одной плитке */
+  const roomsOnUi = !!map && !!map.roomMode && !!map.plateSize && map.mode !== 'rubg' && plateMetrics(map).total > 1;
   const rubg = s?.rubg;
   const myJob = isRubg && s && rubg ? rubg.jobs?.[me] : undefined;
   const myRubgTask = s && map && myJob !== undefined ? cellTaskOf(s, map, myJob.cellIdx) : null;
@@ -938,6 +952,7 @@ export default function GameScreen() {
                     self.pinside.clear();
                     for (const q of pzs) if (inPz(q)) self.pinside.add(q.id);
                     sfx.portal();
+                    portalTpAtRef.current = Date.now(); // смена комнаты через портал — БЕЗ доп. звука (уже прозвучал)
                     break; // один портал за кадр
                   }
                   if (inside) self.pinside.add(pz.id);
@@ -968,7 +983,7 @@ export default function GameScreen() {
               if (!rj) rj = journeyRemote.current[p.id] = { ax: tgt0.x, ay: tgt0.y, vx: 0, vy: 0, t: nowMs, dir: jp?.dir, mv: !!jp?.mv };
               if (jp && (jp.x !== rj.ax || jp.y !== rj.ay || jp.dir !== rj.dir || !!jp.mv !== rj.mv)) {
                 rj.ax = jp.x; rj.ay = jp.y; rj.dir = jp.dir; rj.mv = !!jp.mv; rj.t = nowMs;
-                if (jp.tp) { d.x = jp.x; d.y = jp.y; } // прыжок через портал — у зрителя мгновенный перенос
+                if (jp.tp) { d.x = jp.x; d.y = jp.y; portalTpAtRef.current = Date.now(); } // прыжок через портал — у зрителя мгновенный перенос
                 const spd = cps * CELL; // px/с — РОВНО скорость карты, как у самого игрока
                 const dv = rj.dir ? DIRV[rj.dir] : null;
                 rj.vx = rj.mv && dv ? dv[0] * spd : 0;
@@ -1134,6 +1149,9 @@ export default function GameScreen() {
           : [];
 
         // камера: в режиме мира — общий план (с ручным зумом), иначе — слежение за фишкой
+        /* РЕЖИМ КОМНАТ (АЙЗЕК): работает только при следящей камере; в RUBG не действует
+           (нужны общий план и фаза самолёта), при одной плитке смысла нет */
+        const roomsOn = !!(m.roomMode && m.plateSize) && m.mode !== 'rubg' && viewMode !== 'world' && !peekMap && plateMetrics(m).total > 1;
         let goal;
         if (viewMode === 'world' || peekMap) {
           const fv = fitView(m, w, h);
@@ -1172,6 +1190,33 @@ export default function GameScreen() {
               gx = vw >= fr.w ? fr.x + fr.w / 2 : Math.max(fr.x + vw / 2, Math.min(fr.x + fr.w - vw / 2, gx));
               gy = vh >= fr.h ? fr.y + fr.h / 2 : Math.max(fr.y + vh / 2, Math.min(fr.y + fr.h - vh / 2, gy));
             }
+          }
+          /* РЕЖИМ КОМНАТ (АЙЗЕК): центр кадра зажат в прямоугольник ТЕКУЩЕЙ ПЛИТКИ —
+             соседние комнаты не видны (за их пределами render.ts рисует темноту);
+             осмотр (lookPan/lookZoom) тоже остаётся внутри комнаты.
+             Смена комнаты — затемнение экрана + звук портала (переход ХОДЬБОЙ через
+             открытый стык; переход ЧЕРЕЗ ПОРТАЛ уже озвучен самим порталом). */
+          if (roomsOn) {
+            if (roomMapRef.current !== m) { roomMapRef.current = m; prevRoomRef.current = null; roomNumRef.current = null; setRoomNumUi(null); }
+            const pn = followP ? plateNumAt(m, followP.x, followP.y) : null;
+            if (pn) {
+              if (pn !== roomNumRef.current) {
+                if (prevRoomRef.current !== null && pn !== prevRoomRef.current) {
+                  setRoomFlashTs(Date.now());
+                  if (Date.now() - portalTpAtRef.current > 300) sfx.portal();
+                }
+                prevRoomRef.current = pn;
+              }
+              roomNumRef.current = pn;
+              setRoomNumUi((u) => (u === pn ? u : pn));
+              const pr = plateRectOf(m, pn);
+              const vw = w / (zx * lookZoomRef.current), vh = h / (zx * lookZoomRef.current);
+              gx = vw >= pr.w ? pr.x + pr.w / 2 : Math.max(pr.x + vw / 2, Math.min(pr.x + pr.w - vw / 2, gx));
+              gy = vh >= pr.h ? pr.y + pr.h / 2 : Math.max(pr.y + vh / 2, Math.min(pr.y + pr.h - vh / 2, gy));
+            }
+          } else {
+            roomNumRef.current = null;
+            prevRoomRef.current = null;
           }
           goal = {
             x: gx,
@@ -1255,6 +1300,8 @@ export default function GameScreen() {
           brokenAt: brokenAtRef.current,
           bossDown: sess.bossDown,
           bossFx,
+          /* РЕЖИМ КОМНАТ: темнота за пределами текущей плитки-комнаты */
+          room: roomsOn && roomNumRef.current ? plateRectOf(m, roomNumRef.current) : null,
         });
 
         /* RUBG: оверлей поверх поля — безопасная зона, самолёт, маркеры игры, радиус атаки,
@@ -1865,6 +1912,12 @@ export default function GameScreen() {
           if (!ft) return null;
           return <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal" title="Плиточный режим: каждая плитка — отдельная карта-локация; между ними — порталы">📍 ЛОКАЦИЯ {tileNumOf(tg, ft.id)}/{tg.tiles.length}</span>;
         })()}
+        {(() => {
+          /* РЕЖИМ КОМНАТ (АЙЗЕК): номер текущей плитки-комнаты — брат «ЛОКАЦИИ» плиточного режима */
+          if (!roomsOnUi || !map) return null;
+          const pm = plateMetrics(map);
+          return <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-sky" title="Режим комнат (Айзек): видна только текущая плитка; переходы — открытые стыки (ходьбой) и порталы">🧩 ПЛИТКА {roomNumUi ?? '—'}/{pm.total}</span>;
+        })()}
         {isSkill && s.phase === 'playing' && !s.mapless && (
           <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-gold" title="Лимит ходов хоста в SKILL CHALLENGE">
             ХОД {Math.min(s.turnNo ?? 1, SKILL_TURNS)}/{SKILL_TURNS}
@@ -1936,9 +1989,11 @@ export default function GameScreen() {
           <GhostBtn small onClick={() => { setInvOpen(true); sfx.click(); }}>
             {Ic.grid(12)} Инвентарь{invCount > 0 ? ` · ${invCount}` : ''}{incomingTrades.length > 0 ? ' 💼' : ''}
           </GhostBtn>
-          <GhostBtn small onClick={() => { setPeekMap(false); setWorldZoom(1); worldPanRef.current = { x: 0, y: 0 }; setViewMode((m) => (m === 'world' ? 'follow' : 'world')); }}>
-            {Ic.map(12)} {viewMode === 'world' ? 'К игроку' : 'Карта мира'}
-          </GhostBtn>
+          {!roomsOnUi && (
+            <GhostBtn small onClick={() => { setPeekMap(false); setWorldZoom(1); worldPanRef.current = { x: 0, y: 0 }; setViewMode((m) => (m === 'world' ? 'follow' : 'world')); }}>
+              {Ic.map(12)} {viewMode === 'world' ? 'К игроку' : 'Карта мира'}
+            </GhostBtn>
+          )}
           {room.isHost && (
             <GhostBtn small onClick={() => void saveSessionSnapshot(`${map.name} · ${new Date().toLocaleDateString('ru-RU')}`)}>
               {Ic.save(12)} Сохранить
@@ -1950,6 +2005,8 @@ export default function GameScreen() {
 
       {/* ---------- поле ---------- */}
       <div className="flex-1 relative min-h-0">
+        {/* РЕЖИМ КОМНАТ: короткое затемнение при смене комнаты (key = метка времени — анимация перезапускается) */}
+        {roomsOnUi && roomFlashTs > 0 && <div key={roomFlashTs} className="room-flash pointer-events-none absolute inset-0 z-10" />}
         <canvas
           ref={canvasRef}
           className="w-full h-full block"
@@ -2714,7 +2771,7 @@ export default function GameScreen() {
                   Хозяин ячейки: {ownerName} — потраченные ресурсы уйдут ему
                 </div>
               )}
-              <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
+              {!roomsOnUi && <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>}
               {myTurn && ch.status !== 'choose' && !controlsLocked && (
                 <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
               )}
@@ -3291,7 +3348,7 @@ export default function GameScreen() {
                       />
                       {myQTask.desc && <TaskDesc text={myQTask.desc} label="Задание" />}
                       <div className="tick-label text-faint">Ром: {qName} · {consoleLabel(qRomDef?.ext)}</div>
-                      <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
+                      {!roomsOnUi && <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>}
                       <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
                       <EmuVolumeChip />
                       <GhostBtn small onClick={rubgToggleFs}>{isFs ? Ic.cross(12) : Ic.map(12)} {isFs ? 'Свернуть' : 'Во весь экран'}</GhostBtn>
@@ -3402,7 +3459,7 @@ export default function GameScreen() {
                     />
                     {myRubgTask.desc && <TaskDesc text={myRubgTask.desc} label="Задание" />}
                     <div className="tick-label text-faint">Ром: {rName} · {consoleLabel(rRomDef?.ext)}</div>
-                    <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
+                    {!roomsOnUi && <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>}
                     <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
                     <EmuVolumeChip />
                     <GhostBtn small onClick={rubgToggleFs}>{isFs ? Ic.cross(12) : Ic.map(12)} {isFs ? 'Свернуть' : 'Во весь экран'}</GhostBtn>

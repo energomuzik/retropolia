@@ -3113,7 +3113,7 @@ export default function MapEditor() {
                   title={platesOpen ? 'Свернуть' : 'Развернуть'}
                 >
                   <span className={`text-[10px] shrink-0 ${platesOpen ? 'text-gold' : 'text-faint'}`}>{platesOpen ? '▾' : '▸'}</span>
-                  <span className="tick-label">Плитки и порталы · {(map.portals ?? []).length}{map.plateSize ? ` · ${platesX}×${platesY}` : ''}</span>
+                  <span className="tick-label">Плитки и порталы · {(map.portals ?? []).length}{map.plateSize ? ` · ${platesX}×${platesY}` : ''}{map.roomMode ? ' · 🔒 комнаты' : ''}</span>
                 </button>
                 {platesOpen && (
                   <div className="space-y-1.5">
@@ -3154,6 +3154,14 @@ export default function MapEditor() {
                             })}
                           </div>
                           {plateBgCount > 0 && <p className="text-[9px] text-sky mt-1 leading-tight"><span className="inline-block w-1.5 h-1.5 bg-sky align-middle mr-0.5" /> — у плитки свой фон ({plateBgCount} шт.)</p>}
+                        </div>
+                        {/* РЕЖИМ КОМНАТ (АЙЗЕК): в игре видна только текущая плитка */}
+                        <div className="border-t-2 border-edge pt-1.5">
+                          <button
+                            onClick={() => { updMap({ roomMode: !map.roomMode }); sfx.click(); }}
+                            className={`w-full px-2 py-1.5 text-[9px] font-pixel border-2 cursor-pointer ${map.roomMode ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}
+                          >{map.roomMode ? '🔒 РЕЖИМ КОМНАТ (АЙЗЕК): ВКЛЮЧЁН — нажми, чтобы выключить' : '🔓 Режим комнат (Айзек): выключен — нажми, чтобы включить'}</button>
+                          <p className="text-[9px] text-faint leading-tight mt-1">В игре видна ТОЛЬКО текущая плитка-комната — вокруг темнота; камера и осмотр зажаты в комнате; кнопки «Карта мира» и «Глянуть карту мира» скрыты; в HUD — бейдж «ПЛИТКА n/N». Переходы задаёшь ты: ОТКРЫТЫЙ стык плиток — переход ходьбой (как в Айзеке); стык со СТЕНОЙ — только портал (метроидвания: стены можно снимать квестами NPC). При смене комнаты — затемнение и звук. В RUBG режим не действует.</p>
                         </div>
                         <PxBtn color="coral" small className="w-full" onClick={disablePlates}>Убрать разбивку (одно поле)</PxBtn>
                       </>

@@ -259,3 +259,16 @@ input[type="range"] { accent-color: var(--color-gold); }
 @media (prefers-reduced-motion: reduce) {
   .crt-scanlines, .starfield, .floaty, .marquee-x { animation: none; }
 }
+
+/* ---------- РЕЖИМ КОМНАТ (АЙЗЕК): короткое затемнение экрана при смене комнаты ----------
+   key = метка времени смены — элемент перемонтируется, анимация перезапускается каждый раз */
+.room-flash {
+  background: #04050c;
+  opacity: 0;
+  animation: roomFlash 0.6s ease-out forwards;
+}
+@keyframes roomFlash {
+  0% { opacity: 0.92; }
+  55% { opacity: 0.35; }
+  100% { opacity: 0; }
+}

@@ -258,6 +258,31 @@ export function fitView(map: GameMap, w: number, h: number) {
   return { x: b.w / 2, y: b.h / 2, zoom: Math.max(0.08, zoom) }; // 0.08 — большие карты (до 16384px) влезают целиком
 }
 
+/* ---------- РЕЖИМ КОМНАТ (АЙЗЕК): геометрия плиток-комнат ----------
+   Номер плитки = как в навигаторе редактора: с 1, слева направо, сверху вниз.
+   Краевые плитки могут быть НЕПОЛНЫМИ (поле не кратно стороне плитки) —
+   прямоугольник комнаты обрезается по краю поля. */
+export function plateMetrics(map: GameMap) {
+  const b = mapSize(map);
+  const ps = map.plateSize ?? 0;
+  const cols = Math.max(1, Math.ceil(b.w / ps));
+  const rows = Math.max(1, Math.ceil(b.h / ps));
+  return { ps, cols, rows, total: cols * rows };
+}
+export function plateRectOf(map: GameMap, num: number) {
+  const { ps, cols } = plateMetrics(map);
+  const b = mapSize(map);
+  const r = Math.floor((num - 1) / cols), c = (num - 1) % cols;
+  const x = c * ps, y = r * ps;
+  return { x, y, w: Math.min(ps, b.w - x), h: Math.min(ps, b.h - y) };
+}
+export function plateNumAt(map: GameMap, x: number, y: number): number | null {
+  const { ps, cols, rows } = plateMetrics(map);
+  const c = Math.floor(x / ps), r = Math.floor(y / ps);
+  if (c < 0 || r < 0 || c >= cols || r >= rows) return null;
+  return r * cols + c + 1;
+}
+
 export interface TokenDraw {
   x: number; y: number;
   color: string;
@@ -294,6 +319,10 @@ export interface BoardDrawOpts {
   bossFx?: Record<string, { frames: string[]; fps: number; start: number }>;
   /* QUEST: NPC на карте — рисуются с клипом done, если ВСЕ их квесты сданы ЭТИМ игроком (done считает клиент) */
   npcs?: { npc: PlacedNpc; def: NpcLibEntry; done: boolean }[];
+  /* РЕЖИМ КОМНАТ (АЙЗЕК): прямоугольник текущей плитки-комнаты (px поля).
+   Передаётся только из игры при включённом roomMode; в редакторе не передаётся.
+   Всё за пределами прямоугольника скрывается темнотой + светящаяся граница комнаты. */
+  room?: { x: number; y: number; w: number; h: number } | null;
 }
 
 function px(ctx: CanvasRenderingContext2D, x: number, y: number, s: number, pattern: string[], color: string) {
@@ -1093,6 +1122,26 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.fillRect(-1, -18, 2, 6);
       ctx.fillRect(-3, -21, 6, 4);
     }
+    ctx.restore();
+  }
+
+  /* РЕЖИМ КОМНАТ (АЙЗЕК): в игре видна ТОЛЬКО текущая плитка-комната — всё за её
+     пределами (соседние плитки, края поля, подложка) скрывается ТЕМНОТОЙ; по периметру
+     комнаты — мягкая сиреневая граница (видно, где кончается комната и где стык/стена).
+     Маска ставится ПОСЛЕДНИМ слоем мира — накрывает тайлы, ячейки, NPC и фишки. */
+  if (o.room) {
+    const rm = o.room;
+    const vwW = width / view.zoom, vwH = height / view.zoom; // видимый прямоугольник мира
+    const vx0 = view.x - vwW / 2 - 2, vy0 = view.y - vwH / 2 - 2;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(vx0, vy0, vwW + 4, vwH + 4); // внешняя область = весь экран
+    ctx.rect(rm.x, rm.y, rm.w, rm.h);     // вырез = комната (even-odd)
+    ctx.fillStyle = 'rgba(3,4,9,0.97)';
+    ctx.fill('evenodd');
+    ctx.strokeStyle = 'rgba(167,139,250,0.5)';
+    ctx.lineWidth = 2.5 / Math.max(0.05, view.zoom);
+    ctx.strokeRect(rm.x, rm.y, rm.w, rm.h);
     ctx.restore();
   }
 
