@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode, type ButtonHTMLAttributes } from 'react';
 import { sfx } from './sound';
 import { useApp } from './store';
+import { coinsSplit, coinsStr } from './types';
 
 /* ---------- пиксельные иконки (inline SVG) ---------- */
 
@@ -652,5 +653,75 @@ export function EmuVolumeChip({ className }: { className?: string }) {
       </div>
       <div className="tick-label text-faint mt-1">ЗВУК ЭМУЛЯТОРА · {Math.round(shown * 100)}%</div>
     </div>
+  );
+}
+
+/* ---------- МОНЕТЫ: цветные пиксельные иконки (v0.46.0) ----------
+   Вместо букв «бр»/«5Б» капитал рисуется ИКОНКАМИ монет по ступеням:
+   платина / золото / серебро / бронза (цвета свои, не currentColor). */
+
+export type CoinTier = 'pl' | 'go' | 'si' | 'cu';
+
+const COIN_COLORS: Record<CoinTier, { lo: string; mid: string; hi: string }> = {
+  pl: { lo: '#5c7186', mid: '#b9c9da', hi: '#f2f8ff' }, // платина
+  go: { lo: '#a06a08', mid: '#ffcf3f', hi: '#fff3b0' }, // золото
+  si: { lo: '#6f7b8c', mid: '#c3ccd9', hi: '#f7fafd' }, // серебро
+  cu: { lo: '#8a4a1e', mid: '#e8975a', hi: '#ffd9ae' }, // бронза (медь)
+};
+
+/* Пиксельная монета 8×8: тёмный обод (1), лицевая сторона (2), блик (3),
+   вертикальная метка в центре (1) — читается как монета даже в 10 px. */
+const COIN_PIX = [
+  '..1111..',
+  '.133221.',
+  '12211221',
+  '12211221',
+  '12211221',
+  '12211221',
+  '.122221.',
+  '..1111..',
+];
+
+/** Цветная пиксельная монета ступени: <Coin tier="go" size={12}/> */
+export function Coin({ tier = 'cu', size = 12, className }: { tier?: CoinTier; size?: number; className?: string }) {
+  const c = COIN_COLORS[tier];
+  return (
+    <svg viewBox="0 0 8 8" width={size} height={size} className={`inline-block align-[-1px] shrink-0 ${className ?? ''}`} shapeRendering="crispEdges" aria-hidden>
+      {COIN_PIX.flatMap((row, y) =>
+        [...row].map((ch, x) =>
+          ch === '.' ? null : (
+            <rect
+              key={`${x}-${y}`}
+              x={x}
+              y={y}
+              width={1.02}
+              height={1.02}
+              fill={ch === '1' ? c.lo : ch === '2' ? c.mid : c.hi}
+            />
+          ),
+        ),
+      )}
+    </svg>
+  );
+}
+
+/** Капитал ИКОНКАМИ по ненулевым ступеням: [иконка]2 [иконка]42 [иконка]5.
+   Нулевой капитал — одна бронзовая иконка с «0». title — полная сумма текстом. */
+export function CoinRow({ value, size = 11, className }: { value: number; size?: number; className?: string }) {
+  const { pl, go, si, br } = coinsSplit(value);
+  const parts: { t: CoinTier; n: number }[] = [];
+  if (pl) parts.push({ t: 'pl', n: pl });
+  if (go) parts.push({ t: 'go', n: go });
+  if (si) parts.push({ t: 'si', n: si });
+  if (br || parts.length === 0) parts.push({ t: 'cu', n: br });
+  return (
+    <span className={`inline-flex items-center gap-1 align-middle ${className ?? ''}`} title={`Монеты: ${coinsStr(value)}`}>
+      {parts.map((p) => (
+        <span key={p.t} className="inline-flex items-center gap-0.5">
+          <Coin tier={p.t} size={size} />
+          <span className="tabular-nums">{p.n}</span>
+        </span>
+      ))}
+    </span>
   );
 }

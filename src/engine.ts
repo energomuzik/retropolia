@@ -357,6 +357,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   const questGoalsDone = (p: PlayerState, g: QuestGoal): boolean => {
     switch (g.kind) {
       case 'boss': return !!g.bossId && (s.qBossDown?.[p.id] ?? []).includes(g.bossId);
+      case 'bosses': return (s.qBossDown?.[p.id] ?? []).length >= Math.max(1, Math.floor(g.count ?? 1)); // ЛЮБЫЕ N боссов
       case 'tasks': return (s.qDone?.[p.id] ?? []).length >= Math.max(1, Math.floor(g.count ?? 1));
       case 'coins': return (p.coinsLeft ?? 0) >= Math.max(1, Math.floor(g.count ?? 1));
       case 'hp': return (p.hp ?? RUBG_HP_MAX) >= Math.max(1, Math.floor(g.count ?? 1));

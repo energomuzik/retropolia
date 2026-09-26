@@ -14,8 +14,8 @@ import {
 } from '../input';
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
-import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
-import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, isQuestMode, isSoloMode, questGoalText, tileAt, tileRectOf, tileNumOf, coinsShort, coinsStr, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS } from '../types';
+import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper, Coin, CoinRow } from '../ui';
+import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, isQuestMode, isSoloMode, questGoalText, tileAt, tileRectOf, tileNumOf, coinsStr, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS } from '../types';
 import type { AnimClip, CardDef, ChaosKind, GameMap, GameSession, NpcLibEntry, NpcShopOffer, PlacedNpc, PortalZone, PlayerState, QuestGoal, TaskDef, TokenDir, RubgItem } from '../types';
 import Randomizer from './Randomizer';
 import { idbGet } from '../db';
@@ -35,6 +35,7 @@ const questGoalDoneFor = (sess: GameSession, p: PlayerState, g: QuestGoal | unde
   if (!g || g.kind === 'none') return false;
   switch (g.kind) {
     case 'boss': return !!g.bossId && (sess.qBossDown?.[p.id] ?? []).includes(g.bossId);
+    case 'bosses': return (sess.qBossDown?.[p.id] ?? []).length >= Math.max(1, Math.floor(g.count ?? 1));
     case 'tasks': return (sess.qDone?.[p.id] ?? []).length >= Math.max(1, Math.floor(g.count ?? 1));
     case 'coins': return (p.coinsLeft ?? 0) >= Math.max(1, Math.floor(g.count ?? 1));
     case 'hp': return (p.hp ?? RUBG_HP_MAX) >= Math.max(1, Math.floor(g.count ?? 1));
@@ -1899,14 +1900,14 @@ export default function GameScreen() {
                     </>
                   ) : coinsRes ? (
                     <>
-                      <span className="text-teal" title={`Монеты: ${coinsStr(p.coinsLeft ?? 0)}`}>🪙 {coinsShort(p.coinsLeft ?? 0)}</span>
+                      <span className="text-teal"><CoinRow value={p.coinsLeft ?? 0} size={11} /></span>
                       <span>№{p.pos + 1}</span>
                     </>
                   ) : (
                     <>
                       <span className="text-sky">{fmtClock(p.secLeft)}</span>
                       <span className="text-gold">{p.triesLeft} поп.</span>
-                      {coinsActive && <span className="text-teal" title={`Монеты: ${coinsStr(p.coinsLeft ?? 0)}`}>🪙 {coinsShort(p.coinsLeft ?? 0)}</span>}
+                      {coinsActive && <span className="text-teal"><CoinRow value={p.coinsLeft ?? 0} size={11} /></span>}
                       <span>№{p.pos + 1}</span>
                     </>
                   )}
@@ -2035,12 +2036,12 @@ export default function GameScreen() {
                     {hpRes ? (
                       <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-coral">❤ HP {Math.round(hostP.hp ?? 100)}%</span>
                     ) : coinsRes ? (
-                      <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-teal">🪙 {coinsStr(hostP.coinsLeft ?? 0)}</span>
+                      <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-teal"><CoinRow value={hostP.coinsLeft ?? 0} size={12} /></span>
                     ) : (
                       <>
                         <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-sky">⏱ {fmtClock(hostP.secLeft)}</span>
                         <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-gold">🎯 {hostP.triesLeft} ПОП.</span>
-                        {coinsActive && <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-teal">🪙 {coinsStr(hostP.coinsLeft ?? 0)}</span>}
+                        {coinsActive && <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-teal"><CoinRow value={hostP.coinsLeft ?? 0} size={12} /></span>}
                       </>
                     )}
                     {!hostP.alive && <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-coral">{hpRes ? 'ПОЛОСКА HP НА НУЛЕ' : 'РЕСУРСЫ ИСЧЕРПАНЫ'}</span>}
@@ -2750,17 +2751,17 @@ export default function GameScreen() {
                             onClick={() => { sfx.coin(); dispatch({ t: 'chooseMode', id: me, mode: 'coins' }); }}
                             className="pixel-panel pixel-corners p-4 text-left hover:border-teal hover:-translate-y-0.5 transition-all cursor-pointer group"
                           >
-                            <span className="text-teal">🪙</span>
+                            <span className="text-teal"><Coin size={20} /></span>
                             <div className="font-display uppercase text-paper group-hover:text-teal mt-2">Монеты</div>
-                            <div className="font-pixel text-[10px] text-teal mt-1">{coinsShort(mePlayer?.coinsLeft ?? 0)}</div>
-                            <div className="text-[10px] text-dim mt-1.5">Во время игры ничего не тратится: победа +{map.taskWinCoins ?? 0} бр · пропуск {map.skipCoins ?? 5} бр.</div>
+                            <div className="font-pixel text-[10px] text-teal mt-1"><CoinRow value={mePlayer?.coinsLeft ?? 0} size={11} /></div>
+                            <div className="text-[10px] text-dim mt-1.5">Во время игры ничего не тратится: победа +{map.taskWinCoins ?? 0}<Coin size={9} /> · пропуск {map.skipCoins ?? 5}<Coin size={9} />.</div>
                           </button>
                         )}
                       </div>
                       <div className="mt-3 flex justify-end gap-2 flex-wrap">
                         {coinsActive && (
                           <GhostBtn onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'coins', spentMs: 0, loads: 0 })} disabled={(mePlayer?.coinsLeft ?? 0) > 0 && (mePlayer?.coinsLeft ?? 0) < skipCoinsNeed}>
-                            {Ic.bolt(12)} Сразу пропустить · {skipCoinsNeed} бр
+                            {Ic.bolt(12)} Сразу пропустить · {skipCoinsNeed}<Coin size={10} />
                           </GhostBtn>
                         )}
                         {!coinsOnly && (
@@ -2790,7 +2791,7 @@ export default function GameScreen() {
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className={`hud-chip pixel-corners px-3 py-1.5 font-display text-[11px] uppercase flex items-center gap-1.5 ${ch.mode === 'time' ? 'text-sky' : ch.mode === 'coins' ? 'text-teal' : ch.mode === 'hp' ? 'text-coral' : 'text-gold'}`}>
-                      {ch.mode === 'time' ? Ic.clock(13) : ch.mode === 'coins' ? <span>🪙</span> : ch.mode === 'hp' ? <span>❤</span> : Ic.target(13)} {ch.mode === 'time' ? 'Режим времени' : ch.mode === 'coins' ? 'Монетная игра' : ch.mode === 'hp' ? 'Ресурс: полоска HP' : 'Режим попыток'}
+                      {ch.mode === 'time' ? Ic.clock(13) : ch.mode === 'coins' ? <Coin size={13} /> : ch.mode === 'hp' ? <span>❤</span> : Ic.target(13)} {ch.mode === 'time' ? 'Режим времени' : ch.mode === 'coins' ? 'Монетная игра' : ch.mode === 'hp' ? 'Ресурс: полоска HP' : 'Режим попыток'}
                     </span>
                     {ch.mode === 'hp' && (
                       <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-coral" title="HP-режим: плата по итогам — перезапуски бесплатны">
@@ -2799,7 +2800,7 @@ export default function GameScreen() {
                     )}
                     {ch.mode === 'coins' && (
                       <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-teal" title="Монеты платятся по итогам: победа — награда, пропуск — цена">
-                        🪙 {coinsShort(mePlayer?.coinsLeft ?? 0)} · победа +{map.taskWinCoins ?? 0} бр · пропуск {map.skipCoins ?? 5} бр · перезапуски бесплатны
+                        <CoinRow value={mePlayer?.coinsLeft ?? 0} size={11} /> · победа +{map.taskWinCoins ?? 0}<Coin size={9} /> · пропуск {map.skipCoins ?? 5}<Coin size={9} /> · перезапуски бесплатны
                       </span>
                     )}
                     {info && ch.mode === 'time' && (
@@ -2908,7 +2909,7 @@ export default function GameScreen() {
                           </PxBtn>
                           {ch.mode === 'coins' ? (
                             <p className="text-[10px] text-dim leading-tight">
-                              Эмулятор загружен и ждёт. Монетная игра: во время задания ничего не списывается — победа принесёт {map.taskWinCoins ?? 0} бр, пропуск обойдётся в {map.skipCoins ?? 5} бр. Перезапуски бесплатны и бесконечны.
+                              Эмулятор загружен и ждёт. Монетная игра: во время задания ничего не списывается — победа принесёт {map.taskWinCoins ?? 0}<Coin size={9} />, пропуск обойдётся в {map.skipCoins ?? 5}<Coin size={9} />. Перезапуски бесплатны и бесконечны.
                             </p>
                           ) : ch.mode === 'hp' ? (
                             <p className="text-[10px] text-dim leading-tight">
@@ -2926,7 +2927,7 @@ export default function GameScreen() {
                               title={(mePlayer?.coinsLeft ?? 0) > 0 && (mePlayer?.coinsLeft ?? 0) < skipCoinsNeed ? 'Монет не хватает на плату за пропуск — играйте и побеждайте' : undefined}
                               onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'coins', spentMs: 0, loads: 0 })}
                             >
-                              {Ic.bolt(13)} Пропустить · {skipCoinsNeed} бр
+                              {Ic.bolt(13)} Пропустить · {skipCoinsNeed}<Coin size={10} />
                             </GhostBtn>
                           ) : ch.mode === 'hp' ? (
                             <GhostBtn
@@ -2978,7 +2979,7 @@ export default function GameScreen() {
                               title={(mePlayer?.coinsLeft ?? 0) > 0 && (mePlayer?.coinsLeft ?? 0) < skipCoinsNeed ? 'Монет не хватает на плату за пропуск — играйте и побеждайте' : undefined}
                               onClick={() => dispatch({ t: 'skip', id: me, instant: true, resource: 'coins', spentMs: 0, loads: 0 })}
                             >
-                              {Ic.bolt(13)} Пропустить · {skipCoinsNeed} бр
+                              {Ic.bolt(13)} Пропустить · {skipCoinsNeed}<Coin size={10} />
                             </GhostBtn>
                           ) : ch.mode === 'hp' ? (
                             <GhostBtn
@@ -3168,7 +3169,7 @@ export default function GameScreen() {
                   <div className="space-y-1.5 border-2 border-[#ffcf3f]/50 px-2.5 py-2">
                     <div className="flex items-center justify-between gap-2">
                       <div className="tick-label text-gold">🛒 Торговля</div>
-                      <div className="tick-label text-teal" title={coinsStr(balance)}>🪙 {coinsShort(balance)}</div>
+                      <div className="tick-label text-teal"><CoinRow value={balance} size={11} /></div>
                     </div>
                     {(dlgNpc.npc.shop ?? []).map((off) => {
                       const price = Math.max(0, Math.floor(off.price || 0));
@@ -3177,7 +3178,7 @@ export default function GameScreen() {
                         <div key={off.id} className="flex items-center gap-2 justify-between">
                           <div className="min-w-0">
                             <div className="font-display text-[11px] uppercase truncate text-paper">{shopOfferLabel(off)}</div>
-                            <div className="tick-label text-faint truncate">{price > 0 ? `цена: ${coinsShort(price)} монет` : 'бесплатно'}</div>
+                            <div className="tick-label text-faint truncate">{price > 0 ? <span className="inline-flex items-center gap-0.5">цена: <CoinRow value={price} size={10} /></span> : 'бесплатно'}</div>
                           </div>
                           <PxBtn
                             small
@@ -3220,7 +3221,7 @@ export default function GameScreen() {
                     <span className="text-[12px] text-paper">▸ {o.text || '…'}</span>
                     {o.give && (o.give.coins || o.give.min || o.give.tries) ? (
                       <span className="ml-1.5 text-[10px] text-gold">
-                        [награда: {o.give.coins ? `+${o.give.coins} бр ` : ''}{o.give.min ? `+${o.give.min} мин ` : ''}{o.give.tries ? `+${o.give.tries} поп.` : ''}]
+                        [награда: {o.give.coins ? <span>+{o.give.coins}<Coin size={9} /> </span> : ''}{o.give.min ? `+${o.give.min} мин ` : ''}{o.give.tries ? `+${o.give.tries} поп.` : ''}]
                       </span>
                     ) : null}
                   </button>

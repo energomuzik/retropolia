@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../store';
-import { AnimPreview, GhostBtn, Ic, PxBtn, Stepper } from '../ui';
+import { AnimPreview, GhostBtn, Ic, PxBtn, Stepper, Coin } from '../ui';
+import { DialogTreeEditor } from './DialogTreeEditor';
 import { idbPut, uid } from '../db';
-import type { DialogNode, DialogOption, GameMap, MapEnding, NpcLibEntry, NpcQuest, NpcShopOffer, PlacedNpc, QuestGoalKind, RubgItemKind } from '../types';
+import type { GameMap, MapEnding, NpcLibEntry, NpcQuest, NpcShopOffer, PlacedNpc, QuestGoalKind, RubgItemKind } from '../types';
 import { isQuestMode, questGoalText, RUBG_ITEMS } from '../types';
 import { HoldDeleteButton } from '../delGuard';
 import { sfx } from '../sound';
@@ -38,18 +39,6 @@ export default function QuestEditor() {
   const updNpc = (idx: number, patch: Partial<PlacedNpc>) => {
     dirtyRef.current = true;
     setMap((m) => (m ? { ...m, npcs: (m.npcs ?? []).map((n, i) => (i === idx ? { ...n, ...patch } : n)) } : m));
-  };
-  const updDialog = (idx: number, patch: Partial<NonNullable<PlacedNpc['dialog']>>) =>
-    updNpc(idx, { dialog: { ...(map?.npcs?.[idx].dialog ?? { root: '', nodes: [] }), ...patch } });
-  const updNode = (idx: number, nid: string, patch: Partial<DialogNode>) => {
-    const d = map?.npcs?.[idx].dialog;
-    if (!d) return;
-    updNpc(idx, { dialog: { ...d, nodes: d.nodes.map((n) => (n.id === nid ? { ...n, ...patch } : n)) } });
-  };
-  const updOpt = (idx: number, nid: string, oi: number, patch: Partial<DialogOption>) => {
-    const d = map?.npcs?.[idx].dialog;
-    if (!d) return;
-    updNpc(idx, { dialog: { ...d, nodes: d.nodes.map((n) => (n.id === nid ? { ...n, opts: (n.opts ?? []).map((o, k) => (k === oi ? { ...o, ...patch } : o)) } : n)) } });
   };
   const updQuest = (idx: number, qid: string, patch: Partial<NpcQuest>) => {
     const n = map?.npcs?.[idx];
@@ -231,7 +220,7 @@ export default function QuestEditor() {
                     </div>
                   </div>
 
-                  {/* ---------- ДЕРЕВО ДИАЛОГОВ ---------- */}
+                  {/* ---------- ДЕРЕВО ДИАЛОГОВ (общий редактор v0.46.0) ---------- */}
                   <div className="border-2 border-edge px-2 py-2 space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="tick-label text-gold">💬 Дерево диалогов</span>
@@ -245,87 +234,15 @@ export default function QuestEditor() {
                     </div>
                     {!selNpc.dialog ? (
                       <button
-                        onClick={() => { const nid = uid('dn'); updNpc(selIdx, { dialog: { root: nid, nodes: [{ id: nid, text: 'Приветствую, путник…', opts: [] }] } }); sfx.coin(); }}
+                        onClick={() => { const nid = uid('dn'); updNpc(selIdx, { dialog: { root: nid, nodes: [{ id: nid, text: 'Приветствую, путник…', opts: [{ text: '' }] }] } }); sfx.coin(); }}
                         className="w-full py-1.5 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
                       >+ Создать диалог</button>
                     ) : (
-                      <>
-                        <div className="flex items-center gap-1.5">
-                          <span className="tick-label text-faint shrink-0">Старт:</span>
-                          <select
-                            className="field-in flex-1 min-w-0 px-1.5 py-1 text-[10px]"
-                            value={selNpc.dialog.root}
-                            onChange={(ev) => updDialog(selIdx, { root: ev.target.value })}
-                          >
-                            {selNpc.dialog.nodes.map((n) => (
-                              <option key={n.id} value={n.id}>{(n.text || '(пусто)').slice(0, 30)}</option>
-                            ))}
-                          </select>
-                        </div>
-                        {selNpc.dialog.nodes.map((nd) => (
-                          <div key={nd.id} className="border-2 border-edge px-2 py-1.5 space-y-1.5">
-                            <div className="flex items-center justify-between">
-                              <span className="tick-label text-faint">Узел {nd.id.slice(-4)}{selNpc.dialog!.root === nd.id ? ' · СТАРТ' : ''}</span>
-                              {selNpc.dialog!.nodes.length > 1 && (
-                                <button
-                                  onClick={() => { const d = selNpc.dialog!; const nodes = d.nodes.filter((x) => x.id !== nd.id); updNpc(selIdx, { dialog: { root: d.root === nd.id ? nodes[0].id : d.root, nodes } }); sfx.fail(); }}
-                                  className="text-[10px] text-faint hover:text-coral cursor-pointer"
-                                >удалить</button>
-                              )}
-                            </div>
-                            <textarea
-                              className="field-in w-full px-2 py-1 text-[11px] min-h-[42px]"
-                              maxLength={280}
-                              placeholder="Реплика NPC…"
-                              value={nd.text}
-                              onChange={(ev) => updNode(selIdx, nd.id, { text: ev.target.value })}
-                            />
-                            {(nd.opts ?? []).map((o, oi) => (
-                              <div key={oi} className="border-2 border-edge px-1.5 py-1.5 space-y-1 bg-[rgba(7,9,18,0.5)]">
-                                <div className="flex items-center gap-1">
-                                  <span className="tick-label text-faint shrink-0">{oi + 1}.</span>
-                                  <input className="field-in flex-1 min-w-0 px-1.5 py-1 text-[11px]" maxLength={80} placeholder="Ответ игрока…" value={o.text} onChange={(ev) => updOpt(selIdx, nd.id, oi, { text: ev.target.value })} />
-                                  <button onClick={() => { updNode(selIdx, nd.id, { opts: (nd.opts ?? []).filter((_, k) => k !== oi) }); sfx.fail(); }} className="text-faint hover:text-coral cursor-pointer px-0.5 text-[10px]">✕</button>
-                                </div>
-                                <div className="flex items-center gap-1 flex-wrap">
-                                  <span className="tick-label text-faint shrink-0">Далее:</span>
-                                  <select className="field-in px-1 py-1 text-[10px] flex-1 min-w-[120px]" value={o.next ?? ''} onChange={(ev) => updOpt(selIdx, nd.id, oi, { next: ev.target.value || undefined })}>
-                                    <option value="">— конец диалога —</option>
-                                    {selNpc.dialog!.nodes.filter((x) => x.id !== nd.id).map((x) => (
-                                      <option key={x.id} value={x.id}>{(x.text || '(пусто)').slice(0, 24)}</option>
-                                    ))}
-                                  </select>
-                                </div>
-                                <div className="flex items-center gap-1 flex-wrap">
-                                  <span className="tick-label text-faint shrink-0">Концовка:</span>
-                                  <select className="field-in px-1 py-1 text-[10px] flex-1 min-w-[120px]" value={o.ending ?? ''} onChange={(ev) => updOpt(selIdx, nd.id, oi, { ending: ev.target.value || undefined })}>
-                                    <option value="">— нет —</option>
-                                    {(map.endings ?? []).map((e) => <option key={e.id} value={e.id}>{e.name || '(без названия)'}</option>)}
-                                  </select>
-                                </div>
-                                <div className="grid grid-cols-3 gap-1">
-                                  <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: бронза (монетный режим)">🪙<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={o.give?.coins ?? 0} onChange={(ev) => updOpt(selIdx, nd.id, oi, { give: { ...o.give, coins: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
-                                  <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: минуты">⏱<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={o.give?.min ?? 0} onChange={(ev) => updOpt(selIdx, nd.id, oi, { give: { ...o.give, min: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
-                                  <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: попытки">🎯<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={o.give?.tries ?? 0} onChange={(ev) => updOpt(selIdx, nd.id, oi, { give: { ...o.give, tries: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
-                                </div>
-                                <div className="flex items-center gap-1 flex-wrap">
-                                  <input className="field-in w-[86px] px-1 py-0.5 text-[9px]" placeholder="ставит флаг" value={o.setFlag ?? ''} onChange={(ev) => updOpt(selIdx, nd.id, oi, { setFlag: ev.target.value.trim() || undefined })} title="Флаг ставится игроку при выборе (влияет на другие ветки)" />
-                                  <input className="field-in w-[86px] px-1 py-0.5 text-[9px]" placeholder="нужен флаг" value={o.reqFlag ?? ''} onChange={(ev) => updOpt(selIdx, nd.id, oi, { reqFlag: ev.target.value.trim() || undefined })} title="Вариант виден ТОЛЬКО если флаг стоит" />
-                                  <input className="field-in w-[86px] px-1 py-0.5 text-[9px]" placeholder="без флага" value={o.reqNotFlag ?? ''} onChange={(ev) => updOpt(selIdx, nd.id, oi, { reqNotFlag: ev.target.value.trim() || undefined })} title="Вариант виден ТОЛЬКО если флага НЕТ" />
-                                </div>
-                              </div>
-                            ))}
-                            <button
-                              onClick={() => { updNode(selIdx, nd.id, { opts: [...(nd.opts ?? []), { text: '' }] }); sfx.coin(); }}
-                              className="w-full py-1 border-2 border-dashed border-edge text-faint font-pixel text-[8px] uppercase hover:text-paper cursor-pointer"
-                            >+ вариант ответа</button>
-                          </div>
-                        ))}
-                        <button
-                          onClick={() => { const nid = uid('dn'); updDialog(selIdx, { nodes: [...selNpc.dialog!.nodes, { id: nid, text: '', opts: [] }] }); sfx.coin(); }}
-                          className="w-full py-1 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
-                        >+ узел диалога</button>
-                      </>
+                      <DialogTreeEditor
+                        dialog={selNpc.dialog}
+                        endings={map.endings ?? []}
+                        onChange={(d) => updNpc(selIdx, { dialog: d })}
+                      />
                     )}
                   </div>
 
@@ -344,14 +261,14 @@ export default function QuestEditor() {
                           <select
                             className="field-in px-1 py-1 text-[10px]"
                             value={q.goal.kind}
-                            onChange={(ev) => { const k = ev.target.value as QuestGoalKind; updQuest(selIdx, q.id, { goal: k === 'deliver' ? { kind: k, res: 'coins', count: 500 } : { kind: k, count: k === 'tasks' ? 3 : k === 'coins' ? 500 : k === 'hp' ? 100 : k === 'time' ? 900 : 10, bossId: (map.bosses ?? [])[0]?.id } }); }}
+                            onChange={(ev) => { const k = ev.target.value as QuestGoalKind; updQuest(selIdx, q.id, { goal: k === 'deliver' ? { kind: k, res: 'coins', count: 500 } : { kind: k, count: k === 'tasks' ? 3 : k === 'bosses' ? 1 : k === 'coins' ? 500 : k === 'hp' ? 100 : k === 'time' ? 900 : 10, bossId: (map.bosses ?? [])[0]?.id } }); }}
                           >
-                            <option value="none">без условия</option>
-                            <option value="boss">победить босса</option>
+                            <option value="boss">победить босса (конкретного)</option>
+                            <option value="bosses">победить N боссов (любых)</option>
                             <option value="tasks">победить N заданий</option>
                             <option value="coins">собрать монет</option>
                             <option value="hp">иметь HP %</option>
-                            <option value="time">запас времени, сек</option>
+                            <option value="time">запас времени, мин</option>
                             <option value="tries">запас попыток</option>
                             <option value="deliver">принести/отдать ресурсы</option>
                           </select>
@@ -372,13 +289,25 @@ export default function QuestEditor() {
                               <option value="hp">HP %</option>
                             </select>
                           )}
-                          {q.goal.kind !== 'boss' && q.goal.kind !== 'none' && (
+                          {q.goal.kind !== 'boss' && q.goal.kind !== 'none' && ((q.goal.kind === 'time' || (q.goal.kind === 'deliver' && (q.goal.res ?? 'coins') === 'time')) ? (
+                            /* ВРЕМЯ — счётчик в МИНУТАХ (в данных по-прежнему секунды) */
+                            <Stepper value={Math.max(1, Math.round((q.goal.count ?? 60) / 60))} onChange={(v) => updQuest(selIdx, q.id, { goal: { ...q.goal, count: Math.max(1, v) * 60 } })} min={1} max={180} step={1} suffix=" мин" />
+                          ) : (
                             <Stepper value={q.goal.count ?? 1} onChange={(v) => updQuest(selIdx, q.id, { goal: { ...q.goal, count: v } })} min={1} max={99999} step={q.goal.kind === 'coins' || (q.goal.kind === 'deliver' && (q.goal.res ?? 'coins') === 'coins') ? 25 : 1} />
-                          )}
+                          ))}
                         </div>
                         <p className="text-[9px] text-teal leading-tight">{questGoalText(q.goal, map)}{q.goal.kind === 'deliver' ? ' — при сдаче ресурс УЙДЁТ NPC из капитала игрока' : ''}</p>
+                        {q.goal.kind === 'boss' && (map.bosses ?? []).length === 0 && (
+                          <p className="text-[9px] text-magma leading-tight">⚠ На карте нет ни одного босса — цель невыполнима. Добавьте босса в редакторе карт (панель «👹 Боссы») или выберите другую цель.</p>
+                        )}
+                        {q.goal.kind === 'coins' && map.startCoins === undefined && (
+                          <p className="text-[9px] text-magma leading-tight">⚠ Монеты на карте не включены — цель невыполнима. Включите: редактор карт → «Ресурс игроков» → «Монеты».</p>
+                        )}
+                        {q.goal.kind === 'hp' && map.resMode !== 'hp' && (
+                          <p className="text-[9px] text-magma leading-tight">⚠ Ресурс карты — не полоска HP: у игроков всегда 100% HP, цель выполнится сразу. Для осмысленной цели включите ресурс «Полоска HP».</p>
+                        )}
                         <div className="grid grid-cols-3 gap-1">
-                          <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: бронза">🪙<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.coins ?? 0} onChange={(ev) => updQuest(selIdx, q.id, { reward: { ...q.reward, coins: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
+                          <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: бронза"><Coin size={10} /><input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.coins ?? 0} onChange={(ev) => updQuest(selIdx, q.id, { reward: { ...q.reward, coins: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
                           <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: минуты">⏱<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.min ?? 0} onChange={(ev) => updQuest(selIdx, q.id, { reward: { ...q.reward, min: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
                           <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: попытки">🎯<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.tries ?? 0} onChange={(ev) => updQuest(selIdx, q.id, { reward: { ...q.reward, tries: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
                         </div>
@@ -475,14 +404,15 @@ export default function QuestEditor() {
                   <select
                     className="field-in px-1.5 py-1 text-[10px]"
                     value={e.goal?.kind ?? 'none'}
-                    onChange={(ev) => { const ends = [...(map.endings ?? [])]; const k = ev.target.value as QuestGoalKind; ends[ei] = { ...e, goal: k === 'none' ? undefined : { kind: k, count: k === 'tasks' ? 3 : k === 'coins' ? 500 : k === 'hp' ? 100 : k === 'time' ? 900 : 10, bossId: (map.bosses ?? [])[0]?.id } }; updMap({ endings: ends }); }}
+                    onChange={(ev) => { const ends = [...(map.endings ?? [])]; const k = ev.target.value as QuestGoalKind; ends[ei] = { ...e, goal: k === 'none' ? undefined : { kind: k, count: k === 'tasks' ? 3 : k === 'bosses' ? 1 : k === 'coins' ? 500 : k === 'hp' ? 100 : k === 'time' ? 900 : 10, bossId: (map.bosses ?? [])[0]?.id } }; updMap({ endings: ends }); }}
                   >
                     <option value="none">только через диалог NPC</option>
-                    <option value="boss">победить босса</option>
+                    <option value="boss">победить босса (конкретного)</option>
+                    <option value="bosses">победить N боссов (любых)</option>
                     <option value="tasks">победить N заданий</option>
                     <option value="coins">собрать монет</option>
                     <option value="hp">иметь HP %</option>
-                    <option value="time">запас времени, сек</option>
+                    <option value="time">запас времени, мин</option>
                     <option value="tries">запас попыток</option>
                   </select>
                   {e.goal && e.goal.kind === 'boss' && (
@@ -498,9 +428,12 @@ export default function QuestEditor() {
                       })}
                     </select>
                   )}
-                  {e.goal && e.goal.kind !== 'boss' && (
+                  {e.goal && e.goal.kind !== 'boss' && (e.goal.kind === 'time' ? (
+                    /* ВРЕМЯ — счётчик в МИНУТАХ (в данных секунды) */
+                    <Stepper value={Math.max(1, Math.round((e.goal.count ?? 60) / 60))} onChange={(v) => { const ends = [...(map.endings ?? [])]; ends[ei] = { ...e, goal: { ...e.goal!, count: Math.max(1, v) * 60 } }; updMap({ endings: ends }); }} min={1} max={180} step={1} suffix=" мин" />
+                  ) : (
                     <Stepper value={e.goal.count ?? 1} onChange={(v) => { const ends = [...(map.endings ?? [])]; ends[ei] = { ...e, goal: { ...e.goal!, count: v } }; updMap({ endings: ends }); }} min={1} max={99999} step={e.goal.kind === 'coins' ? 25 : 1} />
-                  )}
+                  ))}
                 </div>
                 <p className="text-[9px] text-faint leading-tight">{questGoalText(e.goal, map)}</p>
               </div>
