@@ -7,7 +7,7 @@ import { setVolume } from './sound';
 
 export type Screen =
   | 'menu' | 'create' | 'join' | 'load' | 'lobby' | 'game' | 'challenge'
-  | 'mapEditor' | 'taskEditor' | 'quizEditor' | 'tokenEditor'
+  | 'mapEditor' | 'taskEditor' | 'quizEditor' | 'tokenEditor' | 'questEditor'
   | 'editorsHub' | 'emulator' | 'options';
 
 interface Toast { id: number; text: string; kind: 'info' | 'ok' | 'err'; }

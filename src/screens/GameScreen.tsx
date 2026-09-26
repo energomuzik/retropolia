@@ -16,7 +16,7 @@ import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper } from '../ui';
 import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, isQuestMode, isSoloMode, questGoalText, tileAt, tileRectOf, tileNumOf, coinsShort, coinsStr, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS } from '../types';
-import type { AnimClip, CardDef, ChaosKind, GameMap, GameSession, NpcLibEntry, PlacedNpc, PortalZone, PlayerState, QuestGoal, TaskDef, TokenDir, RubgItem } from '../types';
+import type { AnimClip, CardDef, ChaosKind, GameMap, GameSession, NpcLibEntry, NpcShopOffer, PlacedNpc, PortalZone, PlayerState, QuestGoal, TaskDef, TokenDir, RubgItem } from '../types';
 import Randomizer from './Randomizer';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
@@ -40,8 +40,27 @@ const questGoalDoneFor = (sess: GameSession, p: PlayerState, g: QuestGoal | unde
     case 'hp': return (p.hp ?? RUBG_HP_MAX) >= Math.max(1, Math.floor(g.count ?? 1));
     case 'time': return p.secLeft >= Math.max(60, Math.floor(g.count ?? 60));
     case 'tries': return p.triesLeft >= Math.max(1, Math.floor(g.count ?? 1));
+    case 'deliver': {
+      const n = Math.max(1, Math.floor(g.count ?? 1));
+      if (g.res === 'time') return p.secLeft >= n;
+      if (g.res === 'tries') return p.triesLeft >= n;
+      if (g.res === 'hp') return (p.hp ?? RUBG_HP_MAX) >= n;
+      return (p.coinsLeft ?? 0) >= n;
+    }
     default: return false;
   }
+};
+
+/* QUEST ТОРГОВЛЯ: подпись товара NPC (вещь из каталога — иконка+название, ресурс — что даёт) */
+const shopOfferLabel = (off: NpcShopOffer): string => {
+  if (off.kind === 'item' && off.item) {
+    const m = RUBG_ITEMS[off.item];
+    return `${m.icon} ${off.title?.trim() || m.name}`;
+  }
+  const a = Math.max(1, Math.floor(off.amount ?? 0));
+  if (off.res === 'tries') return `🎯 ${off.title?.trim() || `+${a} попыток`}`;
+  if (off.res === 'hp') return `❤️ ${off.title?.trim() || `+${a}% HP`}`;
+  return `⏱ ${off.title?.trim() || `+${a} мин времени`}`;
 };
 
 export default function GameScreen() {
@@ -211,7 +230,7 @@ export default function GameScreen() {
   const controlsLocked = task?.chaos === 'invertPad';
   // «Штраф ×2»: цена пропуска удваивается (10 вместо 5)
   const skipNeed = SKIP_COST * (task?.chaos === 'skipX2' ? 2 : 1);
-  const invCount = mePlayer?.inventory?.length ?? 0;
+  const invCount = (mePlayer?.inventory?.length ?? 0) + (isQuest ? (mePlayer?.items?.length ?? 0) : 0);
   const incomingTrades = (s?.trades ?? []).filter((o) => o.to === me && (o.status === 'pending' || o.status === 'countered'));
   const taskRom = task ? st.roms.find((r) => r.id === task.romId) : undefined;
   const isSega = !!taskRom && taskRom.ext !== 'nes';
@@ -3142,6 +3161,39 @@ export default function GameScreen() {
                 </div>
               )}
 
+              {/* ТОРГОВЛЯ NPC: товары за монеты (работает, когда на карте включены монеты) */}
+              {(dlgNpc.npc.shop ?? []).length > 0 && coinsActive && (() => {
+                const balance = mePlayer?.coinsLeft ?? 0;
+                return (
+                  <div className="space-y-1.5 border-2 border-[#ffcf3f]/50 px-2.5 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="tick-label text-gold">🛒 Торговля</div>
+                      <div className="tick-label text-teal" title={coinsStr(balance)}>🪙 {coinsShort(balance)}</div>
+                    </div>
+                    {(dlgNpc.npc.shop ?? []).map((off) => {
+                      const price = Math.max(0, Math.floor(off.price || 0));
+                      const afford = balance >= price;
+                      return (
+                        <div key={off.id} className="flex items-center gap-2 justify-between">
+                          <div className="min-w-0">
+                            <div className="font-display text-[11px] uppercase truncate text-paper">{shopOfferLabel(off)}</div>
+                            <div className="tick-label text-faint truncate">{price > 0 ? `цена: ${coinsShort(price)} монет` : 'бесплатно'}</div>
+                          </div>
+                          <PxBtn
+                            small
+                            color="gold"
+                            disabled={!afford}
+                            className={afford ? '' : 'opacity-40'}
+                            title={afford ? 'Купить за монеты' : 'Не хватает монет'}
+                            onClick={() => dispatch({ t: 'npcBuy', id: me, npcId: dlgNpc.npc.id, offerId: off.id })}
+                          >Купить</PxBtn>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+
               <div className="border-2 border-teal/40 bg-teal/5 px-3 py-2.5">
                 <div className="text-[13px] text-paper leading-snug">{node.text || '…'}</div>
               </div>
@@ -4067,6 +4119,38 @@ function InventoryModal({ onClose }: { onClose: () => void }) {
                         dispatch({ t: 'rubgBelt', id: me!, itemId: it.id, on: true });
                       }}
                     >На пояс</GhostBtn>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ---------- QUEST: РЮКЗАК — предметы, купленные у NPC (хилки пьются отсюда) ---------- */}
+        {!rubgMap && isQuestMode(map?.mode) && rubgInv.length > 0 && (
+          <div className="border-2 border-[#ff8b3f]/60 px-3 py-2.5 mb-4 space-y-2">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="tick-label text-[#ff8b3f]">🎒 Рюкзак · предметов {rubgInv.length}</span>
+              <span className="tick-label text-faint">куплено у NPC · хилки восстанавливают HP</span>
+            </div>
+            {rubgInv.map((it: RubgItem) => {
+              const meta = RUBG_ITEMS[it.kind];
+              const heal = meta.hp > 0 && meta.radius === 0;
+              const hpFull = (mePlayer?.hp ?? 100) >= 100;
+              return (
+                <div key={it.id} className="flex items-center gap-2 px-2 py-1.5 border-2 border-edge">
+                  <span>{meta.icon}</span>
+                  <span className="font-display text-[11px] text-paper min-w-0 truncate">{meta.name}</span>
+                  <span className="ml-auto tick-label text-faint shrink-0" title={heal ? `Восстанавливает ${meta.hp}% HP` : 'Сувенир — пригодится в других приключениях'}>{heal ? `+${meta.hp}% HP` : 'сувенир'}</span>
+                  {heal && (
+                    <PxBtn
+                      small
+                      color="teal"
+                      disabled={hpFull}
+                      className={hpFull ? 'opacity-40' : ''}
+                      title={hpFull ? 'Полоска HP полна' : `Выпить: +${meta.hp}% HP`}
+                      onClick={() => dispatch({ t: 'rubgUseItem', id: me!, itemId: it.id })}
+                    >Выпить</PxBtn>
                   )}
                 </div>
               );

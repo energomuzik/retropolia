@@ -522,14 +522,46 @@ export function Toggle({ checked, onChange, label, hint }: { checked: boolean; o
   );
 }
 
+/* Счётчик «− значение +». ЗНАЧЕНИЕ РЕДАКТИРУЕТСЯ С КЛАВИАТУРЫ: клик по числу открывает
+   поле ввода — наберите цифрами и нажмите Enter (или кликните в сторону); Esc — отмена.
+   Введённое число округляется и зажимается в min..max — та же семантика, что у кнопок. */
 export function Stepper({ value, onChange, min, max, step = 1, suffix }: {
   value: number; onChange: (v: number) => void; min: number; max: number; step?: number; suffix?: string;
 }) {
   const clamp = (v: number) => Math.min(max, Math.max(min, v));
+  const [edit, setEdit] = useState<string | null>(null);
+  const commit = () => {
+    if (edit === null) return;
+    const n = Math.round(Number(String(edit).replace(',', '.')));
+    if (Number.isFinite(n)) onChange(clamp(n));
+    setEdit(null);
+  };
   return (
     <div className="inline-flex items-center gap-1">
       <GhostBtn small onClick={() => onChange(clamp(value - step))} aria-label="меньше">−</GhostBtn>
-      <span className="font-display text-sm text-gold min-w-[52px] text-center tabular-nums">{value}{suffix}</span>
+      {edit === null ? (
+        <span
+          className="font-display text-sm text-gold min-w-[52px] text-center tabular-nums border-2 border-transparent hover:border-edge px-0.5 cursor-text select-none"
+          title="Клик — ввести число с клавиатуры"
+          onClick={() => { sfx.click(); setEdit(String(value)); }}
+        >{value}{suffix}</span>
+      ) : (
+        <input
+          autoFocus
+          type="number"
+          inputMode="numeric"
+          className="font-display text-sm text-gold text-center tabular-nums bg-transparent outline-none border-2 border-gold/70 px-0.5 w-[72px] min-w-[52px]"
+          value={edit}
+          onChange={(ev) => setEdit(ev.target.value)}
+          onBlur={commit}
+          onKeyDown={(ev) => {
+            ev.stopPropagation();
+            if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+            else if (ev.key === 'Escape') { ev.preventDefault(); setEdit(null); }
+          }}
+          aria-label="ввести число"
+        />
+      )}
       <GhostBtn small onClick={() => onChange(clamp(value + step))} aria-label="больше">+</GhostBtn>
     </div>
   );

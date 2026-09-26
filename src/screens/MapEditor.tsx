@@ -8,8 +8,8 @@ import {
 import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, DialogNode, DialogOption, GameMap, MapEnding, NpcAnimDef, NpcLibEntry, NpcQuest, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
-import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileRectOf, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
+import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, DialogNode, DialogOption, GameMap, MapEnding, NpcAnimDef, NpcLibEntry, NpcQuest, NpcShopOffer, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, RubgItemKind, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
+import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileRectOf, RUBG_ITEMS, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
 import type { MapMode } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
@@ -4117,7 +4117,7 @@ export default function MapEditor() {
                           <select
                             className="field-in px-1 py-1 text-[10px]"
                             value={q.goal.kind}
-                            onChange={(ev) => { const k = ev.target.value as QuestGoalKind; updNpcQuest(q.id, { goal: { kind: k, count: k === 'tasks' ? 3 : k === 'coins' ? 500 : k === 'hp' ? 100 : k === 'time' ? 900 : 10, bossId: (map.bosses ?? [])[0]?.id } }); }}
+                            onChange={(ev) => { const k = ev.target.value as QuestGoalKind; updNpcQuest(q.id, { goal: k === 'deliver' ? { kind: k, res: 'coins', count: 500 } : { kind: k, count: k === 'tasks' ? 3 : k === 'coins' ? 500 : k === 'hp' ? 100 : k === 'time' ? 900 : 10, bossId: (map.bosses ?? [])[0]?.id } }); }}
                           >
                             <option value="none">без условия</option>
                             <option value="boss">победить босса</option>
@@ -4126,6 +4126,7 @@ export default function MapEditor() {
                             <option value="hp">иметь HP %</option>
                             <option value="time">запас времени, сек</option>
                             <option value="tries">запас попыток</option>
+                            <option value="deliver">принести/отдать ресурсы</option>
                           </select>
                           {q.goal.kind === 'boss' && (
                             <select className="field-in px-1 py-1 text-[10px]" value={q.goal.bossId ?? ''} onChange={(ev) => updNpcQuest(q.id, { goal: { ...q.goal, bossId: ev.target.value } })}>
@@ -4136,11 +4137,19 @@ export default function MapEditor() {
                               })}
                             </select>
                           )}
+                          {q.goal.kind === 'deliver' && (
+                            <select className="field-in px-1 py-1 text-[10px]" value={q.goal.res ?? 'coins'} onChange={(ev) => updNpcQuest(q.id, { goal: { ...q.goal, res: ev.target.value as 'coins' | 'time' | 'tries' | 'hp' } })}>
+                              <option value="coins">монеты, бронза</option>
+                              <option value="time">время, сек</option>
+                              <option value="tries">попытки</option>
+                              <option value="hp">HP %</option>
+                            </select>
+                          )}
                           {q.goal.kind !== 'boss' && q.goal.kind !== 'none' && (
-                            <Stepper value={q.goal.count ?? 1} onChange={(v) => updNpcQuest(q.id, { goal: { ...q.goal, count: v } })} min={1} max={99999} step={q.goal.kind === 'coins' ? 25 : 1} />
+                            <Stepper value={q.goal.count ?? 1} onChange={(v) => updNpcQuest(q.id, { goal: { ...q.goal, count: v } })} min={1} max={99999} step={q.goal.kind === 'coins' || (q.goal.kind === 'deliver' && (q.goal.res ?? 'coins') === 'coins') ? 25 : 1} />
                           )}
                         </div>
-                        <p className="text-[9px] text-teal leading-tight">{questGoalText(q.goal, map)}</p>
+                        <p className="text-[9px] text-teal leading-tight">{questGoalText(q.goal, map)}{q.goal.kind === 'deliver' ? ' — при сдаче ресурс УЙДЁТ NPC из капитала игрока' : ''}</p>
                         <div className="grid grid-cols-3 gap-1">
                           <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: бронза">🪙<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.coins ?? 0} onChange={(ev) => updNpcQuest(q.id, { reward: { ...q.reward, coins: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
                           <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: минуты">⏱<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.min ?? 0} onChange={(ev) => updNpcQuest(q.id, { reward: { ...q.reward, min: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
@@ -4168,6 +4177,54 @@ export default function MapEditor() {
                       className="w-full py-1.5 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
                     >+ добавить квест</button>
                     <p className="text-[10px] text-faint leading-tight">Выполнив условие, игрок приходит к NPC и сдаёт квест в диалоге: получает награду; назначенные стены ИСЧЕЗАЮТ с карты для всех. Когда ВСЕ квесты NPC сданы — он играет клип «✅ КВЕСТ ВЫПОЛНЕН».</p>
+                  </div>
+
+                  {/* ---------- ТОРГОВЛЯ NPC ---------- */}
+                  <div className="border-2 border-[#ffcf3f]/40 px-2 py-2 space-y-2">
+                    <span className="tick-label text-gold">🛒 Торговля ({(selNpcDef.shop ?? []).length})</span>
+                    {(selNpcDef.shop ?? []).map((off) => (
+                      <div key={off.id} className="border-2 border-edge px-2 py-1.5 space-y-1.5">
+                        <div className="flex items-center gap-1">
+                          <select
+                            className="field-in flex-1 min-w-0 px-1 py-1 text-[10px]"
+                            value={off.kind}
+                            onChange={(ev) => {
+                              const k = ev.target.value as NpcShopOffer['kind'];
+                              updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).map((x) => x.id === off.id ? (k === 'item' ? { ...x, kind: k, item: x.item ?? 'medkit' } : { ...x, kind: k, res: x.res ?? 'time', amount: x.amount ?? 5 }) : x) });
+                              dirtyRef.current = true;
+                            }}
+                          >
+                            <option value="item">вещь (каталог предметов)</option>
+                            <option value="res">ресурс</option>
+                          </select>
+                          <button onClick={() => { updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).filter((x) => x.id !== off.id) }); dirtyRef.current = true; sfx.fail(); }} className="text-faint hover:text-coral cursor-pointer px-0.5 text-[10px]">✕</button>
+                        </div>
+                        {off.kind === 'item' ? (
+                          <select className="field-in w-full px-1 py-1 text-[10px]" value={off.item ?? 'medkit'} onChange={(ev) => { updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).map((x) => x.id === off.id ? { ...x, item: ev.target.value as RubgItemKind } : x) }); dirtyRef.current = true; }}>
+                            {Object.entries(RUBG_ITEMS).map(([k, m]) => <option key={k} value={k}>{m.icon} {m.name}</option>)}
+                          </select>
+                        ) : (
+                          <div className="flex items-center gap-1 flex-wrap">
+                            <select className="field-in px-1 py-1 text-[10px]" value={off.res ?? 'time'} onChange={(ev) => { updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).map((x) => x.id === off.id ? { ...x, res: ev.target.value as 'time' | 'tries' | 'hp' } : x) }); dirtyRef.current = true; }}>
+                              <option value="time">время, мин</option>
+                              <option value="tries">попытки</option>
+                              <option value="hp">HP %</option>
+                            </select>
+                            <Stepper value={off.amount ?? 5} onChange={(v) => { updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).map((x) => x.id === off.id ? { ...x, amount: v } : x) }); dirtyRef.current = true; }} min={1} max={99999} step={(off.res ?? 'time') === 'hp' ? 5 : 1} />
+                          </div>
+                        )}
+                        <input className="field-in w-full px-1.5 py-1 text-[10px]" maxLength={40} placeholder="Своё название (необязательно)" value={off.title ?? ''} onChange={(ev) => { updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).map((x) => x.id === off.id ? { ...x, title: ev.target.value || undefined } : x) }); dirtyRef.current = true; }} />
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-[9px] text-dim shrink-0">Цена:</span>
+                          <Stepper value={off.price ?? 0} onChange={(v) => { updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).map((x) => x.id === off.id ? { ...x, price: v } : x) }); dirtyRef.current = true; }} min={0} max={99999} step={5} suffix=" бр" />
+                        </div>
+                      </div>
+                    ))}
+                    <button
+                      onClick={() => { updNpc(selNpcIdx, { shop: [...(selNpcDef.shop ?? []), { id: uid('shp'), kind: 'item', item: 'medkit', price: 50 }] }); dirtyRef.current = true; sfx.coin(); }}
+                      className="w-full py-1.5 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
+                    >+ добавить товар</button>
+                    <p className="text-[9px] text-faint leading-tight">Игроки покупают за монеты в диалоге NPC. Работает, когда на карте включён ресурс «монеты» (Ресурс игроков → Монеты). Вещи падают в инвентарь (рюкзак), ресурс — сразу в капитал.</p>
                   </div>
 
                   <div className="grid grid-cols-2 gap-1.5">

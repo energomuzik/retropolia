@@ -8,6 +8,7 @@ const EDITORS: { screen: Screen; label: string; desc: string; color: string; ico
   { screen: 'taskEditor', label: 'Редактор заданий', desc: 'ромы, сохранки, картинки, бонусы и ловушки', color: '#ff8b3f', icon: Ic.cart },
   { screen: 'quizEditor', label: 'Редактор квизов', desc: 'вопросы: выбор, текст, музыка, «кот в мешке»', color: '#5aa9ff', icon: Ic.dice },
   { screen: 'tokenEditor', label: 'Редактор анимаций и фишек', desc: 'анимации для карт, анимированные фишки, обычные фишки', color: '#ff7ad9', icon: Ic.pawn },
+  { screen: 'questEditor', label: 'Редактор квестов и диалогов', desc: 'деревья диалогов, квесты и торговля NPC, концовки карты (QUEST)', color: '#b98bff', icon: Ic.users },
 ];
 
 export default function EditorsHub() {

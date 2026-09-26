@@ -79,6 +79,7 @@ export type Action =
   | { t: 'qCardAck'; id: string } // QUEST: игрок подтвердил выпавшую карточку бонуса/ловушки
   | { t: 'dialogPick'; id: string; npcId: string; nodeId: string; optIdx: number } // QUEST: выбор игрока в диалоге NPC (награда/флаг/переход/концовка)
   | { t: 'npcClaim'; id: string; npcId: string; questId: string } // QUEST: сдача квеста NPC — награда + снятие стен
+  | { t: 'npcBuy'; id: string; npcId: string; offerId: string } // QUEST: покупка товара у NPC (торговля в диалоге): списание монет, вещь в инвентарь или ресурс
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const rnd6 = () => 1 + Math.floor(Math.random() * 6);
@@ -361,6 +362,14 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       case 'hp': return (p.hp ?? RUBG_HP_MAX) >= Math.max(1, Math.floor(g.count ?? 1));
       case 'time': return p.secLeft >= Math.max(60, Math.floor(g.count ?? 60));
       case 'tries': return p.triesLeft >= Math.max(1, Math.floor(g.count ?? 1));
+      case 'deliver': {
+        /* ПРИНЕСТИ/ОТДАТЬ: у игрока должен быть ЗАПАС ресурса к моменту сдачи (списывается при сдаче) */
+        const n = Math.max(1, Math.floor(g.count ?? 1));
+        if (g.res === 'time') return p.secLeft >= n;
+        if (g.res === 'tries') return p.triesLeft >= n;
+        if (g.res === 'hp') return (p.hp ?? RUBG_HP_MAX) >= n;
+        return (p.coinsLeft ?? 0) >= n;
+      }
       default: return false;
     }
   };
@@ -1925,6 +1934,14 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (mine[`quest:${q.id}`]) break; // уже сдан
       if (!questGoalsDone(p, q.goal)) { log(`⏳ Квест «${q.title}» ещё не выполнен: ${questGoalText(q.goal, map)}`); break; }
       mine[`quest:${q.id}`] = true;
+      /* Задача «ПРИНЕСТИ/ОТДАТЬ»: ресурс УХОДИТ NPC из капитала игрока при сдаче */
+      if (q.goal.kind === 'deliver') {
+        const n = Math.max(1, Math.floor(q.goal.count ?? 1));
+        if (q.goal.res === 'time') { p.secLeft = Math.max(0, p.secLeft - n); log(`⏱ ${p.name} отдал NPC ${Math.round(n / 60)} мин времени — запас ${fmtClock(p.secLeft)}`); }
+        else if (q.goal.res === 'tries') { p.triesLeft = Math.max(0, p.triesLeft - n); log(`🎯 ${p.name} отдал NPC ${n} попыток — запас ${p.triesLeft}`); }
+        else if (q.goal.res === 'hp') { p.hp = Math.max(0, (p.hp ?? RUBG_HP_MAX) - n); log(`❤️ ${p.name} отдал NPC ${n}% HP — полоска ${Math.round(p.hp)}%`); }
+        else { p.coinsLeft = Math.max(0, (p.coinsLeft ?? 0) - n); log(`🪙 ${p.name} принёс NPC ${coinsStr(n)} — капитал ${coinsStr(p.coinsLeft)}`); }
+      }
       giveReward(p, q.reward, `квест «${q.title}» сдан`);
       /* Снятие стен: выполненный квест убирает назначенные ему стены — путь открыт ВСЕМ */
       if (q.removeWalls?.length) {
@@ -1939,8 +1956,43 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       checkElim();
       break;
     }
+    case 'npcBuy': {
+      /* ТОРГОВЛЯ NPC: покупка за монеты в диалоге. Работает, когда на карте включены монеты
+         (map.startCoins задан). Вещь уходит в инвентарь (как лут RUBG), ресурс — в капитал. */
+      if (s.phase !== 'playing') break;
+      const p = actor();
+      if (!p || !p.alive || p.spect) break;
+      if (map.startCoins === undefined) break; // монет нет — торговля недоступна
+      const npc = (map.npcs ?? []).find((x) => x.id === a.npcId);
+      const off = npc?.shop?.find((x) => x.id === a.offerId);
+      if (!npc || !off) break;
+      const price = Math.max(0, Math.floor(off.price || 0));
+      if ((p.coinsLeft ?? 0) < price) {
+        log(`🛒 ${p.name}: не хватает монет — нужно ${coinsStr(price)}, в кармане ${coinsStr(p.coinsLeft ?? 0)}`);
+        break;
+      }
+      const npcName = (map.npcLib ?? []).find((x) => x.id === npc.nid)?.name ?? 'NPC';
+      if (off.kind === 'item' && off.item) {
+        const meta = RUBG_ITEMS[off.item];
+        p.coinsLeft = Math.max(0, (p.coinsLeft ?? 0) - price);
+        rubgGiveItem(p, off.item); // на пояс, если есть слот, иначе в общий инвентарь
+        log(`🛒 ${p.name} купил у «${npcName}» ${meta.icon} «${off.title?.trim() || meta.name}» за ${coinsStr(price)} — капитал ${coinsStr(p.coinsLeft)}`);
+      } else {
+        const amt = Math.max(1, Math.floor(off.amount ?? 0));
+        const what = off.title?.trim() || (off.res === 'tries' ? `+${amt} попыток` : off.res === 'hp' ? `+${amt}% HP` : `+${amt} мин времени`);
+        if (off.res === 'time') p.secLeft += amt * 60;
+        else if (off.res === 'tries') p.triesLeft += amt;
+        else if (off.res === 'hp') p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? RUBG_HP_MAX) + amt);
+        else break; // товар без ресурса — ничего не продаём
+        p.coinsLeft = Math.max(0, (p.coinsLeft ?? 0) - price);
+        log(`🛒 ${p.name} купил у «${npcName}» «${what}» за ${coinsStr(price)} — капитал ${coinsStr(p.coinsLeft)}`);
+      }
+      checkElim(); // истраченные монеты/приобретённый ресурс могут изменить расклад (в т.ч. выполнить концовку)
+      break;
+    }
     case 'rubgUseItem': {
-      if (map.mode !== 'rubg' || !s.rubg) break;
+      const questUse = isQuestMode(map.mode); // QUEST: хилки пьются из рюкзака (куплены у NPC) — пояс не нужен
+      if ((map.mode !== 'rubg' || !s.rubg) && !questUse) break;
       const p = actor();
       if (!p || !p.alive || p.spect) break;
       const inv = p.items ?? (p.items = []);
@@ -1948,7 +2000,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (ii < 0) break;
       const meta = RUBG_ITEMS[inv[ii].kind];
       if (meta.hp <= 0 || meta.radius > 0) break; // только хилки
-      if (!inv[ii].belt) break; // использовать можно только с ПОЯСА (общий инвентарь — склад: наденьте на пояс)
+      if (!questUse && !inv[ii].belt) break; // RUBG: использовать можно только с ПОЯСА (общий инвентарь — склад); QUEST: пояс не нужен
       if ((p.hp ?? 0) >= RUBG_HP_MAX) break; // полоска полна
       inv.splice(ii, 1);
       p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? 0) + meta.hp);

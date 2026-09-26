@@ -8,6 +8,7 @@ import MapEditor from './screens/MapEditor';
 import TaskEditor from './screens/TaskEditor';
 import QuizEditor from './screens/QuizEditor';
 import TokenEditor from './screens/TokenEditor';
+import QuestEditor from './screens/QuestEditor';
 import EditorsHub from './screens/EditorsHub';
 import EmulatorLauncher from './screens/EmulatorLauncher';
 import OptionsScreen from './screens/OptionsScreen';
@@ -95,6 +96,7 @@ export default function App() {
       {screen === 'taskEditor' && <TaskEditor />}
       {screen === 'quizEditor' && <QuizEditor />}
       {screen === 'tokenEditor' && <TokenEditor />}
+      {screen === 'questEditor' && <QuestEditor />}
       {screen === 'editorsHub' && <EditorsHub />}
       {screen === 'emulator' && <EmulatorLauncher />}
       {screen === 'options' && <OptionsScreen />}
