@@ -2,7 +2,21 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from './store';
 import { DEFAULT_GPAD, DEFAULT_SEGA_GPAD, NES_TO_RETRO, SEGA_TO_RETRO } from './input';
 
-const CDN_DATA = 'https://cdn.emulatorjs.org/stable/data/';
+/* ЯДРА ВНУТРИ САЙТА: все файлы эмулятора (загрузчик, ядра, распаковщик,
+   локализация) лежат в public/emulatorjs/data и отдаются с того же адреса,
+   что и сама игра — интернет при запуске рома больше не нужен. Интернет-CDN
+   остался только запасным источником (перебор баз ниже, при сбое). */
+const LOCAL_DATA = (() => {
+  const b = document.baseURI.endsWith('/') ? document.baseURI : document.baseURI + '/';
+  return new URL('emulatorjs/data/', b).href;
+})();
+const CDN_FALLBACKS = [
+  'https://cdn.emulatorjs.org/stable/data/',
+  'https://cdn.emulatorjs.org/4.2.3/data/',
+];
+/* Порядок источников ядра: СВОЙ сайт → CDN stable → CDN 4.2.3 (версия бандла).
+   Прежнее зеркало static.emulatorjs.org удалено — домен больше не отвечает. */
+const CORE_BASES: string[] = [LOCAL_DATA, ...CDN_FALLBACKS];
 /* Максимум АВТОПЕРЕЗАПУСКОВ ядра при сбое загрузки (см. автоповтор ниже).
    После исчерпания остаётся ручная кнопка «Попробовать снова». */
 const AUTO_RETRY_MAX = 3;
@@ -28,6 +42,11 @@ function coreFor(ext: string): string {
 /**
  * Эмулятор SEGA (Genesis Plus GX / EmulatorJS) в изолированном iframe.
  *
+ * — ЯДРА И ФАЙЛЫ ЭМУЛЯТОРА лежат ВНУТРИ САЙТА (public/emulatorjs/data; источник
+ *   — официальный CDN EmulatorJS 4.2.3 stable, файлы не менялись): загрузчик,
+ *   genesis_plus_gx (SEGA MD/Genesis + Game Gear), smsplus (Master System),
+ *   fceumm (NES), распаковщик 7z/zip/rar и русская локализация. При сбое —
+ *   автоперебор источников: свой сайт → CDN stable → CDN 4.2.3.
  * — Сохранения грузятся перезапуском ядра с EJS_loadStateURL (единственный
  *   надёжный путь в stable-версии EmulatorJS). Ядро при этом берётся из кэша
  *   браузера — повторного скачивания нет, только быстрый рестарт (~1–2 c).
@@ -112,7 +131,7 @@ export default function SegaBox({
     const opts = useApp.getState().options;
     const volume = Math.max(0, Math.min(1, opts.emuVolume ?? 1));
     const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    return buildHtml(resolvedCore, volume, CDN_DATA, bootStateRef.current, nonce, remapJsonRef.current, chaosJsonRef.current);
+    return buildHtml(resolvedCore, volume, CORE_BASES, bootStateRef.current, nonce, remapJsonRef.current, chaosJsonRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedCore, romData, bootTick]);
 
@@ -318,8 +337,8 @@ export default function SegaBox({
           )}
           <span className="text-[11px] text-dim px-6 text-center max-w-sm">
             {loadAttempt > 1 || autoRetry > 0
-              ? 'Сеть нестабильна — пробуем другое зеркало. Ядро скачается автоматически.'
-              : `Первый запуск ${coreLabel}-рома скачивает ядро с CDN (один раз) — дальше браузер берёт его из кэша.`}
+              ? 'Пробуем следующий источник (свой сайт → запасной CDN). Ядро скачается автоматически.'
+              : `Ядра ${coreLabel} теперь лежат ВНУТРИ сайта — CDN не нужен. Дальше браузер берёт их из кэша мгновенно.`}
           </span>
         </div>
       )}
@@ -333,8 +352,8 @@ export default function SegaBox({
           <span className="font-pixel text-[9px] text-coral">НЕ УДАЛОСЬ ЗАГРУЗИТЬ ЯДРО</span>
           <span className="text-[11px] text-dim leading-relaxed max-w-sm">
             {autoRetry >= AUTO_RETRY_MAX
-              ? `Автоповторы (${AUTO_RETRY_MAX}) не помогли. Для первого запуска нужен интернет — ядро ${coreLabel} берётся с CDN emulatorjs.org (один раз, дальше из кэша браузера). Проверьте соединение и попробуйте ещё раз.`
-              : `Сбой загрузки ядра ${coreLabel} — сейчас перезапустимся автоматически (попытка ${autoRetry + 1} из ${AUTO_RETRY_MAX}). Ядро берётся с CDN, дальше — из кэша браузера.`}
+              ? `Автоповторы (${AUTO_RETRY_MAX}) не помогли. Ядра лежат внутри сайта — если не грузятся даже они, проверьте соединение (запасной источник — CDN emulatorjs.org) и попробуйте ещё раз.`
+              : `Сбой загрузки ядра ${coreLabel} — сейчас перезапустимся автоматически (попытка ${autoRetry + 1} из ${AUTO_RETRY_MAX}). Основной источник — свой сайт, запасной — CDN.`}
           </span>
           <button
             onClick={() => { setAutoRetry(0); setBootTick((t) => t + 1); }}
@@ -346,7 +365,7 @@ export default function SegaBox({
   );
 }
 
-function buildHtml(core: string, volume: number, base: string, bootStateB64: string | null, nonce: string, remapJson: string, chaosJson: string): string {
+function buildHtml(core: string, volume: number, bases: string[], bootStateB64: string | null, nonce: string, remapJson: string, chaosJson: string): string {
   // Внутренний документ: чистое окно без тулбара, общается с хостом через postMessage.
   // Ром приходит сообщением 'boot' как ArrayBuffer; blob-URL создаётся ВНУТРИ iframe —
   // с именем и расширением файла (иначе ядро стартует «пустым» и показывает меню RetroArch).
@@ -638,7 +657,7 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '  var applied=buildKeyMap();',
     '  if(applied<remapSpec.length&&remapTries<12){setTimeout(remapPump,500);}',
     '}',
-    `window.EJS_pathtodata=${JSON.stringify(base)};`,
+    `window.EJS_pathtodata=${JSON.stringify(bases[0])};`,
     'window.EJS_language="ru";',
     'window.EJS_backgroundText="";',
     'window.EJS_backgroundColor="#0b0e1c";',
@@ -751,13 +770,12 @@ function buildHtml(core: string, volume: number, base: string, bootStateB64: str
     '          window.EJS_loadStateURL=URL.createObjectURL(new Blob([sb],{type:"application/octet-stream"}));',
     '        }catch(e){}',
     '      }',
-      // Автоповтор загрузки ядра: перебираем зеркала по кругу с растущей задержкой.
-      // Уже скачанное ядро браузер берёт из кэша мгновенно; при сбое сети пробуем снова.
-      '      var bases=[' + JSON.stringify(base) + ',"https://static.emulatorjs.org/stable/data/"];',
-      '      if(bases[0]===bases[1]){bases.pop();}',
+      // Автоповтор загрузки ядра: перебираем источники (свой сайт → CDN) по кругу
+      // с растущей задержкой. Уже скачанное ядро браузер берёт из кэша мгновенно.
+      '      var bases=' + JSON.stringify(bases) + ';',
       '      var attempt=0;var MAX=8;',
       '      var loadAttempt=function(){',
-      '        if(attempt>=MAX){showErr("Не удалось загрузить ядро после "+MAX+" попыток. Проверьте интернет и обновите страницу.");return;}',
+      '        if(attempt>=MAX){showErr("Не удалось загрузить ядро ни с сайта, ни с запасного CDN ("+MAX+" попыток). Проверьте интернет и обновите страницу.");return;}',
       '        var b=bases[attempt%bases.length];',
       '        window.EJS_pathtodata=b;',
       '        try{parent.postMessage({type:"ejs-retrying",attempt:attempt+1,round:Math.floor(attempt/bases.length)+1},"*");}catch(e){}',
