@@ -8,7 +8,7 @@ import { exportGame, importGame, idbAll, idbDel, idbGet, idbPut, uid } from '../
 import { downloadHostBat } from '../host/hostPackage';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import type { BossAnimDef, CustomChallenge, GameMap, MapMode, NpcAnimDef, SessionSnapshot, TokenDef } from '../types';
-import { mapModeModified } from '../types';
+import { mapModeModified, normResMode } from '../types';
 import { bossLibEntryOf, npcLibEntryOf, challengeSummaryLines, coinsStr, isSoloMode, PLAYER_COLORS, PLAYER_NAMES } from '../types';
 import { sfx } from '../sound';
 
@@ -285,12 +285,8 @@ export function CreateScreen() {
                 })()}
               </div>
               <div className="mt-2.5 pt-2 border-t-2 border-edge flex items-center gap-2 flex-wrap">
-                {(m.resMode === 'hp' || m.mode === 'rubg') ? (
+                {(normResMode(m.resMode) === 'hp' || m.mode === 'rubg') ? (
                   <span className="font-display text-[11px] uppercase text-coral">ресурс: полоска HP</span>
-                ) : m.resMode === 'time' ? (
-                  <span className="font-display text-[11px] uppercase text-gold">ресурс: только время ({m.startMin ?? 60} мин)</span>
-                ) : m.resMode === 'tries' ? (
-                  <span className="font-display text-[11px] uppercase text-sky">ресурс: только попытки ({m.startTries ?? 60})</span>
                 ) : m.coinsOnly && m.startCoins !== undefined ? (
                   <span className="font-display text-[11px] uppercase text-teal">ресурс: монеты ({coinsStr(m.startCoins)})</span>
                 ) : (

@@ -9,7 +9,8 @@ import { sfx } from '../sound';
 /* ---------- МАСТЕР «СОЗДАТЬ ЧЕЛЛЕНДЖ» ----------
    Серия окон-вопросов: как играем (режим), какая карта, какие ячейки,
    РЕСУРСЫ + ШТРАФЫ И НАГРАДЫ (один шаг), скорость.
-   РЕСУРС ТОЛЬКО ОДИН: время ИЛИ попытки ИЛИ монеты ИЛИ полоска HP — комбинации не сочетаются.
+   РЕСУРС: «время и попытки» ОДНИМ нераздельным ресурсом ИЛИ монеты ИЛИ полоска HP
+   (выбор «только время»/«только попытки» упразднён с v0.50.0).
    Из ответов складываются ПРАВИЛА челленджа — готовый набор появляется
    в редакторе карт («Мои челленджи», пометка «СВОЙ РЕЖИМ»).
    Вопрос «на чём играют» убран (игроки играют и на ПК, и на телефоне);
@@ -70,12 +71,13 @@ export default function ChallengeWizard() {
     upd({ cells: a.cells.includes(key) ? a.cells.filter((c) => c !== key) : [...a.cells, key] });
   };
 
-  /* РЕСУРС ТОЛЬКО ОДИН: выбор ресурса выключает остальные */
-  const pickRes = (kind: 'time' | 'tries' | 'coins' | 'hp') => {
+  /* РЕСУРС: время+попытки (std) / монеты / HP — выбор выключает остальные.
+     «Время и попытки» — ОДИН ресурс: оба счётчика активны всегда (v0.50.0). */
+  const pickRes = (kind: 'std' | 'coins' | 'hp') => {
     sfx.hover();
     upd({
-      resTime: kind === 'time',
-      resTries: kind === 'tries',
+      resTime: kind === 'std', // «время и попытки» — оба счётчика сразу
+      resTries: kind === 'std',
       resCoins: kind === 'coins',
       resHp: kind === 'hp',
       coinsOnly: kind === 'coins', // монеты — единственный ресурс: платёж по итогам, перезапуски бесплатны
@@ -99,7 +101,7 @@ export default function ChallengeWizard() {
       startTries: clampMin(a.startTries),
       resCoins: coinsOn,
       resHp: a.resHp === true,
-      resMode: a.resHp ? 'hp' : a.resCoins ? 'coins' : a.resTries ? 'tries' : 'time', // ЕДИНСТВЕННЫЙ ресурс: «время» и «попытки» больше не дают оба сразу
+      resMode: a.resHp ? 'hp' : a.resCoins ? 'coins' : 'std', // время и попытки — ОДИН нераздельный ресурс (v0.50.0)
       startCoins: coinsOn ? clampCoin(a.startCoins) : 0,
       coinsOnly: coinsOn, // монеты всегда единственный ресурс
       taskWinCoins: coinsOn ? clampCoin(a.taskWinCoins) : 0,
@@ -164,10 +166,9 @@ export default function ChallengeWizard() {
   /* ---------- ОБЪЕДИНЁННЫЙ ШАГ: ресурсы + штрафы и награды ---------- */
   const resourcesStep = () => (
     <div className="space-y-3">
-      <p className="text-[10px] text-faint leading-tight">Ресурс ТОЛЬКО ОДИН — выберите, чем играют: минутами, попытками, монетами или ПОЛОСКОЙ HP.</p>
+      <p className="text-[10px] text-faint leading-tight">Выберите, чем играют: ВРЕМЯ И ПОПЫТКИ (один нераздельный ресурс — вылет на нуле минут ИЛИ попыток), монеты или ПОЛОСКУ HP.</p>
       <div className="flex gap-1.5">
-        <button onClick={() => pickRes('time')} className={`flex-1 py-2 border-2 cursor-pointer font-display text-[10px] uppercase ${a.resTime ? 'border-sky text-sky bg-sky/10' : 'border-edge text-faint'}`}>⏱ Время</button>
-        <button onClick={() => pickRes('tries')} className={`flex-1 py-2 border-2 cursor-pointer font-display text-[10px] uppercase ${a.resTries ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint'}`}>🎯 Попытки</button>
+        <button onClick={() => pickRes('std')} title="Один ресурс из двух счётчиков: у каждого игрока минуты и попытки; на нуле любого — вылет" className={`flex-1 py-2 border-2 cursor-pointer font-display text-[10px] uppercase ${a.resTime || a.resTries ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint'}`}>⏱🎯 Время и попытки</button>
         <button onClick={() => pickRes('coins')} className={`flex-1 py-2 border-2 cursor-pointer font-display text-[10px] uppercase ${a.resCoins ? 'border-teal text-teal bg-teal/10' : 'border-edge text-faint'}`}>🪙 Монеты</button>
         <button onClick={() => pickRes('hp')} title="Полоска HP: +10% за победу, −5% за поражение/пропуск, на нуле — вылет" className={`flex-1 py-2 border-2 cursor-pointer font-display text-[10px] uppercase ${a.resHp ? 'border-coral text-coral bg-coral/10' : 'border-edge text-faint'}`}>❤ HP</button>
       </div>
@@ -180,39 +181,26 @@ export default function ChallengeWizard() {
         </div>
       )}
 
-      {a.resTime && (
+      {(a.resTime || a.resTries) && (
+        /* «ВРЕМЯ И ПОПЫТКИ» — ОДИН ресурс: оба счётчика и общие штрафы/награды (v0.50.0) */
         <div className="space-y-2">
           <div className="flex items-center justify-between"><span className="text-[12px] text-dim">Минут у игрока</span><Stepper value={a.startMin} onChange={(v) => upd({ startMin: v })} min={5} max={180} step={5} /></div>
-          <div className="space-y-2 border-2 border-edge px-3 py-3">
-            <div className="flex gap-1.5">
-              <button onClick={() => { sfx.hover(); upd({ penalties: false }); }} className={`flex-1 py-1.5 border-2 cursor-pointer font-display text-[9px] uppercase ${!a.penalties ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint'}`}>Без штрафов</button>
-              <button onClick={() => { sfx.hover(); upd({ penalties: true, loseMin: a.loseMin || 5, loseTries: 0 }); }} className={`flex-1 py-1.5 border-2 cursor-pointer font-display text-[9px] uppercase ${a.penalties ? 'border-coral text-coral bg-coral/10' : 'border-edge text-faint'}`}>Со штрафами</button>
-            </div>
-            {a.penalties && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between"><span className="text-[12px] text-dim">− минут за проигрыш задания</span><Stepper value={a.loseMin} onChange={(v) => upd({ loseMin: v })} min={0} max={30} step={1} /></div>
-                <div className="flex items-center justify-between"><span className="text-[12px] text-dim">+ минут за победу (награда)</span><Stepper value={a.winMin} onChange={(v) => upd({ winMin: v })} min={0} max={30} step={1} /></div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {a.resTries && (
-        <div className="space-y-2">
           <div className="flex items-center justify-between"><span className="text-[12px] text-dim">Попыток у игрока</span><Stepper value={a.startTries} onChange={(v) => upd({ startTries: v })} min={5} max={180} step={5} /></div>
           <div className="space-y-2 border-2 border-edge px-3 py-3">
             <div className="flex gap-1.5">
               <button onClick={() => { sfx.hover(); upd({ penalties: false }); }} className={`flex-1 py-1.5 border-2 cursor-pointer font-display text-[9px] uppercase ${!a.penalties ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint'}`}>Без штрафов</button>
-              <button onClick={() => { sfx.hover(); upd({ penalties: true, loseTries: a.loseTries || 1, loseMin: 0 }); }} className={`flex-1 py-1.5 border-2 cursor-pointer font-display text-[9px] uppercase ${a.penalties ? 'border-coral text-coral bg-coral/10' : 'border-edge text-faint'}`}>Со штрафами</button>
+              <button onClick={() => { sfx.hover(); upd({ penalties: true, loseMin: a.loseMin || 5, loseTries: a.loseTries || 1 }); }} className={`flex-1 py-1.5 border-2 cursor-pointer font-display text-[9px] uppercase ${a.penalties ? 'border-coral text-coral bg-coral/10' : 'border-edge text-faint'}`}>Со штрафами</button>
             </div>
             {a.penalties && (
               <div className="space-y-2">
+                <div className="flex items-center justify-between"><span className="text-[12px] text-dim">− минут за проигрыш задания</span><Stepper value={a.loseMin} onChange={(v) => upd({ loseMin: v })} min={0} max={30} step={1} /></div>
                 <div className="flex items-center justify-between"><span className="text-[12px] text-dim">− попыток за проигрыш задания</span><Stepper value={a.loseTries} onChange={(v) => upd({ loseTries: v })} min={0} max={30} step={1} /></div>
+                <div className="flex items-center justify-between"><span className="text-[12px] text-dim">+ минут за победу (награда)</span><Stepper value={a.winMin} onChange={(v) => upd({ winMin: v })} min={0} max={30} step={1} /></div>
                 <div className="flex items-center justify-between"><span className="text-[12px] text-dim">+ попыток за победу (награда)</span><Stepper value={a.winTries} onChange={(v) => upd({ winTries: v })} min={0} max={30} step={1} /></div>
               </div>
             )}
           </div>
+          <p className="text-[9px] text-faint leading-tight">Время и попытки — ОДИН ресурс: оба счётчика активны, вход в задание тратит попытку и минуты по факту; вылет на нуле минут ИЛИ попыток.</p>
         </div>
       )}
 

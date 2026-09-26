@@ -17,7 +17,7 @@ import {
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper, Coin, CoinRow } from '../ui';
-import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, isQuestMode, isSoloMode, questGoalText, tileAt, tileRectOf, tileNumOf, coinsStr, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS } from '../types';
+import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, isQuestMode, isSoloMode, questGoalText, tileAt, tileRectOf, tileNumOf, coinsStr, normResMode, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS } from '../types';
 import type { AnimClip, CardDef, ChaosKind, GameMap, GameSession, NpcLibEntry, NpcShopOffer, PlacedNpc, PortalZone, PlayerState, QuestGoal, TaskDef, TokenDir, RubgItem } from '../types';
 import Randomizer from './Randomizer';
 import { idbGet } from '../db';
@@ -92,6 +92,11 @@ export default function GameScreen() {
   const prevRoomRef = useRef<number | null>(null);
   const roomMapRef = useRef<GameMap | null>(null);
   const portalTpAtRef = useRef(0);
+  /* ТУМАН ИССЛЕДОВАНИЯ (карта мира в режиме комнат): номера ОТКРЫТЫХ (посещённых) плиток.
+     visitedPlatesRef — источник для маски карты мира (rAF, без ре-рендеров); visitedCnt —
+     копия размера для HUD-бейджа «открыто k». Живут до перезапуска партии/смены карты. */
+  const visitedPlatesRef = useRef<Set<number>>(new Set());
+  const [visitedCnt, setVisitedCnt] = useState(0);
   const [roomNumUi, setRoomNumUi] = useState<number | null>(null);
   const [roomFlashTs, setRoomFlashTs] = useState(0);
   const [isFs, setIsFs] = useState(false);
@@ -1150,8 +1155,11 @@ export default function GameScreen() {
 
         // камера: в режиме мира — общий план (с ручным зумом), иначе — слежение за фишкой
         /* РЕЖИМ КОМНАТ (АЙЗЕК): работает только при следящей камере; в RUBG не действует
-           (нужны общий план и фаза самолёта), при одной плитке смысла нет */
-        const roomsOn = !!(m.roomMode && m.plateSize) && m.mode !== 'rubg' && viewMode !== 'world' && !peekMap && plateMetrics(m).total > 1;
+           (нужны общий план и фаза самолёта), при одной плитке смысла нет.
+           roomsMap — база (карта-плитки + режим комнат): в общем плане/заглядывании маски
+           комнаты нет, но включается ТУМАН ИССЛЕДОВАНИЯ (неоткрытые плитки скрыты). */
+        const roomsMap = !!(m.roomMode && m.plateSize) && m.mode !== 'rubg' && plateMetrics(m).total > 1;
+        const roomsOn = roomsMap && viewMode !== 'world' && !peekMap;
         let goal;
         if (viewMode === 'world' || peekMap) {
           const fv = fitView(m, w, h);
@@ -1197,7 +1205,7 @@ export default function GameScreen() {
              Смена комнаты — затемнение экрана + звук портала (переход ХОДЬБОЙ через
              открытый стык; переход ЧЕРЕЗ ПОРТАЛ уже озвучен самим порталом). */
           if (roomsOn) {
-            if (roomMapRef.current !== m) { roomMapRef.current = m; prevRoomRef.current = null; roomNumRef.current = null; setRoomNumUi(null); }
+            if (roomMapRef.current !== m) { roomMapRef.current = m; prevRoomRef.current = null; roomNumRef.current = null; setRoomNumUi(null); visitedPlatesRef.current = new Set(); setVisitedCnt(0); }
             const pn = followP ? plateNumAt(m, followP.x, followP.y) : null;
             if (pn) {
               if (pn !== roomNumRef.current) {
@@ -1208,6 +1216,11 @@ export default function GameScreen() {
                 prevRoomRef.current = pn;
               }
               roomNumRef.current = pn;
+              /* ТУМАН ИССЛЕДОВАНИЯ: посещённая комната остаётся ОТКРЫТОЙ на карте мира */
+              if (!visitedPlatesRef.current.has(pn)) {
+                visitedPlatesRef.current.add(pn);
+                setVisitedCnt(visitedPlatesRef.current.size);
+              }
               setRoomNumUi((u) => (u === pn ? u : pn));
               const pr = plateRectOf(m, pn);
               const vw = w / (zx * lookZoomRef.current), vh = h / (zx * lookZoomRef.current);
@@ -1300,8 +1313,11 @@ export default function GameScreen() {
           brokenAt: brokenAtRef.current,
           bossDown: sess.bossDown,
           bossFx,
-          /* РЕЖИМ КОМНАТ: темнота за пределами текущей плитки-комнаты */
+          /* РЕЖИМ КОМНАТ: темнота за пределами текущей плитки-комнаты.
+             ТУМАН ИССЛЕДОВАНИЯ: на карте мира (общий план/заглядывание) НЕОТКРЫТЫЕ
+             плитки тоже скрыты темнотой — видны только посещённые комнаты. */
           room: roomsOn && roomNumRef.current ? plateRectOf(m, roomNumRef.current) : null,
+          visitedPlates: roomsMap && (viewMode === 'world' || peekMap) ? [...visitedPlatesRef.current] : null,
         });
 
         /* RUBG: оверлей поверх поля — безопасная зона, самолёт, маркеры игры, радиус атаки,
@@ -1916,7 +1932,7 @@ export default function GameScreen() {
           /* РЕЖИМ КОМНАТ (АЙЗЕК): номер текущей плитки-комнаты — брат «ЛОКАЦИИ» плиточного режима */
           if (!roomsOnUi || !map) return null;
           const pm = plateMetrics(map);
-          return <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-sky" title="Режим комнат (Айзек): видна только текущая плитка; переходы — открытые стыки (ходьбой) и порталы">🧩 ПЛИТКА {roomNumUi ?? '—'}/{pm.total}</span>;
+          return <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-sky" title="Режим комнат (Айзек): видна только текущая плитка; переходы — открытые стыки (ходьбой) и порталы; на карте мира открыты только посещённые комнаты">🧩 ПЛИТКА {roomNumUi ?? '—'}/{pm.total} · открыто {Math.min(visitedCnt, pm.total)}</span>;
         })()}
         {isSkill && s.phase === 'playing' && !s.mapless && (
           <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-gold" title="Лимит ходов хоста в SKILL CHALLENGE">
@@ -1953,16 +1969,6 @@ export default function GameScreen() {
                       </span>
                       <span>№{p.pos + 1}</span>
                     </>
-                  ) : map?.resMode === 'time' ? (
-                    <>
-                      <span className="text-sky" title="Единственный ресурс — ВРЕМЯ">{fmtClock(p.secLeft)}</span>
-                      <span>№{p.pos + 1}</span>
-                    </>
-                  ) : map?.resMode === 'tries' ? (
-                    <>
-                      <span className="text-gold" title="Единственный ресурс — ПОПЫТКИ">{p.triesLeft} поп.</span>
-                      <span>№{p.pos + 1}</span>
-                    </>
                   ) : coinsRes ? (
                     <>
                       <span className="text-teal"><CoinRow value={p.coinsLeft ?? 0} size={11} /></span>
@@ -1989,11 +1995,10 @@ export default function GameScreen() {
           <GhostBtn small onClick={() => { setInvOpen(true); sfx.click(); }}>
             {Ic.grid(12)} Инвентарь{invCount > 0 ? ` · ${invCount}` : ''}{incomingTrades.length > 0 ? ' 💼' : ''}
           </GhostBtn>
-          {!roomsOnUi && (
-            <GhostBtn small onClick={() => { setPeekMap(false); setWorldZoom(1); worldPanRef.current = { x: 0, y: 0 }; setViewMode((m) => (m === 'world' ? 'follow' : 'world')); }}>
-              {Ic.map(12)} {viewMode === 'world' ? 'К игроку' : 'Карта мира'}
-            </GhostBtn>
-          )}
+          {/* КАРТА МИРА — доступна и в режиме комнат (v0.50.0): неоткрытые плитки скрывает туман исследования */}
+          <GhostBtn small onClick={() => { setPeekMap(false); setWorldZoom(1); worldPanRef.current = { x: 0, y: 0 }; setViewMode((m) => (m === 'world' ? 'follow' : 'world')); }}>
+            {Ic.map(12)} {viewMode === 'world' ? 'К игроку' : 'Карта мира'}
+          </GhostBtn>
           {room.isHost && (
             <GhostBtn small onClick={() => void saveSessionSnapshot(`${map.name} · ${new Date().toLocaleDateString('ru-RU')}`)}>
               {Ic.save(12)} Сохранить
@@ -2771,7 +2776,8 @@ export default function GameScreen() {
                   Хозяин ячейки: {ownerName} — потраченные ресурсы уйдут ему
                 </div>
               )}
-              {!roomsOnUi && <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>}
+              {/* «Глянуть карту мира» — снова доступна в режиме комнат: неоткрытое скрывает туман */}
+              <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
               {myTurn && ch.status !== 'choose' && !controlsLocked && (
                 <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
               )}
@@ -3348,7 +3354,8 @@ export default function GameScreen() {
                       />
                       {myQTask.desc && <TaskDesc text={myQTask.desc} label="Задание" />}
                       <div className="tick-label text-faint">Ром: {qName} · {consoleLabel(qRomDef?.ext)}</div>
-                      {!roomsOnUi && <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>}
+                      {/* «Глянуть карту мира» — снова доступна в режиме комнат: неоткрытое скрывает туман */}
+                      <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
                       <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
                       <EmuVolumeChip />
                       <GhostBtn small onClick={rubgToggleFs}>{isFs ? Ic.cross(12) : Ic.map(12)} {isFs ? 'Свернуть' : 'Во весь экран'}</GhostBtn>
@@ -3459,7 +3466,8 @@ export default function GameScreen() {
                     />
                     {myRubgTask.desc && <TaskDesc text={myRubgTask.desc} label="Задание" />}
                     <div className="tick-label text-faint">Ром: {rName} · {consoleLabel(rRomDef?.ext)}</div>
-                    {!roomsOnUi && <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>}
+                    {/* «Глянуть карту мира» — снова доступна в режиме комнат: неоткрытое скрывает туман */}
+                    <GhostBtn small onClick={() => setPeekMap(true)}>{Ic.map(12)} Глянуть карту мира</GhostBtn>
                     <GhostBtn small onClick={() => setControlsOpen(true)}>{Ic.gear(12)} Управление</GhostBtn>
                     <EmuVolumeChip />
                     <GhostBtn small onClick={rubgToggleFs}>{isFs ? Ic.cross(12) : Ic.map(12)} {isFs ? 'Свернуть' : 'Во весь экран'}</GhostBtn>

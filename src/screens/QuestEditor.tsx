@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../store';
 import { AnimPreview, GhostBtn, Ic, PxBtn, Stepper, Coin } from '../ui';
 import { DialogTreeEditor } from './DialogTreeEditor';
+import { QuestMapGraph } from './DialogueGraph';
 import { idbPut, uid } from '../db';
 import type { GameMap, MapEnding, NpcLibEntry, NpcQuest, NpcShopOffer, PlacedNpc, QuestGoalKind, RubgItemKind } from '../types';
 import { isQuestMode, questGoalText, RUBG_ITEMS } from '../types';
@@ -18,7 +19,7 @@ export default function QuestEditor() {
   const mapRef = useRef<GameMap | null>(null);
   mapRef.current = map;
   const dirtyRef = useRef(false);
-  const [tab, setTab] = useState<'npc' | 'ends'>('npc');
+  const [tab, setTab] = useState<'npc' | 'ends' | 'map'>('npc');
   const [selId, setSelId] = useState<string | null>(null);
 
   /* Автосохранение при уходе с экрана: правки квест-контента не теряются */
@@ -154,12 +155,13 @@ export default function QuestEditor() {
         )}
 
         {/* вкладки */}
-        <div className="flex items-center gap-2 mb-4">
-          {([['npc', `🧑 NPC и диалоги (${npcs.length})`], ['ends', `🎬 Концовки (${(map.endings ?? []).length})`]] as const).map(([k, label]) => (
+        <div className="flex items-center gap-2 mb-4 flex-wrap">
+          {([['npc', `🧑 NPC и диалоги (${npcs.length})`], ['ends', `🎬 Концовки (${(map.endings ?? []).length})`], ['map', '🗺 Схема карты']] as const).map(([k, label]) => (
             <button
               key={k}
               onClick={() => { setTab(k); sfx.hover(); }}
               className={`px-3 py-1.5 font-display text-[11px] uppercase tracking-wide border-2 cursor-pointer transition-colors ${tab === k ? 'border-gold text-gold bg-gold/10' : 'border-edge text-dim hover:text-paper'}`}
+              title={k === 'map' ? 'Общая схема: все NPC, деревья диалогов, квесты и концовки на одном холсте — как влияют ответы' : undefined}
             >{label}</button>
           ))}
         </div>
@@ -242,6 +244,8 @@ export default function QuestEditor() {
                         dialog={selNpc.dialog}
                         endings={map.endings ?? []}
                         onChange={(d) => updNpc(selIdx, { dialog: d })}
+                        posStore={map.dlgPos}
+                        onPosStore={(p) => updMap({ dlgPos: p ?? undefined })}
                       />
                     )}
                   </div>
@@ -384,6 +388,25 @@ export default function QuestEditor() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ============ ВКЛАДКА СХЕМА КАРТЫ (v0.50.0): граф как в ComfyUI ============ */}
+        {tab === 'map' && (
+          <div className="space-y-2">
+            <p className="text-[11px] text-dim leading-tight">
+              ОБЩАЯ КАРТИНА: все NPC с их деревьями диалогов, КВЕСТЫ и КОНЦОВКИ на одном холсте — видно, что из чего растёт:
+              какие варианты ответов ведут к концовкам (золотые стрелки), где игрок получает флаг и какой вариант без него скрыт
+              (янтарный пунктир). Клик по любому узлу — открыть этого NPC на вкладке «NPC и диалоги». Схему можно масштабировать,
+              панорамировать и раскладывать узлы под себя (сохраняется в карту).
+            </p>
+            <QuestMapGraph
+              map={map}
+              pos={map.dlgPos}
+              onPos={(p) => updMap({ dlgPos: p ?? undefined })}
+              onSelectNpc={(id) => { setSelId(id); setTab('npc'); sfx.hover(); }}
+              height={560}
+            />
           </div>
         )}
 

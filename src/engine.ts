@@ -1,5 +1,5 @@
 import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, NpcReward, PlayerState, QuestGoal, RubgItemKind, RubgZonePhasePlan, TaskDef, TradeOffer, TokenDir } from './types';
-import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, isQuestMode, questGoalText, tileAt, tileRectOf, coinsStr, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, RUBG_ZONE_DEFAULT_SEC, rubgFmtZone, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx } from './types';
+import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, isQuestMode, questGoalText, tileAt, tileRectOf, coinsStr, normResMode, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, RUBG_ZONE_DEFAULT_SEC, rubgFmtZone, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx } from './types';
 import type { RubgItem } from './types';
 import type { JoyId } from './types';
 import { CELL, cellAtPoint, cellCenter, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
@@ -309,7 +309,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     const coinsFatal = map.coinsOnly === true && map.startCoins !== undefined;
     const isRubg = map.mode === 'rubg';
     const hpRes = isRubg || map.resMode === 'hp'; // ресурс «полоска HP» — вылет по нулю HP (RUBG и карты с выбором «HP»)
-    const resM = map.resMode ?? 'std';
+    const resM = normResMode(map.resMode); // время+попытки — один ресурс (time/tries нормализуются в std)
     const failsLimit = map.questDefeatFails && map.questDefeatFails > 0 ? Math.floor(map.questDefeatFails) : 0; // QUEST: поражение при N провалах
     for (const p of s.players) {
       const out = hpRes
@@ -628,7 +628,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         };
         log(`✔ ${winner.name}: верный ответ! +${wc} бронзы — капитал ${coinsStr(w?.coinsLeft ?? 0)}`);
       } else {
-        const kind = map.resMode === 'time' ? 'time' : map.resMode === 'tries' ? 'tries' : Math.random() < 0.5 ? 'time' : 'tries';
+        const kind = Math.random() < 0.5 ? 'time' : 'tries'; // время и попытки — один ресурс: квиз честно платит случайным из них
         if (w) {
           if (kind === 'time') w.secLeft += 300;
           else w.triesLeft += 5;
@@ -983,11 +983,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       /* РЕСУРС «ПОЛОСКА HP»: выбора нет — задание сразу готово (плата по итогам: +10% победа / −5% поражение) */
       s.challenge.mode = 'hp';
       s.challenge.status = 'ready';
-    } else if (map.resMode === 'time' || map.resMode === 'tries') {
-      /* ОДИН РЕСУРС (мастер челленджа): выбора нет — задание сразу готово */
-      s.challenge.mode = map.resMode;
-      s.challenge.status = 'ready';
     }
+    /* «только время»/«только попытки» упразднены (v0.50.0): при ресурсе «время и попытки» (std)
+       игрок сам выбирает, чем играть в окне задания — ветки автоготовности больше не нужны */
     const owner = s.captured[p.pos] ? s.players.find((x) => x.id === s.captured[p.pos]) : null;
     log(`🎯 ${p.name}: задание на ячейке ${posName(p.pos)}${owner ? ` (хозяин ${owner.name})` : ''}`);
     /* пакость «Один кубик»: следующий бросок вставшего — только один кубик */
@@ -1557,9 +1555,6 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           } else if (map.resMode === 'hp') {
             s.challenge.mode = 'hp'; // ресурс «полоска HP» — плата по итогам
             s.challenge.status = 'ready';
-          } else if (map.resMode === 'time' || map.resMode === 'tries') {
-            s.challenge.mode = map.resMode; // ОДИН ресурс — выбора нет
-            s.challenge.status = 'ready';
           }
           const owner = s.captured[i] ? s.players.find((pl) => pl.id === s.captured[i]) : null;
           log(`🎯 ${p.name} ПЕРВЫМ пересёк ячейку ${posName(i)} — задание его!${owner ? ` (хозяин ${owner.name})` : ''}`);
@@ -1826,7 +1821,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (!job || job.cellIdx !== a.cellIdx) break;
       delete s.qJobs![p.id];
       /* ресурс партии: время списывается по факту (минуты за задание); монеты/HP — платёж по итогам; попытка — 1 за вход */
-      const resM = map.resMode ?? ((map.coinsOnly && map.startCoins !== undefined) ? 'coins' : 'std');
+      const resM = (map.coinsOnly && map.startCoins !== undefined) ? 'coins' : normResMode(map.resMode); // время+попытки — один ресурс
       if (resM === 'time' || resM === 'std') {
         const mins = Math.max(0, Math.ceil((Date.now() - job.startedAt) / 60000));
         const spend = Math.min(mins, Math.floor(p.secLeft / 60)) * 60;
@@ -2249,10 +2244,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (a.mode === 'time' && p.secLeft <= 0) break;
       if (a.mode === 'tries' && p.triesLeft <= 0) break;
       if (a.mode === 'coins' && map.startCoins === undefined) break;
-      /* ОДИН РЕСУРС (мастер челленджа): «время» недоступно при ресурсе «попытки» и наоборот */
-      const resM = map.resMode ?? 'std';
-      if (a.mode === 'time' && resM === 'tries') break;
-      if (a.mode === 'tries' && resM === 'time') break;
+      /* Ресурс «время и попытки» (v0.50.0): время и попытки — ОДИН ресурс, играют вместе —
+         выбирать между ними больше не запрещают (time/tries у карты нормализуются в std) */
       ch.mode = a.mode;
       // пакость «Штраф ×2» удваивает цену пропуска
       const need = SKIP_COST * (cellTaskOf(s, map, ch.cellIdx)?.chaos === 'skipX2' ? 2 : 1);
@@ -2731,7 +2724,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
             answerer.coinsLeft = Math.max(0, (answerer.coinsLeft ?? 0) - lc);
             log(`✖ ${answerer.name}: неверно (−${lc} бронзы) — капитал ${coinsStr(answerer.coinsLeft)}`);
           } else {
-            const kind = map.resMode === 'time' ? 'time' : map.resMode === 'tries' ? 'tries' : Math.random() < 0.5 ? 'time' : 'tries';
+            const kind = Math.random() < 0.5 ? 'time' : 'tries'; // время и попытки — один ресурс: квиз честно платит случайным из них
             if (kind === 'time') answerer.secLeft = Math.max(0, answerer.secLeft - 300);
             else answerer.triesLeft = Math.max(0, answerer.triesLeft - 5);
             log(`✖ ${answerer.name}: неверно (−5 ${kind === 'time' ? 'мин' : 'попыток'})`);
@@ -2752,7 +2745,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           answerer.coinsLeft = Math.min(COINS_MAX, (answerer.coinsLeft ?? 0) + wc);
           log(`✔ ${answerer.name}: верно! +${wc} бронзы — капитал ${coinsStr(answerer.coinsLeft)}`);
         } else {
-          const kind = map.resMode === 'time' ? 'time' : map.resMode === 'tries' ? 'tries' : Math.random() < 0.5 ? 'time' : 'tries';
+          const kind = Math.random() < 0.5 ? 'time' : 'tries'; // время и попытки — один ресурс: квиз честно платит случайным из них
           if (kind === 'time') answerer.secLeft += 300;
           else answerer.triesLeft += 5;
           log(`✔ ${answerer.name}: верно! +5 ${kind === 'time' ? 'мин' : 'попыток'} — квиз продолжается`);
@@ -2808,7 +2801,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         q.result = { correct: false, deltaMin: 0, deltaTries: 0, targetName: loser.name, reason: 'timeout' };
         log(`⏰ Время вышло! ${loser.name}: −${lc} бронзы — капитал ${coinsStr(loser.coinsLeft)}`);
       } else {
-        const kind = map.resMode === 'time' ? 'time' : map.resMode === 'tries' ? 'tries' : Math.random() < 0.5 ? 'time' : 'tries';
+        const kind = Math.random() < 0.5 ? 'time' : 'tries'; // время и попытки — один ресурс: квиз честно платит случайным из них
         if (kind === 'time') { loser.secLeft = Math.max(0, loser.secLeft - 300); deltaMin = -5; }
         else { loser.triesLeft = Math.max(0, loser.triesLeft - 5); deltaTries = -5; }
         q.result = { correct: false, deltaMin, deltaTries, targetName: loser.name, reason: 'timeout' };

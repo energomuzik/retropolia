@@ -323,6 +323,10 @@ export interface BoardDrawOpts {
    Передаётся только из игры при включённом roomMode; в редакторе не передаётся.
    Всё за пределами прямоугольника скрывается темнотой + светящаяся граница комнаты. */
   room?: { x: number; y: number; w: number; h: number } | null;
+  /* ТУМАН ИССЛЕДОВАНИЯ (карта мира в режиме комнат, v0.50.0): номера ОТКРЫТЫХ плиток.
+   Передаётся из игры только в общем плане/заглядывании карты мира: все плитки, НЕ вошедшие
+   в список, рисуются ПОСЛЕДНИМ слоем залитыми темнотой (карта заполняется по мере исследования). */
+  visitedPlates?: number[] | null;
 }
 
 function px(ctx: CanvasRenderingContext2D, x: number, y: number, s: number, pattern: string[], color: string) {
@@ -1142,6 +1146,26 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     ctx.strokeStyle = 'rgba(167,139,250,0.5)';
     ctx.lineWidth = 2.5 / Math.max(0.05, view.zoom);
     ctx.strokeRect(rm.x, rm.y, rm.w, rm.h);
+    ctx.restore();
+  }
+
+  /* ТУМАН ИССЛЕДОВАНИЯ на карте мира (режим комнат, v0.50.0): общий план показывает
+     ТОЛЬКО ОТКРЫТЫЕ (посещённые) плитки-комнаты; неоткрытые скрыты темнотой с тусклой
+     сиреневой рамкой — как в метроидваниях: карта заполняется по мере исследования.
+     Ставится после маски комнаты — работает и когда самой маски нет (общий план). */
+  if (o.visitedPlates && o.visitedPlates.length > 0) {
+    const pm = plateMetrics(map);
+    const seen = new Set(o.visitedPlates);
+    ctx.save();
+    for (let n = 1; n <= pm.total; n++) {
+      if (seen.has(n)) continue; // открытая комната видна
+      const r = plateRectOf(map, n);
+      ctx.fillStyle = 'rgba(3,4,9,0.97)';
+      ctx.fillRect(r.x - 1, r.y - 1, r.w + 2, r.h + 2);
+      ctx.strokeStyle = 'rgba(167,139,250,0.22)'; // тусклая рамка «здесь есть комната»
+      ctx.lineWidth = 1.5 / Math.max(0.05, view.zoom);
+      ctx.strokeRect(r.x, r.y, r.w, r.h);
+    }
     ctx.restore();
   }
 

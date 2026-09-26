@@ -10,7 +10,7 @@ import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, GameMap, MapEnding, NpcAnimDef, NpcLibEntry, NpcQuest, NpcShopOffer, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, RubgItemKind, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
-import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileRectOf, RUBG_ITEMS, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
+import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, normResMode, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileRectOf, RUBG_ITEMS, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
 import type { MapMode } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
@@ -161,6 +161,7 @@ export default function MapEditor() {
   const [selAnim, setSelAnim] = useState<string | null>(null); // выбранная размещённая анимация
   const [placeNpcId, setPlaceNpcId] = useState(''); // вшитый NPC, выбранный для размещения
   const [selNpc, setSelNpc] = useState<string | null>(null); // выбранный размещённый NPC
+  const [dlgWinOpen, setDlgWinOpen] = useState(false); // окно личного дерева диалогов NPC (с граф-схемой)
   const [placeBossId, setPlaceBossId] = useState(''); // вшитый босс, выбранный для размещения
   const [selBoss, setSelBoss] = useState<string | null>(null); // выбранный размещённый босс
   const [selWall, setSelWall] = useState<number | null>(null); // выбранная стена (индекс)
@@ -2804,15 +2805,15 @@ export default function MapEditor() {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {/* ТРИ взаимоисключающих варианта — как в мастере «Создать челлендж» */}
+                    {/* ТРИ варианта ресурса: «время и попытки» — ОДИН нераздельный ресурс (v0.50.0);
+                        выбор «только время»/«только попытки» упразднён — старые карты с ним
+                        автоматически играются как «время и попытки» (normResMode) */}
                     {([
-                      { id: 'std', title: '⏱ 🎯 Время и попытки', desc: 'Классика: таймер и попытки у каждого. Кнопки «Время/Попытки» в окне задания.' },
-                      { id: 'time', title: '⏱ Только время', desc: 'ОДИН ресурс — минуты: попытки не считаются и в игре не показываются. Вылет на нуле минут.' },
-                      { id: 'tries', title: '🎯 Только попытки', desc: 'ОДИН ресурс — попытки: таймер не тикает и не показывается. Вылет на нуле попыток.' },
+                      { id: 'std', title: '⏱🎯 Время и попытки', desc: 'ОДИН ресурс из двух счётчиков: таймер и попытки у каждого; вылет на нуле минут ИЛИ попыток. В окне задания — выбор «Время/Попытки».' },
                       { id: 'coins', title: '🪙 Монеты', desc: 'Единственный ресурс — монеты (старт/награды/плата за пропуск). 0 монет = вылет.' },
                       { id: 'hp', title: '❤ Полоска HP', desc: 'Единственный ресурс — HP: победа +10%, поражение/пропуск −5%. На нуле — вылет.' },
                     ] as const).map((r) => {
-                      const on = (map.resMode ?? (map.coinsOnly && map.startCoins !== undefined ? 'coins' : 'std')) === r.id;
+                      const on = normResMode(map.resMode ?? (map.coinsOnly && map.startCoins !== undefined ? 'coins' : 'std')) === r.id;
                       return (
                         <button
                           key={r.id}
@@ -2822,10 +2823,6 @@ export default function MapEditor() {
                               updMap({ resMode: 'coins', coinsOnly: true, startCoins: map.startCoins ?? 100, taskWinCoins: map.taskWinCoins ?? 10, skipCoins: map.skipCoins ?? 5, quizWinCoins: map.quizWinCoins ?? 5, quizLoseCoins: map.quizLoseCoins ?? 5 });
                             } else if (r.id === 'hp') {
                               updMap({ resMode: 'hp', coinsOnly: undefined, startCoins: undefined });
-                            } else if (r.id === 'time') {
-                              updMap({ resMode: 'time', coinsOnly: undefined, startCoins: undefined });
-                            } else if (r.id === 'tries') {
-                              updMap({ resMode: 'tries', coinsOnly: undefined, startCoins: undefined });
                             } else {
                               updMap({ resMode: 'std', coinsOnly: undefined, startCoins: undefined });
                             }
@@ -2838,22 +2835,11 @@ export default function MapEditor() {
                       );
                     })}
                     {/* настройки выбранного варианта */}
-                    {(map.resMode ?? 'std') === 'std' && (
+                    {normResMode(map.resMode) === 'std' && (
                       <div className="space-y-2 pt-1">
                         <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Минут у каждого</span><Stepper value={map.startMin ?? 60} onChange={(v) => updMap({ startMin: v })} min={5} max={180} step={5} /></div>
                         <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><Stepper value={map.startTries ?? 60} onChange={(v) => updMap({ startTries: v })} min={5} max={180} step={5} /></div>
-                      </div>
-                    )}
-                    {map.resMode === 'time' && (
-                      <div className="space-y-2 pt-1">
-                        <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Минут у каждого</span><Stepper value={map.startMin ?? 60} onChange={(v) => updMap({ startMin: v })} min={5} max={180} step={5} /></div>
-                        <p className="text-[9px] text-faint leading-tight">Единственный ресурс — ВРЕМЯ: попытки не тратятся и не показываются. Победа в задании списывает фактические минуты.</p>
-                      </div>
-                    )}
-                    {map.resMode === 'tries' && (
-                      <div className="space-y-2 pt-1">
-                        <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Попыток у каждого</span><Stepper value={map.startTries ?? 60} onChange={(v) => updMap({ startTries: v })} min={5} max={180} step={5} /></div>
-                        <p className="text-[9px] text-faint leading-tight">Единственный ресурс — ПОПЫТКИ: вход в задание тратит одну попытку, таймер не идёт.</p>
+                        <p className="text-[9px] text-faint leading-tight">Время и попытки — ОДИН ресурс: оба счётчика активны всегда; вход в задание тратит попытку и минуты по факту. Вылет на нуле минут ИЛИ попыток.</p>
                       </div>
                     )}
                     {map.resMode === 'coins' && (
@@ -4016,13 +4002,22 @@ export default function MapEditor() {
                   <div className="border-2 border-edge px-2 py-2 space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="tick-label text-gold">💬 Дерево диалогов</span>
-                      {selNpcDef.dialog && (
-                        <button
-                          onClick={() => { updNpc(selNpcIdx, { dialog: undefined }); dirtyRef.current = true; sfx.fail(); }}
-                          title="Удалить диалог целиком"
-                          className="text-[10px] text-faint hover:text-coral cursor-pointer px-1"
-                        >удалить</button>
-                      )}
+                      <div className="flex items-center gap-1">
+                        {selNpcDef.dialog && (
+                          <button
+                            onClick={() => { setDlgWinOpen(true); sfx.click(); }}
+                            title="Открыть личное дерево диалогов этого NPC в большом окне — с граф-схемой (как в ComfyUI)"
+                            className="text-[10px] text-teal hover:text-paper cursor-pointer px-1 border-2 border-teal/50"
+                          >🖼 Окно</button>
+                        )}
+                        {selNpcDef.dialog && (
+                          <button
+                            onClick={() => { updNpc(selNpcIdx, { dialog: undefined }); dirtyRef.current = true; sfx.fail(); }}
+                            title="Удалить диалог целиком"
+                            className="text-[10px] text-faint hover:text-coral cursor-pointer px-1"
+                          >удалить</button>
+                        )}
+                      </div>
                     </div>
                     {!selNpcDef.dialog ? (
                       <button
@@ -4034,6 +4029,8 @@ export default function MapEditor() {
                         dialog={selNpcDef.dialog}
                         endings={map.endings ?? []}
                         onChange={(d) => { updNpc(selNpcIdx, { dialog: d }); dirtyRef.current = true; }}
+                        posStore={map.dlgPos}
+                        onPosStore={(p) => { updMap({ dlgPos: p ?? undefined }); dirtyRef.current = true; }}
                       />
                     )}
                   </div>
@@ -4318,7 +4315,31 @@ export default function MapEditor() {
           </div>
         </Modal>
       )}
+
+      {/* ---------- ОКНО ЛИЧНОГО ДЕРЕВА ДИАЛОГОВ NPC (v0.50.0) ---------- */}
+      {dlgWinOpen && map && selNpcDef?.dialog && (
+        <div className="fixed inset-0 z-[96] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-[rgba(4,6,14,0.9)]" onClick={() => setDlgWinOpen(false)} />
+          <div className="relative pixel-panel pixel-corners w-full max-w-4xl max-h-[94vh] overflow-y-auto p-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="font-display uppercase tracking-wider text-teal text-sm truncate">
+                💬 Дерево диалогов — {selNpcLib?.name ?? 'NPC'}
+              </span>
+              <span className="tick-label text-faint hidden sm:inline">узлов: {selNpcDef.dialog.nodes.length}</span>
+              <GhostBtn small className="ml-auto shrink-0" onClick={() => setDlgWinOpen(false)}>{Ic.cross(12)} Закрыть</GhostBtn>
+            </div>
+            <DialogTreeEditor
+              dialog={selNpcDef.dialog}
+              endings={map.endings ?? []}
+              openGraph
+              graphHeight={430}
+              onChange={(d) => { updNpc(selNpcIdx, { dialog: d }); dirtyRef.current = true; }}
+              posStore={map.dlgPos}
+              onPosStore={(p) => { updMap({ dlgPos: p ?? undefined }); dirtyRef.current = true; }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
-

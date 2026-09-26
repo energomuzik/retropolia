@@ -3,6 +3,8 @@ import { uid } from '../db';
 import { sfx } from '../sound';
 import type { DialogNode, DialogOption, MapEnding, NpcDialog } from '../types';
 import { Coin } from '../ui';
+import { DialogueGraph } from './DialogueGraph';
+import type { DlgPosMap } from './DialogueGraph';
 
 /* ОБЩИЙ РЕДАКТОР ДЕРЕВА ДИАЛОГОВ NPC (v0.46.0) — один компонент для редактора карт
    И для «Редактора квестов и диалогов». Сделан удобным и понятным:
@@ -16,13 +18,22 @@ import { Coin } from '../ui';
    • «Далее:» и «Старт:» показывают НОМЕР и текст узла, а не безликий «(пусто)»;
    • при удалении узла ссылки на него автоматически очищаются;
    • флаги: вариант может ставить флаг и/или быть видимым только с флагом/без флага
-     (пустые поля = вариант виден всем всегда). */
-export function DialogTreeEditor({ dialog, endings, onChange }: {
+     (пустые поля = вариант виден всем всегда).
+   СХЕМА (v0.50.0): кнопка «Схема» раскрывает граф в духе ComfyUI — узлы-вопросы на холсте
+   со стрелками «что из чего растёт»; узлы перетаскиваются (позиции сохраняются в карту
+   через posStore/onPosStore), зум колесом, панорама, «Собрать» раскладывает заново.
+   Клик по узлу графа выбирает его для редактирования ниже. */
+export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosStore, openGraph = false, graphHeight = 300 }: {
   dialog: NpcDialog;
   endings: MapEnding[];
   onChange: (d: NpcDialog) => void;
+  posStore?: DlgPosMap;                 // сохранённые позиции узлов (map.dlgPos)
+  onPosStore?: (p: DlgPosMap | null) => void; // записать позиции в карту (null — сброс)
+  openGraph?: boolean;                  // показать схему сразу (окно дерева NPC)
+  graphHeight?: number;                 // высота холста схемы
 }) {
   const [selRaw, setSel] = useState<string>('');
+  const [graphOpen, setGraphOpen] = useState(openGraph);
   const nodes = dialog.nodes;
   /* выбранная нода; сбрасывается на стартовую, если удалили текущую */
   const selId = nodes.some((n) => n.id === selRaw) ? selRaw : dialog.root;
@@ -112,7 +123,7 @@ export function DialogTreeEditor({ dialog, endings, onChange }: {
 
   return (
     <div className="space-y-2">
-      {/* стартовый узел — с него диалог начинается (нумерованный список) */}
+      {/* стартовый узел + переключатель схемы */}
       <div className="flex items-center gap-1.5">
         <span className="tick-label text-faint shrink-0">Старт:</span>
         <select
@@ -124,7 +135,26 @@ export function DialogTreeEditor({ dialog, endings, onChange }: {
             <option key={n.id} value={n.id}>{`№${i + 1} · ${(n.text || '(пусто)').slice(0, 26)}`}</option>
           ))}
         </select>
+        <button
+          onClick={() => { setGraphOpen((v) => !v); sfx.hover(); }}
+          className={`px-2 py-1 border-2 font-display text-[9px] uppercase cursor-pointer transition-colors shrink-0 ${graphOpen ? 'border-teal text-teal bg-teal/10' : 'border-edge text-faint hover:text-teal'}`}
+          title="Граф-схема дерева: узлы-вопросы и стрелки «что из чего растёт» — как в ComfyUI"
+        >🌳 Схема</button>
       </div>
+
+      {/* ГРАФ-СХЕМА ДЕРЕВА (ComfyUI): узлы перетаскиваются, позиции сохраняются в карту */}
+      {graphOpen && (
+        <DialogueGraph
+          dialog={dialog}
+          endings={endings}
+          selId={selId}
+          onSelect={(id) => { setSel(id); sfx.hover(); }}
+          pos={posStore}
+          onPos={onPosStore}
+          height={graphHeight}
+          fitKey={dialog.root}
+        />
+      )}
 
       {/* СПИСОК УЗЛОВ-вопросов: клик — выбрать для редактирования */}
       <div className="space-y-1">
