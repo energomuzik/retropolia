@@ -20,10 +20,12 @@ import type { DlgEditOps, DlgPosMap } from './DialogueGraph';
    • на узле: «＋ ответ», ✕ у варианта, ✕ в шапке узла (ссылки очищаются);
    • клик по узлу выбирает его — панель ниже правит СВОЙСТВА выбранного узла:
      «Далее», концовка, награды, ФЛАГИ (с подсказками, списком флагов карты и
-     ПРИМЕРОМ-объяснением), маркеры «🛒 торговля на этом узле» / «📜 квесты на этом
-     узле» и галочка «📌 показывать всегда» (v0.53: реплика узла не сворачивается
-     в «…уже слышали», даже если игрок её уже видел — решает автор карты). */
-export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosStore, height = 380, selId, onSelect, allFlags = [], onAddEnding, onDelEnding }: {
+     ПРИМЕРОМ-объяснением), «🚪 отнести к ячейке» у варианта (v0.54: NPC переносит
+     игрока на выбранную ячейку), маркеры «🛒 торговля на этом узле» / «📜 квесты
+     на этом узле» и ПИН «📌 скрывать, если игрок это уже слышал» (v0.54, наоборот
+     к v0.53: по умолчанию реплики пишутся ВСЕГДА, пин — по желанию автора; СТАРТОВЫЙ
+     узел пин игнорирует — приветствие NPC пишется всегда). */
+export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosStore, height = 380, selId, onSelect, allFlags = [], cells = [], onAddEnding, onDelEnding }: {
   dialog: NpcDialog;
   endings: MapEnding[];
   onChange: (d: NpcDialog) => void;
@@ -33,6 +35,7 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
   selId?: string | null;                // выбранный узел — снаружи (окно NPC продолжает выбор)
   onSelect?: (id: string) => void;
   allFlags?: string[];                  // v0.52: флаги, уже использованные на карте (подсказка в полях)
+  cells?: { idx: number; label: string }[]; // v0.54: ячейки карты для «отнести к ячейке» у вариантов
   onAddEnding?: () => void;             // v0.53: «＋ Концовка» на схеме — новая концовка карты
   onDelEnding?: (id: string) => void;   // v0.53: ✕ на золотой плашке — удалить концовку
 }) {
@@ -201,10 +204,16 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
               <input type="checkbox" checked={!!selNode.showQuests} onChange={(ev) => updNode(selNode.id, { showQuests: ev.target.checked || undefined })} />
               📜 квесты на этом узле
             </label>
-            <label className="flex items-center gap-1 text-[10px] text-gold cursor-pointer" title="v0.53: реплика этого узла ВСЕГДА показывается целиком — тумблер игрока «сказанное скрыто» её НЕ сворачивает, даже если игрок её уже слышал. Без галочки реплика после первого просмотра схлопывается в «…вы это уже слышали» (кнопка «показать» возвращает текст).">
-              <input type="checkbox" checked={!!selNode.alwaysShow} onChange={(ev) => updNode(selNode.id, { alwaysShow: ev.target.checked || undefined })} />
-              📌 показывать эту реплику всегда
-            </label>
+            {/* v0.54 (НАОБОРОТ к v0.53): ПИН — по умолчанию ВСЕ реплики пишутся всегда;
+                пин автора СКРЫВАЕТ виденную реплику. СТАРТОВЫЙ узел пин игнорирует. */}
+            {dialog.root !== selNode.id ? (
+              <label className="flex items-center gap-1 text-[10px] text-gold cursor-pointer" title="По умолчанию реплика пишется ВСЕГДА. С пином реплика, которую игрок уже слышал, схлопывается в «…вы это уже слышали» (кнопка «показать» возвращает текст) — при включённом тумблере игрока «сказанное скрыто».">
+                <input type="checkbox" checked={!!selNode.pinHide} onChange={(ev) => updNode(selNode.id, { pinHide: ev.target.checked || undefined })} />
+                📌 скрывать, если игрок это уже слышал
+              </label>
+            ) : (
+              <span className="text-[9px] text-faint" title="Стартовое сообщение NPC считается виденным, но пишется ВСЕГДА — пин на нём не действует.">🌱 стартовая реплика пишется всегда</span>
+            )}
           </div>
 
           <div className="flex items-center justify-between gap-1">
@@ -259,6 +268,20 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
                   >
                     <option value="">— нет —</option>
                     {endings.map((e) => <option key={e.id} value={e.id}>{e.name || '(без названия)'}</option>)}
+                  </select>
+                </div>
+              )}
+              {/* v0.54: NPC ОТНОСИТ игрока к ячейке при выборе варианта (мгновенный перенос, как портал) */}
+              {cells.length > 0 && (
+                <div className="flex items-center gap-1 flex-wrap">
+                  <span className="tick-label text-teal shrink-0" title="Выбор варианта перенесёт игрока на эту ячейку — NPC «относит» его туда (мгновенный перенос, как через портал)">🚪 отнести к ячейке:</span>
+                  <select
+                    className="field-in px-1 py-1 text-[10px] flex-1 min-w-[110px]"
+                    value={o.tpCell !== undefined ? String(o.tpCell) : ''}
+                    onChange={(ev) => updOpt(selNode.id, oi, { tpCell: ev.target.value === '' ? undefined : Math.floor(Number(ev.target.value)) })}
+                  >
+                    <option value="">— нет —</option>
+                    {cells.map((c) => <option key={c.idx} value={c.idx}>{c.label}</option>)}
                   </select>
                 </div>
               )}

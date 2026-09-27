@@ -4463,6 +4463,7 @@ export default function MapEditor() {
               endings={map.endings ?? []}
               height={470}
               allFlags={allDlgFlags(map)}
+              cells={(map.cells ?? []).map((c, i) => ({ idx: i, label: `№${c?.n ?? i + 1}${c?.label ? ` · ${c.label}` : c?.task?.title ? ` · ${c.task.title.slice(0, 18)}` : ''}` }))}
               onChange={(d) => { updNpc(selNpcIdx, { dialog: d }); dirtyRef.current = true; }}
               posStore={map.dlgPos}
               onPosStore={(p) => { updMap({ dlgPos: p ?? undefined }); dirtyRef.current = true; }}

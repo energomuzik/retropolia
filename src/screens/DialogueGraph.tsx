@@ -16,8 +16,10 @@ import type { DialogNode, GameMap, MapEnding, NpcDialog } from '../types';
      удаляет узел (ссылки на него очищаются);
    • клик по узлу выбирает его — текст и свойства правятся в панели под холстом;
    • узлы ПЕРЕТАСКИВАЮТСЯ мышью/пальцем — позиции сохраняются в карту (map.dlgPos);
-   • холст панорамируется перетаскиванием фона; МАСШТАБ — ТОЛЬКО кнопками «＋/−/⤢»
-     (v0.53: зум колесом УБРАН — колесо не уводит окно вверх, прокрутка — ползунком);
+   • холст панорамируется перетаскиванием фона; МАСШТАБ — КОЛЕСОМ МЫШИ (вокруг курсора)
+     или кнопками «＋/−/⤢» (v0.54, наоборот к v0.53: колесо СНОВА масштабирует схему,
+     но прокрутку СТРАНИЦЫ отменяет нативный непассивный слушатель — окно больше
+     не уезжает вверх; прокрутка окна — ползунком, как и просили);
    • «Собрать» раскладывает дерево заново по глубине (BFS от стартового узла);
    • ЦВЕТА НИТЕЙ (v0.53): у каждого варианта ответа — СВОЙ цвет (нить, сокет и подпись
      окрашены одинаково — видно, какая нить куда идёт); золотая — КОНЦОВКА, янтарный
@@ -204,6 +206,8 @@ function GraphViewport({ height, bbox, fitKey, zoomRef, vtRef, onBgDblClick, chi
   }, []);
   const z = vt?.z ?? 1;
   zoomRef.current = z;
+  const zoomAtRef = useRef(zoomAt);
+  zoomAtRef.current = zoomAt;
   /* держим актуальную трансформацию снаружи (нити, «＋ Узел» в центре экрана) */
   vtRef.current = { x: vt?.x ?? 0, y: vt?.y ?? 0, z, svg: svgRef.current };
 
@@ -216,6 +220,23 @@ function GraphViewport({ height, bbox, fitKey, zoomRef, vtRef, onBgDblClick, chi
   const toCanvasRef = useRef(toCanvas);
   toCanvasRef.current = toCanvas;
 
+  /* v0.54 (НАОБОРОТ к v0.53): КОЛЕСО МЫШИ = МАСШТАБ вокруг курсора. Слушатель вешается
+     НАТИВНО с passive:false — только так preventDefault() реально отменяет прокрутку
+     страницы (React-овский onWheel пассивен, из-за этого в v0.50 окно «уезжало вверх»
+     — тогда зум и убрали; теперь колесо зумит, а окно стоит на месте).
+     Прокрутка самого окна — обычным ползунком за пределами холста. */
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      zoomAtRef.current(e.deltaY < 0 ? 1.12 : 1 / 1.12, e.clientX - r.left, e.clientY - r.top);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
   return (
     <div className="relative select-none" ref={wrapRef}>
       <svg
@@ -224,8 +245,8 @@ function GraphViewport({ height, bbox, fitKey, zoomRef, vtRef, onBgDblClick, chi
         height={height}
         className="block cursor-grab active:cursor-grabbing"
         style={{ background: 'repeating-conic-gradient(#0a0d1c 0 25%, #0b0e1c 0 50%) 0 0 / 22px 22px', border: '2px solid #23294d' }}
-        /* v0.53: onWheel УБРАН — колесо мыши больше не масштабирует схему и не уводит
-           окно вверх; масштаб — кнопками «＋/−/⤢» справа вверху, прокрутка окна — ползунком */
+        /* v0.54: зум колесом вешается нативным непассивным слушателем выше — здесь
+           onWheel НЕ используется (React-обработчик пассивен и не отменяет прокрутку) */
         onPointerDown={(e) => {
           if ((e.target as Element).closest('[data-node]')) return; // узлы и нити тянут себя сами
           panRef.current = { sx: e.clientX, sy: e.clientY, vx: vt?.x ?? 0, vy: vt?.y ?? 0 };
@@ -254,7 +275,7 @@ function GraphViewport({ height, bbox, fitKey, zoomRef, vtRef, onBgDblClick, chi
         <button onClick={() => fitRef.current()} className="px-2 py-0.5 border-2 border-edge bg-[rgba(7,9,18,0.9)] text-dim font-display text-[9px] uppercase cursor-pointer hover:text-gold" title="Вписать схему в окно">⤢ Вписать</button>
       </div>
       <div className="absolute left-1.5 bottom-1.5 px-1.5 py-0.5 text-[8px] text-faint font-pixel bg-[rgba(7,9,18,0.85)] border border-[#23294d] pointer-events-none">
-        масштаб — кнопки ＋/− справа вверху · тяните фон — панорама · тяните узел — переместить · нить из сокета — соединить · двойной клик по фону — новый узел
+        масштаб — колесо мыши или кнопки ＋/− справа вверху · тяните фон — панорама · тяните узел — переместить · нить из сокета — соединить · двойной клик по фону — новый узел
       </div>
     </div>
   );

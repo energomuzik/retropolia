@@ -12,8 +12,9 @@ import { sfx } from '../sound';
    • клик по карточке — название и описание предмета пишутся ВНИЗУ окна;
    • перетащили на СТОЛ — предмет показывается картинкой (без подписи),
      а ПОД СТОЛОМ считается итог: сколько стоит вся покупка / вся продажа;
-   • товары и вещи перетаскиваются мышью в СДЕЛКУ (или добавляются «＋»), после чего
-     обмениваются ПАЧКОЙ кнопкой «Обменять»; для одной вещи — быстрые «Купить»/«Продать».
+   • товары и вещи перетаскиваются мышью в СДЕЛКУ (или добавляются «＋» либо ДВОЙНЫМ
+     КЛИКОМ ЛКМ по карточке — v0.54: кнопка «Купить» у товаров убрана), после чего
+     обмениваются ПАЧКОЙ кнопкой «Обменять»; для одной вещи — быстрое «Продать» в рюкзаке.
    Цены — с учётом скидок за сданные квесты; у торговца конечные витрина (шт) и касса. */
 
 type Deal = { buys: { offerId: string; qty: number }[]; sells: string[] };
@@ -38,11 +39,13 @@ const resDesc = (off: NpcShopOffer): string => {
   return off.res === 'tries' ? `ресурс: +${amt} попыток` : off.res === 'hp' ? `ресурс: +${amt}% HP` : `ресурс: +${amt} минут времени`;
 };
 
-/* Карточка-«монополия»: рисунок, цена под ним, запас уголком, кнопки. */
-function TradeCard({ sel, soldOut, onSel, draggable, onDragStart, children, buttons }: {
+/* Карточка-«монополия»: рисунок, цена под ним, запас уголком, кнопки.
+   v0.54: ДВОЙНОЙ КЛИК ЛКМ кладёт предмет на стол СДЕЛКИ. */
+function TradeCard({ sel, soldOut, onSel, onDoubleClick, draggable, onDragStart, children, buttons }: {
   sel: boolean;
   soldOut?: boolean;
   onSel: () => void;
+  onDoubleClick?: () => void;
   draggable?: boolean;
   onDragStart?: (e: React.DragEvent) => void;
   children: React.ReactNode;
@@ -53,8 +56,9 @@ function TradeCard({ sel, soldOut, onSel, draggable, onDragStart, children, butt
       draggable={draggable && !soldOut}
       onDragStart={onDragStart}
       onClick={onSel}
+      onDoubleClick={onDoubleClick}
       className={`trade-card ${sel ? 'trade-card-sel' : ''} ${soldOut ? 'trade-card-off' : ''}`}
-      title={soldOut ? 'Товар разобрали' : 'Клик — что это за предмет (внизу окна) · тяните на стол СДЕЛКИ'}
+      title={soldOut ? 'Товар разобрали' : 'Клик — что это за предмет (внизу окна) · ДВОЙНОЙ КЛИК — на стол СДЕЛКИ · можно тянуть мышью'}
     >
       {children}
       {buttons && <div className="flex items-center gap-1 justify-center pt-0.5">{buttons}</div>}
@@ -128,10 +132,8 @@ export default function TradeWindow({ s, map, me, npc, def, dispatch, onClose }:
     dispatch({ t: 'npcTrade', id: me, npcId: npc.id, buys: deal.buys, sells: deal.sells });
     setDeal({ buys: [], sells: [] });
   };
-  const quickBuy = (off: NpcShopOffer) => {
-    sfx.coin();
-    dispatch({ t: 'npcTrade', id: me, npcId: npc.id, buys: [{ offerId: off.id, qty: 1 }], sells: [] });
-  };
+  /* v0.54: быстрая «Купить» убрана — предмет кладётся на стол ДВОЙНЫМ КЛИКОМ, «＋» или перетаскиванием,
+     обмен — пачкой кнопкой «Обменять». Быстрое «Продать» в рюкзаке осталось. */
   const quickSell = (it: RubgItem) => {
     sfx.coin();
     dispatch({ t: 'npcTrade', id: me, npcId: npc.id, buys: [], sells: [it.id] });
@@ -187,13 +189,12 @@ export default function TradeWindow({ s, map, me, npc, def, dispatch, onClose }:
         <div className="grid md:grid-cols-[1fr_240px_1fr] gap-2.5 items-start">
           {/* ---------- ОКНО 1: ТОВАРЫ ТОРГОВЦА — КАРТОЧКАМИ ---------- */}
           <div className="border-2 border-[#ffcf3f]/40 px-2 py-2 space-y-1.5 min-w-0">
-            <div className="tick-label text-gold">🏪 Товары торговца <span className="text-faint normal-case">· клик — что это · тяните на стол</span></div>
+            <div className="tick-label text-gold">🏪 Товары торговца <span className="text-faint normal-case">· клик — что это · двойной клик — на стол</span></div>
             {(npc.shop ?? []).length === 0 && <p className="text-[10px] text-faint">Витрина пуста.</p>}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
               {(npc.shop ?? []).map((off) => {
                 const price = unitPrice(off);
                 const st = stockOf(off);
-                const afford = balance >= price;
                 const offSale = st !== undefined && st <= 0;
                 return (
                   <TradeCard
@@ -201,17 +202,15 @@ export default function TradeWindow({ s, map, me, npc, def, dispatch, onClose }:
                     sel={sel?.k === 'buy' && sel.id === off.id}
                     soldOut={offSale}
                     onSel={() => { setSel({ k: 'buy', id: off.id }); sfx.hover(); }}
+                    onDoubleClick={() => { if (!offSale) addBuy(off.id); }}
                     draggable
                     onDragStart={(e) => e.dataTransfer.setData('text/plain', JSON.stringify({ k: 'buy', offerId: off.id }))}
                     buttons={!offSale && (
-                      <>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); addBuy(off.id); }}
-                          className="px-1.5 border-2 border-edge text-faint hover:text-teal text-[11px] cursor-pointer"
-                          title="Положить на стол СДЕЛКИ"
-                        >＋</button>
-                        <PxBtn small color="gold" disabled={!afford} className={!afford ? 'opacity-40' : ''} onClick={(e) => { e.stopPropagation(); quickBuy(off); }} title={afford ? 'Купить сразу за монеты' : 'Не хватает монет'}>Купить</PxBtn>
-                      </>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); addBuy(off.id); }}
+                        className="px-1.5 border-2 border-edge text-faint hover:text-teal text-[11px] cursor-pointer"
+                        title="Положить на стол СДЕЛКИ (или двойной клик по карточке)"
+                      >＋</button>
                     )}
                   >
                     {/* запас уголком */}
@@ -311,6 +310,7 @@ export default function TradeWindow({ s, map, me, npc, def, dispatch, onClose }:
                   key={it.id}
                   sel={sel?.k === 'sell' && sel.id === it.id}
                   onSel={() => { setSel({ k: 'sell', id: it.id }); sfx.hover(); }}
+                  onDoubleClick={() => { if (pool !== undefined) addSell(it.id); }}
                   draggable
                   onDragStart={(e) => e.dataTransfer.setData('text/plain', JSON.stringify({ k: 'sell', itemId: it.id }))}
                   buttons={pool !== undefined && (
@@ -346,7 +346,7 @@ export default function TradeWindow({ s, map, me, npc, def, dispatch, onClose }:
               </span>
             </>
           ) : (
-            <span className="text-[10px] text-faint leading-tight">Кликните по предмету — здесь напишется, что это такое. Перетаскивайте товары и вещи на столы СДЕЛКИ (на телефоне — кнопками «＋»), затем «🤝 Обменять». Скидка {disc} % учтена в ценах{pool !== undefined ? `, касса торговца: ${coinsStr(pool)}` : ''}.</span>
+            <span className="text-[10px] text-faint leading-tight">Кликните по предмету — здесь напишется, что это такое. ДВОЙНОЙ КЛИК по товару/вещи кладёт его на стол СДЕЛКИ (можно перетаскивать мышью или кнопкой «＋»; на телефоне — «＋»), затем «🤝 Обменять». Скидка {disc} % учтена в ценах{pool !== undefined ? `, касса торговца: ${coinsStr(pool)}` : ''}.</span>
           )}
         </div>
       </div>

@@ -83,7 +83,8 @@ export type Action =
   | { t: 'npcBuy'; id: string; npcId: string; offerId: string } // QUEST: быстрая покупка одного товара (делегирует в npcTrade) — совместимость
   | { t: 'npcTrade'; id: string; npcId: string; buys: { offerId: string; qty: number }[]; sells: string[] } // QUEST v0.51: СДЕЛКА с торговцем — купить товары (со скидками за квесты) и/или продать вещи из рюкзака (в кассу торговца), одним действием
   | { t: 'plateSeen'; id: string; plate: number } // v0.53 СИНХРОНИЗАЦИЯ ОТКРЫТЫХ КОМНАТ: игрок впервые вошёл в комнату-плитку — хост открывает её ВСЕЙ команде (s.openPlates → общий туман карты мира)
-  | { t: 'bossCapture'; id: string; bossId: string } // v0.53 ЗАХВАТ: патрульный босс догнал игрока — хост проверяет дистанцию/кулдаун и мгновенно переносит фишку на СТАРТОВУЮ ячейку (там её ждёт задание)
+  | { t: 'bossCapture'; id: string; bossId: string } // v0.53/v0.54 ЗАХВАТ: патрульный босс догнал игрока — хост проверяет дистанцию/кулдаун и оттаскивает фишку на ПЕРВУЮ ТОЧКУ ПАТРУЛЯ босса (патруль замирает)
+  | { t: 'bossHold'; id: string; bossId: string; on: boolean } // v0.54 БОСС ЖДЁТ КОНЦА РАЗГОВОРА: on — диалог открыт рядом с боссом: босс ЗАМИРАЕТ и не ловит; off — разговор закончен: игрок всё ещё вплотную — босс ЛОВИТ, иначе патруль продолжается
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const rnd6 = () => 1 + Math.floor(Math.random() * 6);
@@ -231,6 +232,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     base.openPlates = Array.isArray(base.openPlates) ? base.openPlates : [];
     base.qBossDownAt = base.qBossDownAt ?? {};
     base.qCaptureAt = base.qCaptureAt ?? {};
+    base.qBossHoldAt = base.qBossHoldAt ?? {};
     if (base.rubg !== undefined) {
       base.rubg.jobs = base.rubg.jobs ?? {};
       base.rubg.looted = base.rubg.looted ?? [];
@@ -277,6 +279,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   if (!Array.isArray(s.openPlates)) s.openPlates = [];
   if (!s.qBossDownAt) s.qBossDownAt = {};
   if (!s.qCaptureAt) s.qCaptureAt = {};
+  if (!s.qBossHoldAt) s.qBossHoldAt = {};
   if (s.rubg !== undefined) {
     // старые сессии RUBG без части полей
     s.rubg.jobs = s.rubg.jobs ?? {};
@@ -346,6 +349,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         if (s.pendingCard && s.pendingCard.player === p.id) s.pendingCard = null;
         if (s.rubg?.jobs) delete s.rubg.jobs[p.id]; // личное задание мёртвого закрывается
         if (s.qJobs) delete s.qJobs[p.id]; // QUEST: личное задание мёртвого закрывается
+        if (s.qBossHoldAt) delete s.qBossHoldAt[p.id]; // v0.54: заморозки патрулей мёртвого игрока не нужны
         if (s.qCards) delete s.qCards[p.id];
         s.awaitPost = false;
         s.moving = null;
@@ -370,6 +374,33 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       return;
     }
     if (!current().alive && s.phase === 'playing') nextTurn();
+  };
+
+  /* ---------- v0.54: БОСС И ДИАЛОГ/ЗАХВАТ — общий код ----------
+     bossCaptureDo — ОТТАСКИВАНИЕ: фишка переносится на ПЕРВУЮ ТОЧКУ ПАТРУЛЯ босса
+     (клиент по qCaptureAt плавно тащит фишку — видно, как босс уводит игрока),
+     патруль босса ДЛЯ ЭТОГО ИГРОКА замирает (qBossHoldAt — «после поимки он прекращает
+     патрулирование»), незаконченное задание бросается, уведомление + лог. */
+  const bossHoldOf = (pid: string): Record<string, number> => {
+    s.qBossHoldAt = s.qBossHoldAt ?? {};
+    return (s.qBossHoldAt[pid] = s.qBossHoldAt[pid] ?? {});
+  };
+  const bossNameOf = (bid: string): string => {
+    const d = (map.bossLib ?? []).find((x) => x.id === bid);
+    return d ? ` «${d.name}»` : '';
+  };
+  const bossCaptureDo = (p: PlayerState, b: NonNullable<GameMap['bosses']>[number], now: number): boolean => {
+    const p0 = (b.patrol?.pts ?? [])[0];
+    if (!p0 || !Number.isFinite(p0.x) || !Number.isFinite(p0.y)) return false;
+    s.journeyPos = s.journeyPos ?? {};
+    s.journeyPos[p.id] = { x: p0.x, y: p0.y, ts: now, mv: false };
+    s.qCaptureAt = s.qCaptureAt ?? {};
+    s.qCaptureAt[p.id] = now;
+    bossHoldOf(p.id)[b.id] = now; // ПОСЛЕ ПОИМКИ БОСС ПРЕКРАЩАЕТ ПАТРУЛЬ (для этого игрока)
+    if (s.qJobs?.[p.id]) { delete s.qJobs[p.id]; log(`👹 ${p.name} брошен посреди задания — босс утащил его к своей точке патруля`); }
+    s.notice = { text: `👹 Босс${bossNameOf(b.bid)} ПОЙМАЛ вас и оттащил на свою первую точку патруля! Патруль босса остановлен.`, ts: now };
+    log(`👹 Босс${bossNameOf(b.bid)} ПОЙМАЛ игрока ${p.name} и оттащил фишку на ПЕРВУЮ ТОЧКУ ПАТРУЛЯ — патруль остановлен!`);
+    return true;
   };
 
   /* ---------- QUEST / QUEST SOLO: цели, концовки, награды ----------
@@ -1968,6 +1999,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           s.qBossDownAt = s.qBossDownAt ?? {};
           const downAt = s.qBossDownAt[p.id] = s.qBossDownAt[p.id] ?? {};
           downAt[b.id] = Date.now();
+          /* v0.54: босс повержен — заморозка патруля больше не нужна (замирает навсегда) */
+          if (s.qBossHoldAt?.[p.id]) delete s.qBossHoldAt[p.id][b.id];
           const bdef = (map.bossLib ?? []).find((x) => x.id === b.bid);
           const dms = bdef ? clipMs(bdef.defeated) : 0;
           if (bdef && dms) pushFx({ kind: 'bossDef', player: p.id, cellIdx: a.cellIdx, bossId: b.id, ms: dms, after: 'none' });
@@ -1978,6 +2011,17 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       } else {
         s.qFails = s.qFails ?? {};
         s.qFails[p.id] = (s.qFails[p.id] ?? 0) + 1;
+        /* v0.54: игрок ПРОИГРАЛ задание на ячейке босса — босс, патруль которого
+           замирал из-за него (захват/ожидание), СНОВА ПАТРУЛИРУЕТ; повержённые
+           остаются повержёнными. */
+        for (const hb of map.bosses ?? []) {
+          if (cellAtPoint(map, hb.x, hb.y) !== a.cellIdx) continue;
+          const h = s.qBossHoldAt?.[p.id];
+          if (h && h[hb.id] !== undefined) {
+            delete h[hb.id];
+            log(`👹 Босс${bossNameOf(hb.bid)} снова патрулирует — игрок проиграл задание.`);
+          }
+        }
         if (resM === 'coins') {
           const sc = Math.max(0, Math.floor(map.skipCoins ?? SKIP_COINS_DEFAULT));
           if (sc > 0) { p.coinsLeft = Math.max(0, (p.coinsLeft ?? 0) - sc); log(`🪙 Плата за поражение: −${sc} бронзы — капитал ${coinsStr(p.coinsLeft)}`); }
@@ -2024,6 +2068,18 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (opt.next) seen[opt.next] = 1;
       if (opt.give) giveReward(p, opt.give, 'награда от NPC');
       if (opt.setFlag) mine[opt.setFlag] = true;
+      /* v0.54: NPC ОТНОСИТ игрока к ячейке — выбор варианта мгновенно переносит фишку
+         на ячейку, выбранную автором (как портал: у зрителей мгновенный снап). */
+      if (opt.tpCell !== undefined) {
+        const tc = Math.floor(opt.tpCell);
+        const cell = map.cells[tc];
+        if (cell) {
+          const cc = cellCenter(map, tc);
+          s.journeyPos = s.journeyPos ?? {};
+          s.journeyPos[p.id] = { x: cc.x, y: cc.y, ts: Date.now(), mv: false, tp: true };
+          log(`🚪 ${p.name} отнесён NPC к ячейке №${tc + 1}`);
+        }
+      }
       if (opt.ending) {
         const e = (map.endings ?? []).find((x) => x.id === opt.ending);
         if (e) {
@@ -2053,10 +2109,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       break;
     }
     case 'bossCapture': {
-      /* v0.53 ЗАХВАТ ИГРОКА БОССОМ: только в QUEST, живой для игрока ПАТРУЛЬНЫЙ босс,
-         дистанция сходится, кулдаун 6 с прошёл. Фишка мгновенно переносится на СТАРТОВУЮ
-         ячейку (там автор карты поставит задание), незаконченное задание бросается,
-         в лог — запись, у игрока — уведомление. */
+      /* v0.53/v0.54 ЗАХВАТ ИГРОКА БОССОМ: только в QUEST, живой для игрока ПАТРУЛЬНЫЙ босс,
+         дистанция сходится, кулдаун 6 с прошёл, игрок НЕ в диалоге (в диалоге босс ждёт —
+         финальное решение приходит позже action'ом bossHold off). Фишка ПЛАВНО оттаскивается
+         на ПЕРВУЮ ТОЧКУ ПАТРУЛЯ босса (не на стартовую ячейку), патруль босса замирает,
+         незаконченное задание бросается, в лог — запись, у игрока — уведомление. */
       if (s.phase !== 'playing' || !isQuestMode(map.mode)) break;
       const p = s.players.find((x) => x.id === a.id);
       if (!p || !p.alive || p.spect) break;
@@ -2068,21 +2125,53 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const now = Date.now();
       s.qCaptureAt = s.qCaptureAt ?? {};
       if (now - (s.qCaptureAt[p.id] ?? 0) < 6000) break; // защита от мгновенного повторного захвата
+      if ((s.qBossHoldAt?.[p.id] ?? {})[b.id]) break; // босс УЖЕ ждёт конца разговора — решение за bossHold off
       const myPos = s.journeyPos?.[p.id];
       const bpos = patrolPos(b.patrol, s.startedAt || 0, now);
       if (!myPos || !bpos) break;
       const capR = b.r && b.r > 0 ? b.r : CELL_PX * 1.5;
       if (Math.hypot(myPos.x - bpos.x, myPos.y - bpos.y) > capR) break; // на хосте дистанция не подтвердилась
-      const sc = map.cells[startCellIdx(map)];
-      const scx = sc ? (sc.cx ?? (sc.x + (sc.w || 1) / 2) * CELL_PX) : 0;
-      const scy = sc ? (sc.cy ?? (sc.y + (sc.h || 1) / 2) * CELL_PX) : 0;
-      s.journeyPos = s.journeyPos ?? {};
-      s.journeyPos[p.id] = { x: scx, y: scy, ts: now, mv: false };
-      s.qCaptureAt[p.id] = now;
-      if (s.qJobs?.[p.id]) { delete s.qJobs[p.id]; log(`👹 ${p.name} брошен посреди задания — босс утащил его на старт`); }
-      const bdef = (map.bossLib ?? []).find((x) => x.id === b.bid);
-      s.notice = { text: `👹 Босс${bdef ? ` «${bdef.name}»` : ''} поймал вас и оттащил на СТАРТ! Осторожнее с патрулями.`, ts: now };
-      log(`👹 Босс${bdef ? ` «${bdef.name}»` : ''} ПОЙМАЛ игрока ${p.name} и утащил его на стартовую ячейку!`);
+      bossCaptureDo(p, b, now);
+      break;
+    }
+    case 'bossHold': {
+      /* v0.54 БОСС ЖДЁТ КОНЦА РАЗГОВОРА (и плавное возвращение патруля):
+         on — игрок открыл диалог рядом с боссом: босс ЗАМИРАЕТ для него (hold = момент
+         открытия) и НЕ ЛОВИТ, пока идёт разговор;
+         off — разговор закончен: если игрок всё ещё вплотную к ЗАМЕРШЕМУ боссу — босс
+         его ЛОВИТ (оттаскивает на первую точку патруля); если игрок далеко (вышел из
+         радиуса) — hold снимается, патруль продолжается. */
+      if (s.phase !== 'playing' || !isQuestMode(map.mode)) break;
+      const p = s.players.find((x) => x.id === a.id);
+      if (!p || !p.alive || p.spect) break;
+      const b = (map.bosses ?? []).find((x) => x.id === a.bossId);
+      if (!b || !b.patrol) break;
+      if (s.bossDown?.[b.id]) break;
+      s.qBossDown = s.qBossDown ?? {};
+      if ((s.qBossDown[p.id] ?? []).includes(b.id)) break;
+      const now = Date.now();
+      if (a.on) {
+        if ((b.patrol.pts ?? []).length < 2) break; // стоячий босс не «ждёт» — он и так стоит
+        if (bossHoldOf(p.id)[b.id]) break; // уже ждёт
+        const myPos = s.journeyPos?.[p.id];
+        const bpos = patrolPos(b.patrol, s.startedAt || 0, now);
+        if (!myPos || !bpos) break;
+        const capR = b.r && b.r > 0 ? b.r : CELL_PX * 1.5;
+        if (Math.hypot(myPos.x - bpos.x, myPos.y - bpos.y) > capR) break; // босс не рядом — ждать не нужно
+        bossHoldOf(p.id)[b.id] = now;
+        log(`👹 Босс${bossNameOf(b.bid)} замер и ждёт конца разговора…`);
+      } else {
+        const holdTs = (s.qBossHoldAt?.[p.id] ?? {})[b.id];
+        if (!holdTs) break;
+        const myPos = s.journeyPos?.[p.id];
+        const bpos = patrolPos(b.patrol, s.startedAt || 0, now, holdTs);
+        if (myPos && bpos) {
+          const capR = b.r && b.r > 0 ? b.r : CELL_PX * 1.5;
+          if (Math.hypot(myPos.x - bpos.x, myPos.y - bpos.y) <= capR) { bossCaptureDo(p, b, now); break; }
+        }
+        delete bossHoldOf(p.id)[b.id]; // разговор окончен — босс далеко, патруль продолжается
+        log(`👹 Босс${bossNameOf(b.bid)} снова патрулирует.`);
+      }
       break;
     }
     case 'npcClaim': {

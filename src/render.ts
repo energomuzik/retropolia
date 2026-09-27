@@ -339,6 +339,7 @@ export interface BoardDrawOpts {
   patrolBase?: number;
   patrolNow?: number;
   patrolFreeze?: Record<string, number>; // PlacedBoss.id → момент (мс), в который босс погиб и замер
+  npcFreeze?: Record<string, number>; // v0.54: PlacedNpc.id → момент (мс), в который NPC замер — с ним ОТКРЫТ ДИАЛОГ (патруль стоит, пока идёт разговор)
   patrolRoutes?: { pts: { x: number; y: number }[]; color: string }[];
 }
 
@@ -1064,8 +1065,12 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
   for (const it of o.npcs ?? []) {
     const { npc, def, done } = it;
     /* ПАТРУЛЬ: NPC с маршрутом рисуется в текущей точке (формула от времени партии);
-       без маршрута — на своём месте (npc.x/y) */
-    const pp = npc.patrol && o.patrolBase !== undefined ? patrolPos(npc.patrol, o.patrolBase, o.patrolNow ?? 0) : null;
+       без маршрута — на своём месте (npc.x/y). v0.54: если с NPC ОТКРЫТ ДИАЛОГ —
+       время заморожено на момент открытия (npcFreeze): NPC стоит на месте, а не уходит;
+       разговор закончился — патруль продолжается с обычной формулы. */
+    const pp = npc.patrol && o.patrolBase !== undefined
+      ? patrolPos(npc.patrol, o.patrolBase, o.patrolNow ?? 0, o.npcFreeze?.[npc.id])
+      : null;
     const nx = pp ? pp.x : npc.x;
     const ny = pp ? pp.y : npc.y;
     if (o.sndRadii && npc.r && npc.r > 0) {

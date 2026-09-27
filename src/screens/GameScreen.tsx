@@ -503,6 +503,14 @@ export default function GameScreen() {
   const [dlgNpcId, setDlgNpcId] = useState<string | null>(null);
   const [dlgNode, setDlgNode] = useState<string | null>(null);
   const [tradeNpcId, setTradeNpcId] = useState<string | null>(null); // v0.51: открыто окно торговли с NPC
+  /* v0.54: открыты ДИАЛОГ/ТОРГОВЛЯ → NPC-собеседник ЗАМЕР (npcFreeze — не уходит в патруле),
+     боссы вплотную ЖДУТ конца разговора (bossHold on/off), захват приостановлен */
+  const dlgOpenId = dlgNpcId ?? tradeNpcId;
+  const dlgOpenRef = useRef(false);
+  const dlgOpenTsRef = useRef(0);
+  const heldBossesRef = useRef<Set<string>>(new Set());
+  dlgOpenRef.current = !!dlgOpenId;
+  if (dlgOpenId) { if (!dlgOpenTsRef.current) dlgOpenTsRef.current = Date.now(); } else dlgOpenTsRef.current = 0;
   /* v0.53: скрывать реплики, которые персонаж уже отвечал (настройка ТОЛЬКО НА ТЕКУЩУЮ
      СЕССИЮ — между партиями больше не запоминается; при загрузке сохранения метки
      «уже слышали» возвращаются вместе с партией — они часть сейва);
@@ -668,6 +676,7 @@ export default function GameScreen() {
       if (!self || !self.alive || self.spect) return;
       const myPos = sess.journeyPos?.[cur.selfId];
       if (!myPos) return;
+      if (dlgOpenRef.current) return; // v0.54: пока открыт диалог/торговля — босс НЕ ЛОВИТ, он ждёт конца разговора
       const now = Date.now();
       if (now < captureCdRef.current) return;
       const base = sess.startedAt || 0;
@@ -675,6 +684,7 @@ export default function GameScreen() {
         if (sess.bossDown?.[b.id]) continue;
         if ((sess.qBossDown?.[cur.selfId] ?? []).includes(b.id)) continue; // мною повержен — не трогает
         if (!b.patrol || (b.patrol.pts ?? []).length < 2) continue; // не патрулирует — не хватает
+        if ((sess.qBossHoldAt?.[cur.selfId] ?? {})[b.id]) continue; // v0.54: босс уже ждёт/держит игрока — решение за bossHold off
         const bp = patrolPos(b.patrol, base, now);
         if (!bp) continue;
         const capR = b.r && b.r > 0 ? b.r : CELL * 1.5;
@@ -692,12 +702,55 @@ export default function GameScreen() {
   /* v0.53: звуковой сигнал и короткая тряска при захвате (факт захвата — s.qCaptureAt) */
   const lastCaptureRef = useRef(0);
   const myCaptureTs = isQuest && s ? s.qCaptureAt?.[me] : undefined;
+  /* v0.54: ВИЗУАЛЬНОЕ ОТТАСКИВАНИЕ — сама анимация делается в rAF-цикле (bossDragRef):
+     факт захвата = journeyPos.ts совпал с qCaptureAt — фишка плавно едет от места поимки
+     к первой точке патруля босса. Здесь — только звуковой сигнал. */
+  const bossDragRef = useRef<{ fx: number; fy: number; tx: number; ty: number; t0: number; ms: number } | null>(null);
+  const lastCapTsRef = useRef(0);
   useEffect(() => {
     if (myCaptureTs && myCaptureTs !== lastCaptureRef.current) {
       lastCaptureRef.current = myCaptureTs;
       sfx.alarm();
     }
   }, [myCaptureTs]);
+
+  /* ---------- v0.54: БОСС ЖДЁТ КОНЦА РАЗГОВОРА ----------
+     Открыли диалог/торговлю → каждый патрульный босс ВПЛОТЬ ЗАМИРАЕТ (bossHold on) и
+     НЕ ЛОВИТ, пока идёт разговор; закрыли → хост решает: игрок всё ещё вплотную —
+     босс ЛОВИТ (оттаскивает на первую точку патруля), иначе патруль продолжается. */
+  useEffect(() => {
+    if (!dlgOpenId) return;
+    const cur = useApp.getState();
+    const sess = cur.session;
+    const mp = cur.sessionMap;
+    if (!sess || !mp || sess.phase !== 'playing' || !isQuestMode(mp.mode)) return;
+    const self = sess.players.find((x) => x.id === cur.selfId);
+    const myPos = sess.journeyPos?.[cur.selfId];
+    if (!self || !self.alive || self.spect || !myPos) return;
+    const now = Date.now();
+    const base = sess.startedAt || 0;
+    for (const b of mp.bosses ?? []) {
+      if (sess.bossDown?.[b.id]) continue;
+      if ((sess.qBossDown?.[cur.selfId] ?? []).includes(b.id)) continue;
+      if (!b.patrol || (b.patrol.pts ?? []).length < 2) continue; // стоячий не «ждёт»
+      if ((sess.qBossHoldAt?.[cur.selfId] ?? {})[b.id] || heldBossesRef.current.has(b.id)) continue;
+      const bp = patrolPos(b.patrol, base, now);
+      if (!bp) continue;
+      const capR = b.r && b.r > 0 ? b.r : CELL * 1.5;
+      if (Math.hypot(myPos.x - bp.x, myPos.y - bp.y) <= capR) {
+        heldBossesRef.current.add(b.id);
+        dispatch({ t: 'bossHold', id: cur.selfId, bossId: b.id, on: true });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dlgOpenId]);
+  useEffect(() => {
+    if (dlgOpenId || !heldBossesRef.current.size) return;
+    const cur = useApp.getState();
+    for (const bossId of [...heldBossesRef.current]) dispatch({ t: 'bossHold', id: cur.selfId, bossId, on: false });
+    heldBossesRef.current.clear();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dlgOpenId]);
 
   /* ---------- полный экран эмулятора ---------- */
   useEffect(() => {
@@ -968,7 +1021,33 @@ export default function GameScreen() {
                  восстановление партии). Мгновенный снап к ней. Идущего НЕ трогаем — локальная
                  симуляция всегда чуть впереди сети. Раньше фишка после прыжка оставалась стоять
                  на стартовой ячейке, и «Старт игры» происходил не там, где спрыгнул игрок. */
-              if (jp && !self.moving && !self.dirty) {
+              /* v0.54: ОТТАСКИВАНИЕ БОССОМ — новый факт захвата (journeyPos.ts совпал с
+                 qCaptureAt): запускаем ПЛАВНУЮ анимацию — фишка едет от места поимки к
+                 ПЕРВОЙ ТОЧКЕ ПАТРУЛЯ босса (видно, как босс оттаскивает фишку). */
+              if (isQuest && sess.qCaptureAt?.[me] && jp && sess.qCaptureAt[me] === jp.ts && lastCapTsRef.current !== jp.ts) {
+                lastCapTsRef.current = jp.ts;
+                const distC = Math.hypot(jp.x - self.x, jp.y - self.y);
+                if (distC > 4) {
+                  const spdC = cps * CELL; // px/с — скорость карты
+                  bossDragRef.current = { fx: self.x, fy: self.y, tx: jp.x, ty: jp.y, t0: Date.now(), ms: Math.max(700, Math.min(2400, (distC / spdC) * 1000)) };
+                }
+              }
+              const bDrag = bossDragRef.current;
+              if (bDrag) {
+                /* фишка под контролем босса: едем по easeInOutQuad, ввод игнорируется,
+                   анти-телепорт и порталы не действуют, пока не доехали */
+                const k = Math.max(0, Math.min(1, (Date.now() - bDrag.t0) / bDrag.ms));
+                const ease = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+                self.x = bDrag.fx + (bDrag.tx - bDrag.fx) * ease;
+                self.y = bDrag.fy + (bDrag.ty - bDrag.fy) * ease;
+                self.moving = false;
+                self.dirty = false;
+                if (k >= 1) {
+                  bossDragRef.current = null;
+                  self.pinside.clear();
+                  for (const q of m.portals ?? []) if (self.x >= q.x && self.x < q.x + q.w && self.y >= q.y && self.y < q.y + q.h) self.pinside.add(q.id);
+                }
+              } else if (jp && !self.moving && !self.dirty) {
                 const snapD = Math.hypot(jp.x - self.x, jp.y - self.y);
                 if (snapD > CELL * 1.5) {
                   self.x = jp.x;
@@ -978,7 +1057,7 @@ export default function GameScreen() {
                 }
               }
               let vx = 0, vy = 0;
-              const canWalk = sess.phase === 'playing' && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate) && !(sess.qCards && me && sess.qCards[me]);
+              const canWalk = sess.phase === 'playing' && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate) && !(sess.qCards && me && sess.qCards[me]) && !bossDragRef.current; // v0.54: во время оттаскивания боссом ходить нельзя
               if (canWalk) {
                 for (const kd of [...journeyKeys.current, ...journeyPadRef.current]) {
                   if (kd === 'up') vy -= 1; else if (kd === 'down') vy += 1;
@@ -1377,6 +1456,10 @@ export default function GameScreen() {
             if (ts && patrolFreeze[bid] === undefined) patrolFreeze[bid] = ts;
           }
         }
+        /* v0.54: боссы, чей патруль ЗАМЕР ДЛЯ МЕНЯ — ждут конца моего разговора
+           (bossHold on) или держат меня после захвата; у остальных игроков — свой тайминг */
+        const myHolds = isQuest && me ? sess.qBossHoldAt?.[me] : undefined;
+        if (myHolds) for (const [hid, hts] of Object.entries(myHolds)) if (patrolFreeze[hid] === undefined) patrolFreeze[hid] = hts;
 
         // ЛОКАЛЬНЫЕ моменты разбития ячеек — для короткой анимации осколков.
         // Запоминаем первый кадр, когда ячейка увидена разбитой; убрали — чистим.
@@ -1426,6 +1509,9 @@ export default function GameScreen() {
           patrolBase: sess.startedAt || 0,
           patrolNow: Date.now(),
           patrolFreeze,
+          /* v0.54: NPC, с которым открыт диалог/торговля, НЕ уходит в патруле —
+             стоит на месте (время заморожено на момент открытия), после разговора патруль продолжается */
+          npcFreeze: dlgOpenId ? { [dlgOpenId]: dlgOpenTsRef.current } : undefined,
         });
 
         /* RUBG: оверлей поверх поля — безопасная зона, самолёт, маркеры игры, радиус атаки,
@@ -3370,7 +3456,9 @@ export default function GameScreen() {
                   которые персонаж уже отвечал (s.dlgSeen) — вместо текста «…уже слышали»
                   с кнопкой «показать». Варианты ответа видны всегда. */}
               {(() => {
-                const seen = hideSeen && !node.alwaysShow && !!(s.dlgSeen?.[me]?.[node.id]);
+                /* v0.54 (наоборот к v0.53): сворачиваются ТОЛЬКО реплики с ПИНОМ автора
+                   (node.pinHide); стартовый узел (dlg.root) пишется ВСЕГДА — даже с пином */
+                const seen = hideSeen && node.pinHide && node.id !== dlg.root && !!(s.dlgSeen?.[me]?.[node.id]);
                 return (
                   <div className="border-2 border-teal/40 bg-teal/5 px-3 py-2.5">
                     {seen && !revealSeen ? (
