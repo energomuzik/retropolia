@@ -18,8 +18,10 @@ import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper, Coin, CoinRow } from '../ui';
 import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, isQuestMode, isSoloMode, questGoalText, tileAt, tileRectOf, tileNumOf, coinsStr, normResMode, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS } from '../types';
-import type { AnimClip, CardDef, ChaosKind, GameMap, GameSession, NpcLibEntry, NpcShopOffer, PlacedNpc, PortalZone, PlayerState, QuestGoal, TaskDef, TokenDir, RubgItem } from '../types';
+import type { AnimClip, CardDef, ChaosKind, GameMap, GameSession, NpcLibEntry, PlacedNpc, PortalZone, PlayerState, QuestGoal, TaskDef, TokenDir, RubgItem } from '../types';
 import Randomizer from './Randomizer';
+import TradeWindow from './TradeWindow';
+import { nodeShowsQuests, nodeShowsShop } from '../dialogHubs';
 import { idbGet } from '../db';
 import { sfx } from '../sound';
 import { startLoop, stopLoop, syncLoops, stopGroup, killGroup, stopOneShot, playOneShot } from '../loopsnd';
@@ -54,16 +56,11 @@ const questGoalDoneFor = (sess: GameSession, p: PlayerState, g: QuestGoal | unde
   }
 };
 
-/* QUEST ТОРГОВЛЯ: подпись товара NPC (вещь из каталога — иконка+название, ресурс — что даёт) */
-const shopOfferLabel = (off: NpcShopOffer): string => {
-  if (off.kind === 'item' && off.item) {
-    const m = RUBG_ITEMS[off.item];
-    return `${m.icon} ${off.title?.trim() || m.name}`;
-  }
-  const a = Math.max(1, Math.floor(off.amount ?? 0));
-  if (off.res === 'tries') return `🎯 ${off.title?.trim() || `+${a} попыток`}`;
-  if (off.res === 'hp') return `❤️ ${off.title?.trim() || `+${a}% HP`}`;
-  return `⏱ ${off.title?.trim() || `+${a} мин времени`}`;
+/* v0.51: скидка игрока у этого NPC (сданные квесты → сумма процентов, потолок 90) — для бейджа кнопки «Торговать» */
+const discBadge = (npc: PlacedNpc, flags: Record<string, boolean>): number => {
+  let d = 0;
+  for (const x of npc.discounts ?? []) if (x.questId && flags[`quest:${x.questId}`]) d += Math.max(0, Math.floor(x.pct));
+  return Math.min(90, d);
 };
 
 export default function GameScreen() {
@@ -499,11 +496,18 @@ export default function GameScreen() {
   }, [isQuest, s, map, mePlayer, myJourneyPos?.x, myJourneyPos?.y]);
   const [dlgNpcId, setDlgNpcId] = useState<string | null>(null);
   const [dlgNode, setDlgNode] = useState<string | null>(null);
+  const [tradeNpcId, setTradeNpcId] = useState<string | null>(null); // v0.51: открыто окно торговли с NPC
   const dlgNpc = nearNpc && dlgNpcId === nearNpc.npc.id ? nearNpc : (dlgNpcId ? (() => {
     const n = (map?.npcs ?? []).find((x) => x.id === dlgNpcId);
     const def = n ? (map?.npcLib ?? []).find((x) => x.id === n.nid) : undefined;
     return n && def ? { npc: n, def } : null;
   })() : null);
+  /* NPC, с которым открыто окно торговли (v0.51) */
+  const tradeNpc = tradeNpcId ? (() => {
+    const n = (map?.npcs ?? []).find((x) => x.id === tradeNpcId);
+    const def = n ? (map?.npcLib ?? []).find((x) => x.id === n.nid) : undefined;
+    return n && def ? { npc: n, def } : null;
+  })() : null;
   const openDialog = (npcId: string) => {
     const n = (map?.npcs ?? []).find((x) => x.id === npcId);
     if (!n?.dialog) { useApp.getState().toast('У этого NPC нет диалога', 'info'); return; }
@@ -511,7 +515,7 @@ export default function GameScreen() {
     setDlgNode(n.dialog.root);
     sfx.click();
   };
-  const closeDialog = () => { setDlgNpcId(null); setDlgNode(null); };
+  const closeDialog = () => { setDlgNpcId(null); setDlgNode(null); setTradeNpcId(null); };
   /* клавиша E — поговорить с NPC в радиусе; ESC — закрыть диалог */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -3212,7 +3216,9 @@ export default function GameScreen() {
                 <button onClick={closeDialog} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
               </div>
 
-              {quests.length > 0 && (
+              {/* КВЕСТЫ NPC: на узле с маркером «📜 квесты на этом узле» (авто-ветка «Есть ли для меня работа?»).
+                  Для старых карт БЕЗ маркеров — как раньше, на каждом узле. */}
+              {quests.length > 0 && nodeShowsQuests(dlgNpc.npc, node) && (
                 <div className="space-y-1.5 border-2 border-edge px-2.5 py-2">
                   <div className="tick-label text-gold">📜 Квесты NPC</div>
                   {quests.map((q) => {
@@ -3235,38 +3241,17 @@ export default function GameScreen() {
                 </div>
               )}
 
-              {/* ТОРГОВЛЯ NPC: товары за монеты (работает, когда на карте включены монеты) */}
-              {(dlgNpc.npc.shop ?? []).length > 0 && coinsActive && (() => {
-                const balance = mePlayer?.coinsLeft ?? 0;
-                return (
-                  <div className="space-y-1.5 border-2 border-[#ffcf3f]/50 px-2.5 py-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="tick-label text-gold">🛒 Торговля</div>
-                      <div className="tick-label text-teal"><CoinRow value={balance} size={11} /></div>
-                    </div>
-                    {(dlgNpc.npc.shop ?? []).map((off) => {
-                      const price = Math.max(0, Math.floor(off.price || 0));
-                      const afford = balance >= price;
-                      return (
-                        <div key={off.id} className="flex items-center gap-2 justify-between">
-                          <div className="min-w-0">
-                            <div className="font-display text-[11px] uppercase truncate text-paper">{shopOfferLabel(off)}</div>
-                            <div className="tick-label text-faint truncate">{price > 0 ? <span className="inline-flex items-center gap-0.5">цена: <CoinRow value={price} size={10} /></span> : 'бесплатно'}</div>
-                          </div>
-                          <PxBtn
-                            small
-                            color="gold"
-                            disabled={!afford}
-                            className={afford ? '' : 'opacity-40'}
-                            title={afford ? 'Купить за монеты' : 'Не хватает монет'}
-                            onClick={() => dispatch({ t: 'npcBuy', id: me, npcId: dlgNpc.npc.id, offerId: off.id })}
-                          >Купить</PxBtn>
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              })()}
+              {/* ТОРГОВЛЯ v0.51: кнопка «Торговать» открывает 3-оконное окно торговли (как в классических RPG).
+                  Показывается на узле с маркером «🛒 торговля на этом узле» (авто-ветка «Можно ли поторговать с тобой?»);
+                  для старых карт БЕЗ маркеров — как раньше, на каждом узле. */}
+              {nodeShowsShop(dlgNpc.npc, node) && (dlgNpc.npc.shop ?? []).length > 0 && coinsActive && (
+                <PxBtn
+                  color="gold"
+                  className="w-full"
+                  onClick={() => { setTradeNpcId(dlgNpc.npc.id); sfx.click(); }}
+                  title="Открыть окно торговли: товары торговца, СДЕЛКА и ваш рюкзак — перетаскивайте и обменивайтесь"
+                >🛒 Торговать{discBadge(dlgNpc.npc, fl) > 0 ? ` · скидка ${discBadge(dlgNpc.npc, fl)} %` : ''}</PxBtn>
+              )}
 
               <div className="border-2 border-teal/40 bg-teal/5 px-3 py-2.5">
                 <div className="text-[13px] text-paper leading-snug">{node.text || '…'}</div>
@@ -3307,6 +3292,11 @@ export default function GameScreen() {
           </div>
         );
       })()}
+
+      {/* ---------- ОКНО ТОРГОВЛИ NPC (v0.51): товары / СДЕЛКА / рюкзак ---------- */}
+      {tradeNpc && s && map && s.phase === 'playing' && (
+        <TradeWindow s={s} map={map} me={me} npc={tradeNpc.npc} def={tradeNpc.def} dispatch={dispatch} onClose={() => setTradeNpcId(null)} />
+      )}
 
       {/* ---------- карточка бонуса/ловушки QUEST (индивидуальная) ---------- */}
       {s?.qCards && me && s.qCards[me] && !peekMap && !dlgNpcId && (

@@ -4,48 +4,43 @@ import { sfx } from '../sound';
 import type { DialogNode, DialogOption, MapEnding, NpcDialog } from '../types';
 import { Coin } from '../ui';
 import { DialogueGraph } from './DialogueGraph';
-import type { DlgPosMap } from './DialogueGraph';
+import type { DlgEditOps, DlgPosMap } from './DialogueGraph';
 
-/* ОБЩИЙ РЕДАКТОР ДЕРЕВА ДИАЛОГОВ NPC (v0.46.0) — один компонент для редактора карт
-   И для «Редактора квестов и диалогов». Сделан удобным и понятным:
-   • слева — СПИСОК УЗЛОВ-вопросов с номерами («№1 · Приветствие») и бейджами
-     (СТАРТ, сколько вариантов ответа, «⚠ не связан» — узел, до которого нельзя дойти);
-   • редактируется ВЫБРАННЫЙ узел — реплика NPC + его варианты ответа;
-   • у узла может СКОЛЬКО УГОДНО вариантов: крупная кнопка «+ Добавить вариант»,
-     у каждого варианта — ↑↓ (порядок), ⧉ (дублировать), ✕ (удалить);
-   • кнопка «→ новый узел» у варианта: создаёт узел и СРАЗУ привязывает вариант
-     к нему — так дерево растёт естественным путём (вопрос → ответ → новый вопрос);
-   • «Далее:» и «Старт:» показывают НОМЕР и текст узла, а не безликий «(пусто)»;
-   • при удалении узла ссылки на него автоматически очищаются;
-   • флаги: вариант может ставить флаг и/или быть видимым только с флагом/без флага
-     (пустые поля = вариант виден всем всегда).
-   СХЕМА (v0.50.0): кнопка «Схема» раскрывает граф в духе ComfyUI — узлы-вопросы на холсте
-   со стрелками «что из чего растёт»; узлы перетаскиваются (позиции сохраняются в карту
-   через posStore/onPosStore), зум колесом, панорама, «Собрать» раскладывает заново.
-   Клик по узлу графа выбирает его для редактирования ниже. */
-export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosStore, openGraph = false, graphHeight = 300 }: {
+/* ОБЩИЙ РЕДАКТОР ДЕРЕВА ДИАЛОГОВ NPC (v0.51.0) — ВСЁ ДЕЛАЕТСЯ НА СХЕМЕ (граф в духе ComfyUI).
+   Один компонент для редактора карт (окно «Редактор диалогов») и для «Редактора квестов
+   и диалогов». Список узлов-плиток УБРАН — дерево растит холст:
+   • создать узел: «＋ Узел» в шапке схемы, двойной клик по фону или нить из сокета,
+     брошенная на пустое место (узел создастся и сразу привяжется);
+   • СОЕДИНИТЬ/РАЗЪЕДИНИТЬ: нить из сокета варианта → на узел (привязать «Далее») или
+     на золотую плашку КОНЦОВКИ (назначить концовку); ✕ на середине нити — разъединить;
+   • на узле: «＋ ответ», ✕ у варианта, ✕ в шапке узла (ссылки очищаются);
+   • клик по узлу выбирает его — панель ниже правит текст и свойства выбранного узла:
+     реплика, варианты (текст, «Далее», концовка, награды, флаги), маркеры
+     «🛒 торговля на этом узле» / «📜 квесты на этом узле» (v0.51 — авто-ветки
+     «Можно ли поторговать с тобой?» и «Есть ли для меня работа?» создаются сами
+     при добавлении торговли/квеста). */
+export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosStore, height = 380, selId, onSelect }: {
   dialog: NpcDialog;
   endings: MapEnding[];
   onChange: (d: NpcDialog) => void;
   posStore?: DlgPosMap;                 // сохранённые позиции узлов (map.dlgPos)
   onPosStore?: (p: DlgPosMap | null) => void; // записать позиции в карту (null — сброс)
-  openGraph?: boolean;                  // показать схему сразу (окно дерева NPC)
-  graphHeight?: number;                 // высота холста схемы
+  height?: number;                      // высота холста схемы
+  selId?: string | null;                // выбранный узел — снаружи (окно NPC продолжает выбор)
+  onSelect?: (id: string) => void;
 }) {
   const [selRaw, setSel] = useState<string>('');
-  const [graphOpen, setGraphOpen] = useState(openGraph);
   const nodes = dialog.nodes;
+  const selFrom = selId !== undefined ? selId : selRaw;
   /* выбранная нода; сбрасывается на стартовую, если удалили текущую */
-  const selId = nodes.some((n) => n.id === selRaw) ? selRaw : dialog.root;
-  const selIdx = Math.max(0, nodes.findIndex((n) => n.id === selId));
+  const selIdEff = nodes.some((n) => n.id === selFrom) ? selFrom : dialog.root;
+  const selIdx = Math.max(0, nodes.findIndex((n) => n.id === selIdEff));
   const selNode = nodes[selIdx];
 
-  /* сколько вариантов во ВСЁМ дереве ведут в узел (для «⚠ не связан») */
-  const refsOf = (id: string): number =>
-    nodes.reduce((a, n) => a + (n.opts ?? []).filter((o) => o.next === id).length, 0);
-  const nodeLabel = (n: DialogNode): string => {
-    const i = nodes.findIndex((x) => x.id === n.id);
-    return `№${i + 1} · ${(n.text || '(пусто)').slice(0, 26)}`;
+  const setSelNode = (id: string) => {
+    if (selId !== undefined) onSelect?.(id);
+    else setSel(id);
+    sfx.hover();
   };
 
   /* ---------- операции (все иммутабельные, результат — новый NpcDialog) ---------- */
@@ -90,24 +85,19 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
     updNode(nid, { opts: arr });
     sfx.coin();
   };
-  const addNode = () => {
-    const nid = uid('dn');
-    onChange({ ...dialog, nodes: [...nodes, { id: nid, text: '', opts: [] }] });
-    setSel(nid);
-    sfx.coin();
-  };
-  /* создать узел и сразу привязать вариант к нему — главный способ растить дерево */
-  const addNodeLinked = (fromNid: string, oi: number) => {
+  const addNode = (at: { x: number; y: number }, linkFrom?: { nodeId: string; optIdx: number }) => {
     const nid = uid('dn');
     onChange({
       ...dialog,
       nodes: nodes
-        .map((n) => (n.id === fromNid
-          ? { ...n, opts: (n.opts ?? []).map((o, i) => (i === oi ? { ...o, next: nid } : o)) }
+        .map((n) => (linkFrom && n.id === linkFrom.nodeId
+          ? { ...n, opts: (n.opts ?? []).map((o, i) => (i === linkFrom.optIdx ? { ...o, next: nid } : o)) }
           : n))
         .concat([{ id: nid, text: '', opts: [] }]),
     });
-    setSel(nid);
+    /* позиция нового узла сохраняется в карту, чтобы схема запомнила, где его бросили */
+    if (onPosStore) onPosStore({ ...(posStore ?? {}), [nid]: { x: Math.max(0, at.x), y: Math.max(0, at.y) } });
+    setSelNode(nid);
     sfx.coin();
   };
   const delNode = (nid: string) => {
@@ -117,13 +107,27 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
     const cleaned = rest.map((n) => ({ ...n, opts: (n.opts ?? []).map((o) => (o.next === nid ? { ...o, next: undefined } : o)) }));
     const root = dialog.root === nid ? rest[0].id : dialog.root;
     onChange({ root, nodes: cleaned });
-    if (selId === nid) setSel(root);
+    if (onPosStore && posStore && posStore[nid]) {
+      const { [nid]: _drop, ...restPos } = posStore;
+      onPosStore(restPos);
+    }
+    if (selIdEff === nid) setSelNode(root);
     sfx.fail();
+  };
+  const setRoot = (nid: string) => { onChange({ ...dialog, root: nid }); sfx.hover(); };
+
+  const ops: DlgEditOps = {
+    setNext: (nid, oi, next) => { updOpt(nid, oi, { next }); sfx.hover(); },
+    setEnding: (nid, oi, ending) => { updOpt(nid, oi, { ending }); sfx.hover(); },
+    addNode,
+    delNode,
+    addOpt,
+    delOpt,
   };
 
   return (
     <div className="space-y-2">
-      {/* стартовый узел + переключатель схемы */}
+      {/* стартовый узел */}
       <div className="flex items-center gap-1.5">
         <span className="tick-label text-faint shrink-0">Старт:</span>
         <select
@@ -135,74 +139,42 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
             <option key={n.id} value={n.id}>{`№${i + 1} · ${(n.text || '(пусто)').slice(0, 26)}`}</option>
           ))}
         </select>
-        <button
-          onClick={() => { setGraphOpen((v) => !v); sfx.hover(); }}
-          className={`px-2 py-1 border-2 font-display text-[9px] uppercase cursor-pointer transition-colors shrink-0 ${graphOpen ? 'border-teal text-teal bg-teal/10' : 'border-edge text-faint hover:text-teal'}`}
-          title="Граф-схема дерева: узлы-вопросы и стрелки «что из чего растёт» — как в ComfyUI"
-        >🌳 Схема</button>
       </div>
 
-      {/* ГРАФ-СХЕМА ДЕРЕВА (ComfyUI): узлы перетаскиваются, позиции сохраняются в карту */}
-      {graphOpen && (
-        <DialogueGraph
-          dialog={dialog}
-          endings={endings}
-          selId={selId}
-          onSelect={(id) => { setSel(id); sfx.hover(); }}
-          pos={posStore}
-          onPos={onPosStore}
-          height={graphHeight}
-          fitKey={dialog.root}
-        />
-      )}
+      {/* СХЕМА — главная поверхность: создать, соединить, разъединить, удалить */}
+      <DialogueGraph
+        dialog={dialog}
+        endings={endings}
+        selId={selIdEff}
+        onSelect={setSelNode}
+        pos={posStore}
+        onPos={onPosStore}
+        ops={ops}
+        height={height}
+        fitKey={dialog.root}
+      />
 
-      {/* СПИСОК УЗЛОВ-вопросов: клик — выбрать для редактирования */}
-      <div className="space-y-1">
-        {nodes.map((n, i) => {
-          const incoming = refsOf(n.id);
-          const orphan = dialog.root !== n.id && incoming === 0 && nodes.length > 1;
-          const active = n.id === selId;
-          return (
-            <div
-              key={n.id}
-              onClick={() => { setSel(n.id); sfx.hover(); }}
-              className={`flex items-center gap-1.5 px-1.5 py-1 border-2 cursor-pointer transition-colors ${active ? 'border-teal bg-teal/5' : 'border-edge hover:border-edge2'}`}
-              title={orphan ? '⚠ В этот узел не ведёт ни один вариант — в игре он недостижим (назначьте его стартом или свяжите вариант «Далее:»)' : `В этот узел ведут вариантов: ${incoming}${dialog.root === n.id ? ' · стартовый узел' : ''}`}
-            >
-              <span className={`font-display text-[10px] shrink-0 ${active ? 'text-teal' : 'text-faint'}`}>№{i + 1}</span>
-              <span className={`flex-1 min-w-0 text-[10px] truncate ${n.text ? 'text-dim' : 'text-faint'}`}>{n.text || '(пустая реплика)'}</span>
-              {dialog.root === n.id && <span className="tick-label text-gold shrink-0">СТАРТ</span>}
-              <span className={`tick-label shrink-0 ${orphan ? 'text-magma' : 'text-faint'}`}>{(n.opts ?? []).length} отв.</span>
-              {orphan && <span className="tick-label text-magma shrink-0" title="Узел недостижим из диалога">⚠</span>}
-              {nodes.length > 1 && (
-                <button
-                  onClick={(ev) => { ev.stopPropagation(); delNode(n.id); }}
-                  className="text-faint hover:text-coral cursor-pointer px-0.5 text-[10px]"
-                  title="Удалить узел (ссылки на него очистятся автоматически)"
-                >✕</button>
-              )}
-            </div>
-          );
-        })}
-        <button
-          onClick={addNode}
-          className="w-full py-1 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
-        >+ Новый узел (вопрос NPC)</button>
-        <p className="text-[9px] text-faint leading-tight">Кликните по узлу — откроется его редактирование. Узлов и вариантов может быть сколько угодно; «Далее:» ведёт в другой узел, пусто — диалог завершается.</p>
-      </div>
-
-      {/* РЕДАКТИРОВАНИЕ ВЫБРАННОГО УЗЛА */}
+      {/* РЕДАКТИРОВАНИЕ ВЫБРАННОГО УЗЛА (выбор — кликом по узлу на схеме) */}
       {selNode && (
         <div className="border-2 border-teal/50 px-2 py-2 space-y-2">
           <div className="flex items-center justify-between">
             <span className="tick-label text-teal">Узел №{selIdx + 1}{dialog.root === selNode.id ? ' · СТАРТ' : ''}</span>
-            {dialog.root !== selNode.id && (
-              <button
-                onClick={() => onChange({ ...dialog, root: selNode.id })}
-                className="text-[10px] text-faint hover:text-gold cursor-pointer px-1"
-                title="Диалог начнётся с этого узла"
-              >сделать стартом</button>
-            )}
+            <div className="flex items-center gap-1">
+              {dialog.root !== selNode.id && (
+                <button
+                  onClick={() => setRoot(selNode.id)}
+                  className="text-[10px] text-faint hover:text-gold cursor-pointer px-1"
+                  title="Диалог начнётся с этого узла"
+                >сделать стартом</button>
+              )}
+              {nodes.length > 1 && (
+                <button
+                  onClick={() => delNode(selNode.id)}
+                  className="text-[10px] text-faint hover:text-coral cursor-pointer px-1"
+                  title="Удалить узел (ссылки на него очистятся автоматически)"
+                >удалить узел</button>
+              )}
+            </div>
           </div>
           <textarea
             className="field-in w-full px-2 py-1 text-[11px] min-h-[42px]"
@@ -212,6 +184,18 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
             onChange={(ev) => updNode(selNode.id, { text: ev.target.value })}
           />
 
+          {/* маркеры узла: что показывать игроку, когда диалог дошёл до этого узла */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <label className="flex items-center gap-1 text-[10px] text-dim cursor-pointer" title="В игре на этом узле появится кнопка «Торговать» (окно торговли). Авто-ветка «Можно ли поторговать с тобой?» ставит маркер сама.">
+              <input type="checkbox" checked={!!selNode.showShop} onChange={(ev) => updNode(selNode.id, { showShop: ev.target.checked || undefined })} />
+              🛒 торговля на этом узле
+            </label>
+            <label className="flex items-center gap-1 text-[10px] text-dim cursor-pointer" title="В игре на этом узле появится список квестов NPC со сдачей. Авто-ветка «Есть ли для меня работа?» ставит маркер сама.">
+              <input type="checkbox" checked={!!selNode.showQuests} onChange={(ev) => updNode(selNode.id, { showQuests: ev.target.checked || undefined })} />
+              📜 квесты на этом узле
+            </label>
+          </div>
+
           <div className="flex items-center justify-between gap-1">
             <span className="tick-label text-gold">Варианты ответа ({(selNode.opts ?? []).length})</span>
             <button
@@ -220,7 +204,7 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
             >+ Добавить вариант</button>
           </div>
           {(selNode.opts ?? []).length === 0 && (
-            <p className="text-[9px] text-magma leading-tight">Ни одного варианта: диалог закроется сразу после реплики. Добавьте вариант ответа.</p>
+            <p className="text-[9px] text-magma leading-tight">Ни одного варианта: диалог закроется сразу после реплики. Добавьте вариант — или прямо на схеме нажмите «＋ ответ» на узле.</p>
           )}
           {(selNode.opts ?? []).map((o, oi) => (
             <div key={oi} className="border-2 border-edge px-1.5 py-1.5 space-y-1 bg-[rgba(7,9,18,0.5)]">
@@ -257,14 +241,9 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
                 >
                   <option value="">— конец диалога —</option>
                   {nodes.filter((x) => x.id !== selNode.id).map((x) => (
-                    <option key={x.id} value={x.id}>{nodeLabel(x)}</option>
+                    <option key={x.id} value={x.id}>{`№${nodes.findIndex((y) => y.id === x.id) + 1} · ${(x.text || '(пусто)').slice(0, 26)}`}</option>
                   ))}
                 </select>
-                <button
-                  onClick={() => addNodeLinked(selNode.id, oi)}
-                  className="px-1.5 py-1 border-2 border-dashed border-teal/60 text-teal font-pixel text-[8px] uppercase hover:bg-teal/10 cursor-pointer shrink-0"
-                  title="Создать новый узел-вопрос и сразу привязать этот вариант к нему"
-                >→ новый узел</button>
               </div>
               {endings.length > 0 && (
                 <div className="flex items-center gap-1 flex-wrap">

@@ -1,20 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { GameMap, MapEnding, NpcDialog } from '../types';
+import type { DialogNode, GameMap, MapEnding, NpcDialog } from '../types';
 
-/* СХЕМА ДЕРЕВЬЕВ ДИАЛОГОВ (v0.50.0) — граф в духе ComfyUI: узлы-вопросы на холсте,
-   стрелки показывают «что из чего растёт» (вопрос → вариант ответа → следующий вопрос).
+/* СХЕМА ДЕРЕВЬЕВ ДИАЛОГОВ (v0.51.0) — ГЛАВНАЯ ПОВЕРХНОСТЬ РЕДАКТИРОВАНИЯ, граф в духе ComfyUI.
+   Список узлов-плиток убран — дерево делается ЦЕЛИКОМ на схеме:
+   • создать узел: кнопка «＋ Узел», двойной клик по фону, или перетаскивание нити из
+     сокета варианта на ПУСТОЕ место (узел создастся и сразу привяжется);
+   • СОЕДИНИТЬ: потяните нить из круглого сокета варианта и бросьте на другой узел —
+     вариант «Далее:» привяжется к нему;
+   • РАЗЪЕДИНИТЬ: нажмите ✕ на середине нити — вариант снова ведёт в конец диалога;
+     нить, брошенная на золотую плашку КОНЦОВКИ, назначает варианту эту концовку
+     (✕ на золотой нити — снять концовку);
+   • на узле: «＋ ответ» добавляет вариант, ✕ у строки удаляет вариант, ✕ в шапке
+     удаляет узел (ссылки на него очищаются);
+   • клик по узлу выбирает его — текст и свойства правятся в панели под холстом;
    • узлы ПЕРЕТАСКИВАЮТСЯ мышью/пальцем — позиции сохраняются в карту (map.dlgPos);
-   • холст панорамируется перетаскиванием фона, зум — колесом мыши и кнопками «+/−»;
+   • холст панорамируется перетаскиванием фона, зум — колесом мыши и кнопками «＋/−»;
    • «Собрать» раскладывает дерево заново по глубине (BFS от стартового узла);
-   • цвета связей: бирюзовая — «Далее:», золотая — КОНЦОВКА, янтарная пунктирная —
-     флаг (вариант слева ставит флаг, вариант справа без него скрыт), серая точка — конец;
+   • цвета нитей: бирюзовая — «Далее:», золотая — КОНЦОВКА, янтарный пунктир — флаг
+     (вариант слева ставит флаг, вариант справа без него скрыт), серая точка — конец;
    • QuestMapGraph — ОБЩАЯ схема карты: все NPC, их деревья, КВЕСТЫ и КОНЦОВКИ
-     на одном холсте — видно, какие ответы ведут к концовкам и что открывают флаги. */
+     на одном холсте — здесь можно СТАВИТЬ концовки и тянуть нити ответов к ним. */
 
-const NW = 200; // ширина узла-вопроса
-const NH = 96;  // высота узла-вопроса
+const NW = 240; // ширина узла-вопроса
 const GX = 56;  // горизонтальный зазор между колонками
 const GY = 78;  // вертикальный зазор между поколениями
+const ROW_H = 18; // высота строки варианта на узле
 const C_TEAL = '#2ee6a8';
 const C_GOLD = '#ffcf3f';
 const C_AMBER = '#ffb347';
@@ -25,24 +35,55 @@ export type DlgPos = { x: number; y: number };
 export type DlgPosMap = { [key: string]: DlgPos };
 type BBox = { x0: number; y0: number; x1: number; y1: number };
 
+/* Операции редактирования ОДНОГО дерева (для DialogueGraph). */
+export type DlgEditOps = {
+  setNext: (nodeId: string, optIdx: number, next: string | undefined) => void;
+  setEnding: (nodeId: string, optIdx: number, ending: string | undefined) => void;
+  addNode: (at: { x: number; y: number }, linkFrom?: { nodeId: string; optIdx: number }) => void;
+  delNode: (nodeId: string) => void;
+  addOpt: (nodeId: string) => void;
+  delOpt: (nodeId: string, optIdx: number) => void;
+};
+
+/* Операции ОБЩЕЙ схемы (для QuestMapGraph): всё то же, но с указанием NPC. */
+export type DlgEditOpsMap = {
+  setNext: (npcId: string, nodeId: string, optIdx: number, next: string | undefined) => void;
+  setEnding: (npcId: string, nodeId: string, optIdx: number, ending: string | undefined) => void;
+  addNode: (npcId: string, at: { x: number; y: number }, linkFrom?: { nodeId: string; optIdx: number }) => void;
+  delNode: (npcId: string, nodeId: string) => void;
+  addOpt: (npcId: string, nodeId: string) => void;
+  delOpt: (npcId: string, nodeId: string, optIdx: number) => void;
+  addEnding?: (at?: { x: number; y: number }) => void;
+  delEnding?: (id: string) => void;
+};
+
+/* высота узла — динамическая: шапка + реплика + строка на каждый вариант (+ «＋ ответ») */
+export const nodeH = (n: DialogNode, editable: boolean): number => {
+  const lines = wrap(n.text);
+  return 26 + (lines.length ? lines.length * 13 + 6 : 16) + (n.opts ?? []).length * ROW_H + (editable ? ROW_H : 0) + 8;
+};
+/* y центра строки варианта oi на узле в позиции p (для сокетов) */
+const optRowY = (n: DialogNode, p: DlgPos, oi: number): number =>
+  p.y + 26 + (wrap(n.text).length ? wrap(n.text).length * 13 + 6 : 16) + oi * ROW_H + ROW_H / 2;
+
 const tr = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 /** Разбивка реплики на строки ≤ w символов, максимум 3 строки (дальше — многоточие). */
-const wrap = (s: string, w = 27): string[] => {
+export function wrap(s: string, w = 32): string[] {
   const words = (s || '').split(/\s+/).filter(Boolean);
   const lines: string[] = [];
   let cur = '';
   for (const word of words) {
-    if (!cur.length) cur = word;
-    else if (cur.length + 1 + word.length <= w) cur += ` ${word}`;
+    if (!cur) { cur = word; continue; }
+    if ((cur + ' ' + word).length <= w) cur += ' ' + word;
     else { lines.push(cur); cur = word; }
   }
-  if (cur.length) lines.push(cur);
+  if (cur) lines.push(cur);
   if (lines.length > 3) {
     lines.length = 3;
     lines[2] = tr(lines[2], w);
   }
   return lines;
-};
+}
 
 /* ---------- РАСКЛАДКА: BFS от стартового узла по поколениям; недостижимые — внизу ---------- */
 export function layoutDialog(dialog: NpcDialog): DlgPosMap {
@@ -78,11 +119,19 @@ export function layoutDialog(dialog: NpcDialog): DlgPosMap {
   layers.forEach((a) => { if (a.length > maxCount) maxCount = a.length; });
   const span = maxCount * (NW + GX);
   const pos: DlgPosMap = {};
-  layers.forEach((ids, d) => {
+  /* слои идут по порядку глубин; каждый следующий — после САМОГО НИЗКОГО узла предыдущего
+     (узлы разной высоты: чем больше вариантов, тем выше узел) */
+  let layerY = 40;
+  for (const d of [...layers.keys()].sort((a, b) => a - b)) {
+    const ids = layers.get(d)!;
+    let y = layerY;
     ids.forEach((id, i) => {
-      pos[id] = { x: 40 + (span - ids.length * (NW + GX)) / 2 + i * (NW + GX), y: 40 + d * (NH + GY) };
+      pos[id] = { x: 40 + (span - ids.length * (NW + GX)) / 2 + i * (NW + GX), y };
+      const n = byId.get(id);
+      y += (n ? nodeH(n, false) : 96) + 16;
     });
-  });
+    layerY = y + GY;
+  }
   return pos;
 }
 
@@ -91,14 +140,19 @@ const incoming = (dialog: NpcDialog, id: string): number =>
   dialog.nodes.reduce((a, n) => a + (n.opts ?? []).filter((o) => o.next === id).length, 0);
 
 /* ---------- ОБЩИЙ ХОЛСТ: панорама + зум. Вписывание — только при смене fitKey ---------- */
-function GraphViewport({ height, bbox, fitKey, zoomRef, children }: {
+export type VtRef = { x: number; y: number; z: number; svg: SVGSVGElement | null };
+
+function GraphViewport({ height, bbox, fitKey, zoomRef, vtRef, onBgDblClick, children }: {
   height: number;
   bbox: BBox;
   fitKey: string;
   zoomRef: React.MutableRefObject<number>; // текущий зум для обработчиков перетаскивания узлов
+  vtRef: React.MutableRefObject<VtRef>;    // текущая трансформация + svg — для пересчёта координат нитей
+  onBgDblClick?: (p: { x: number; y: number }) => void;
   children: React.ReactNode;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
   const [vt, setVt] = useState<{ x: number; y: number; z: number } | null>(null);
   const panRef = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
 
@@ -106,7 +160,7 @@ function GraphViewport({ height, bbox, fitKey, zoomRef, children }: {
     const el = wrapRef.current;
     const w = el?.clientWidth ?? 800;
     const bw = Math.max(1, bbox.x1 - bbox.x0), bh = Math.max(1, bbox.y1 - bbox.y0);
-    const z = Math.max(0.3, Math.min(1.25, Math.min((w - 48) / bw, (height - 48) / bh)));
+    const z = Math.max(0.25, Math.min(1.25, Math.min((w - 48) / bw, (height - 48) / bh)));
     setVt({ x: (w - bw * z) / 2 - bbox.x0 * z, y: (height - bh * z) / 2 - bbox.y0 * z, z });
   }, [bbox.x0, bbox.y0, bbox.x1, bbox.y1, height]);
   const fitRef = useRef(fit);
@@ -118,17 +172,29 @@ function GraphViewport({ height, bbox, fitKey, zoomRef, children }: {
   const zoomAt = useCallback((factor: number, cx: number, cy: number) => {
     setVt((s) => {
       if (!s) return s;
-      const z = Math.max(0.3, Math.min(2.2, s.z * factor));
+      const z = Math.max(0.25, Math.min(2.4, s.z * factor));
       const k = z / s.z;
       return { z, x: cx - (cx - s.x) * k, y: cy - (cy - s.y) * k };
     });
   }, []);
   const z = vt?.z ?? 1;
   zoomRef.current = z;
+  /* держим актуальную трансформацию снаружи (нити, «＋ Узел» в центре экрана) */
+  vtRef.current = { x: vt?.x ?? 0, y: vt?.y ?? 0, z, svg: svgRef.current };
+
+  const toCanvas = useCallback((clientX: number, clientY: number): { x: number; y: number } => {
+    const v = vtRef.current;
+    const r = v.svg?.getBoundingClientRect();
+    if (!r) return { x: 0, y: 0 };
+    return { x: (clientX - r.left - v.x) / v.z, y: (clientY - r.top - v.y) / v.z };
+  }, [vtRef]);
+  const toCanvasRef = useRef(toCanvas);
+  toCanvasRef.current = toCanvas;
 
   return (
     <div className="relative select-none" ref={wrapRef}>
       <svg
+        ref={svgRef}
         width="100%"
         height={height}
         className="block cursor-grab active:cursor-grabbing"
@@ -138,7 +204,7 @@ function GraphViewport({ height, bbox, fitKey, zoomRef, children }: {
           zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX - r.left, e.clientY - r.top);
         }}
         onPointerDown={(e) => {
-          if ((e.target as Element).closest('[data-node]')) return; // узлы тянут себя сами
+          if ((e.target as Element).closest('[data-node]')) return; // узлы и нити тянут себя сами
           panRef.current = { sx: e.clientX, sy: e.clientY, vx: vt?.x ?? 0, vy: vt?.y ?? 0 };
           (e.currentTarget as SVGSVGElement).setPointerCapture(e.pointerId);
         }}
@@ -149,6 +215,12 @@ function GraphViewport({ height, bbox, fitKey, zoomRef, children }: {
         }}
         onPointerUp={() => { panRef.current = null; }}
         onPointerLeave={() => { panRef.current = null; }}
+        onDoubleClick={(e) => {
+          const t = e.target as Element;
+          if (t.closest('[data-node]')) return;
+          if (!onBgDblClick) return;
+          onBgDblClick(toCanvasRef.current(e.clientX, e.clientY));
+        }}
       >
         {vt && <g transform={`translate(${vt.x},${vt.y}) scale(${vt.z})`}>{children}</g>}
       </svg>
@@ -159,13 +231,13 @@ function GraphViewport({ height, bbox, fitKey, zoomRef, children }: {
         <button onClick={() => fitRef.current()} className="px-2 py-0.5 border-2 border-edge bg-[rgba(7,9,18,0.9)] text-dim font-display text-[9px] uppercase cursor-pointer hover:text-gold" title="Вписать схему в окно">⤢ Вписать</button>
       </div>
       <div className="absolute left-1.5 bottom-1.5 px-1.5 py-0.5 text-[8px] text-faint font-pixel bg-[rgba(7,9,18,0.85)] border border-[#23294d] pointer-events-none">
-        колесо — масштаб · тяните фон — панорама · тяните узел — переместить
+        колесо — масштаб · тяните фон — панорама · тяните узел — переместить · нить из сокета — соединить
       </div>
     </div>
   );
 }
 
-/* ---------- СТРЕЛКА-«КОСТОЧКА» между точками ---------- */
+/* ---------- НИТЬ-«КОСТОЧКА» между точками + кнопка ✕ «разъединить» ---------- */
 function Edge({ x1, y1, x2, y2, color, dashed, opacity = 1 }: {
   x1: number; y1: number; x2: number; y2: number; color: string; dashed?: boolean; opacity?: number;
 }) {
@@ -178,7 +250,7 @@ function Edge({ x1, y1, x2, y2, color, dashed, opacity = 1 }: {
   );
 }
 
-/* подпись на связи (текст варианта ответа) */
+/* подпись на нити (текст варианта ответа) */
 function EdgeLabel({ x, y, text, color }: { x: number; y: number; text: string; color: string }) {
   const w = text.length * 5.3 + 10;
   return (
@@ -189,22 +261,36 @@ function EdgeLabel({ x, y, text, color }: { x: number; y: number; text: string; 
   );
 }
 
-/* ---------- ОДНО ДЕРЕВО ДИАЛОГОВ NPC (граф) ---------- */
-export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, height = 300, fitKey }: {
+/* ✕ на середине нити — РАЗЪЕДИНИТЬ (v0.51) */
+function EdgeCut({ x, y, color, onCut, title }: { x: number; y: number; color: string; onCut: () => void; title: string }) {
+  return (
+    <g data-node="1" className="cursor-pointer" onPointerDown={(e) => { e.stopPropagation(); onCut(); }}>
+      <rect x={x - 7} y={y - 7} width={14} height={14} rx={3} fill="#0b0e1c" stroke={color} strokeWidth={1.2} opacity={0.95} />
+      <text x={x} y={y + 3.5} textAnchor="middle" fontSize={9} fill={color}>{'✕'}</text>
+      <title>{title}</title>
+    </g>
+  );
+}
+/* ---------- ОДНО ДЕРЕВО ДИАЛОГОВ NPC (граф-редактор v0.51) ---------- */
+export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, ops, height = 300, fitKey }: {
   dialog: NpcDialog;
   endings: MapEnding[];
   selId?: string | null;
   onSelect?: (nodeId: string) => void;
   pos?: DlgPosMap;                 // сохранённые позиции (map.dlgPos) — перекрывают автораскладку
   onPos?: (p: DlgPosMap | null) => void; // сохранить позиции (null — сбросить и разложить заново)
+  ops?: DlgEditOps;                // v0.51: операции на схеме (нет — режим «только смотреть»)
   height?: number;
   fitKey?: string;                 // смена ключа = заново вписать схему в окно
 }) {
   const zoomRef = useRef(1);
+  const vtRef = useRef<VtRef>({ x: 0, y: 0, z: 1, svg: null });
   const layout = useMemo<DlgPosMap>(() => ({ ...layoutDialog(dialog), ...(pos ?? {}) }), [dialog, pos]);
   const dragRef = useRef<{ id: string; sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null);
-  const [, bump] = useState(0); // перерисовка при перетаскивании узла
+  const linkRef = useRef<{ nodeId: string; optIdx: number; x: number; y: number } | null>(null);
+  const [, bump] = useState(0); // перерисовка при перетаскивании узла/нити
 
+  const editable = !!ops;
   const nodes = dialog.nodes;
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   const idxOf = useMemo(() => new Map(nodes.map((n, i) => [n.id, i])), [nodes]);
@@ -216,9 +302,15 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, he
     return ids.map((id) => ({ id, e: endings.find((x) => x.id === id) })).filter((x): x is { id: string; e: MapEnding } => !!x.e);
   }, [nodes, endings]);
 
+  const hs = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const n of nodes) m[n.id] = nodeH(n, editable);
+    return m;
+  }, [nodes, editable]);
+
   const ys = Object.values(layout).map((p) => p.y);
   const xs = Object.values(layout).map((p) => p.x);
-  const bottomY = (ys.length ? Math.max(...ys) : 0) + NH;
+  const bottomY = (ys.length ? Math.max(...ys) : 0) + Math.max(...Object.values(hs), NH_MIN);
   const endY = bottomY + 78;
   const endRowW = usedEndings.length ? 40 + usedEndings.length * 236 : 0;
   const bbox: BBox = {
@@ -226,6 +318,13 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, he
     y0: Math.min(0, ...(ys.length ? ys : [0])) - 20,
     x1: Math.max(NW + 80, endRowW, ...(xs.length ? xs.map((x) => x + NW) : [NW + 80])) + 20,
     y1: usedEndings.length ? endY + 10 : bottomY + 30,
+  };
+
+  const toCanvas = (clientX: number, clientY: number): { x: number; y: number } => {
+    const v = vtRef.current;
+    const r = v.svg?.getBoundingClientRect();
+    if (!r) return { x: 0, y: 0 };
+    return { x: (clientX - r.left - v.x) / v.z, y: (clientY - r.top - v.y) / v.z };
   };
 
   const nodeDown = (id: string) => (e: React.PointerEvent) => {
@@ -250,38 +349,137 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, he
     onSelect?.(id);
   };
 
+  /* ---------- нить: тянем из сокета варианта ---------- */
+  const linkDown = (nodeId: string, optIdx: number) => (e: React.PointerEvent) => {
+    if (!ops) return;
+    e.stopPropagation();
+    const c = toCanvas(e.clientX, e.clientY);
+    linkRef.current = { nodeId, optIdx, x: c.x, y: c.y };
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    bump((n) => n + 1);
+  };
+  const linkMove = (e: React.PointerEvent) => {
+    if (!linkRef.current) return;
+    const c = toCanvas(e.clientX, e.clientY);
+    linkRef.current = { ...linkRef.current, x: c.x, y: c.y };
+    bump((n) => n + 1);
+  };
+  const hitNode = (pt: { x: number; y: number }): string | null => {
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const n = nodes[i];
+      const p = layout[n.id];
+      if (!p) continue;
+      const h = hs[n.id] ?? nodeH(n, editable);
+      if (pt.x >= p.x && pt.x <= p.x + NW && pt.y >= p.y && pt.y <= p.y + h) return n.id;
+    }
+    return null;
+  };
+  const hitEnding = (pt: { x: number; y: number }): string | null => {
+    for (let i = usedEndings.length - 1; i >= 0; i--) {
+      const u = usedEndings[i];
+      const ex = 40 + i * 236;
+      if (pt.x >= ex && pt.x <= ex + 216 && pt.y >= endY - 44 && pt.y <= endY - 4) return u.id;
+    }
+    return null;
+  };
+  const linkUp = (e: React.PointerEvent) => {
+    const lk = linkRef.current;
+    linkRef.current = null;
+    bump((n) => n + 1);
+    if (!lk || !ops) return;
+    const src = nodes.find((n) => n.id === lk.nodeId);
+    if (!src) return;
+    const pt = toCanvas(e.clientX, e.clientY);
+    const start = { x: layout[lk.nodeId].x + NW - 12, y: optRowY(src, layout[lk.nodeId], lk.optIdx) };
+    if (Math.hypot(pt.x - start.x, pt.y - start.y) < 16) return; // вернули в сокет — отмена
+    const endId = hitNode(pt);
+    if (endId && endId !== lk.nodeId) { ops.setNext(lk.nodeId, lk.optIdx, endId); return; }
+    const endE = hitEnding(pt);
+    if (endE) { ops.setEnding(lk.nodeId, lk.optIdx, endE); return; }
+    /* бросили на пустое место — создать узел и сразу привязать */
+    ops.addNode({ x: pt.x - NW / 2, y: pt.y - 20 }, { nodeId: lk.nodeId, optIdx: lk.optIdx });
+  };
+
+  const addAtCenter = () => {
+    if (!ops) return;
+    const v = vtRef.current;
+    const r = v.svg?.getBoundingClientRect();
+    const cx = r ? (r.width / 2 - v.x) / v.z : 120;
+    const cy = r ? (r.height / 2 - v.y) / v.z : 120;
+    ops.addNode({ x: cx - NW / 2, y: cy - 20 });
+  };
+
   return (
     <div className="space-y-1">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="tick-label text-teal">🌳 Схема дерева</span>
-        <span className="tick-label text-faint">
-          <span style={{ color: C_TEAL }}>— далее</span> · <span style={{ color: C_GOLD }}>— концовка</span> · <span style={{ color: C_AMBER }}>⬚ флаг</span> · ·? — конец диалога
+        <span className="tick-label text-faint hidden md:inline">
+          <span style={{ color: C_TEAL }}>— далее</span> · <span style={{ color: C_GOLD }}>— концовка</span> · <span style={{ color: C_AMBER }}>⬚ флаг</span> · тяните нить из ○
         </span>
-        {onPos && (
-          <button
-            onClick={() => onPos(null)}
-            className="ml-auto px-2 py-0.5 border-2 border-edge text-faint font-display text-[9px] uppercase hover:text-teal cursor-pointer"
-            title="Разложить все узлы заново по глубине дерева (сбрасывает перетаскивания)"
-          >⌖ Собрать</button>
-        )}
+        <span className="ml-auto flex items-center gap-1">
+          {ops && (
+            <button
+              onClick={addAtCenter}
+              className="px-2 py-0.5 border-2 border-teal/60 text-teal font-display text-[9px] uppercase hover:bg-teal/10 cursor-pointer"
+              title="Создать узел-вопрос в центре холста (ещё можно двойным кликом по фону)"
+            >＋ Узел</button>
+          )}
+          {onPos && (
+            <button
+              onClick={() => onPos(null)}
+              className="px-2 py-0.5 border-2 border-edge text-faint font-display text-[9px] uppercase hover:text-teal cursor-pointer"
+              title="Разложить все узлы заново по глубине дерева (сбрасывает перетаскивания)"
+            >⌖ Собрать</button>
+          )}
+        </span>
       </div>
-      <GraphViewport height={height} bbox={bbox} fitKey={`${fitKey ?? ''}|${dialog.root}|${dialog.nodes.length}`} zoomRef={zoomRef}>
-        {/* связи «Далее» и концы */}
+      <GraphViewport
+        height={height}
+        bbox={bbox}
+        fitKey={`${fitKey ?? ''}|${dialog.root}|${dialog.nodes.length}`}
+        zoomRef={zoomRef}
+        vtRef={vtRef}
+        onBgDblClick={ops ? (p) => ops.addNode({ x: p.x - NW / 2, y: p.y - 20 }) : undefined}
+      >
+        {/* временная нить под курсором */}
+        {linkRef.current && (() => {
+          const lk = linkRef.current;
+          const src = nodes.find((n) => n.id === lk.nodeId);
+          const p = layout[lk.nodeId];
+          if (!src || !p) return null;
+          return <Edge x1={p.x + NW - 12} y1={optRowY(src, p, lk.optIdx)} x2={lk.x} y2={lk.y} color={C_TEAL} dashed opacity={0.9} />;
+        })()}
+        {/* связи «Далее», концы и концовки */}
         {nodes.map((n) => {
           const p = layout[n.id];
           if (!p) return null;
           const opts = n.opts ?? [];
           return opts.map((o, oi) => {
-            const sx = p.x + (NW * (oi + 1)) / (opts.length + 1);
-            const sy = p.y + NH;
+            const sx = p.x + NW - 12;
+            const sy = optRowY(n, p, oi);
             if (o.next && byId.has(o.next)) {
               const tp = layout[o.next];
               if (!tp) return null;
-              return <Edge key={`${n.id}:${oi}`} x1={sx} y1={sy} x2={tp.x + NW / 2} y2={tp.y} color={o.ending ? C_GOLD : C_TEAL} opacity={0.85} />;
+              const mx = (sx + tp.x) / 2, my = (sy + tp.y + 26) / 2;
+              return (
+                <g key={`${n.id}:${oi}`}>
+                  <Edge x1={sx} y1={sy} x2={tp.x} y2={tp.y + 26} color={o.ending ? C_GOLD : C_TEAL} opacity={0.85} />
+                  {ops && <EdgeCut x={mx} y={my} color={o.ending ? C_GOLD : C_TEAL} onCut={() => ops.setNext(n.id, oi, undefined)} title="Разъединить: вариант снова ведёт в конец диалога" />}
+                  <EdgeLabel x={mx} y={my - 11} text={tr(o.text || '(без текста)', 20)} color={o.ending ? C_GOLD : C_TEAL} />
+                </g>
+              );
             }
             if (o.ending && usedEndings.some((u) => u.id === o.ending)) {
               const i = usedEndings.findIndex((u) => u.id === o.ending);
-              return <Edge key={`${n.id}:${oi}`} x1={sx} y1={sy} x2={40 + i * 236 + 108} y2={endY - 44} color={C_GOLD} opacity={0.9} />;
+              const ex = 40 + i * 236 + 108;
+              const ey = endY - 44;
+              const mx = (sx + ex) / 2, my = (sy + ey) / 2;
+              return (
+                <g key={`${n.id}:${oi}`}>
+                  <Edge x1={sx} y1={sy} x2={ex} y2={ey} color={C_GOLD} opacity={0.9} />
+                  {ops && <EdgeCut x={mx} y={my} color={C_GOLD} onCut={() => ops.setEnding(n.id, oi, undefined)} title="Снять концовку с этого варианта" />}
+                </g>
+              );
             }
             /* конец диалога — короткий хвостик с точкой */
             return (
@@ -301,21 +499,7 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, he
             if (!src) return null;
             const sp = layout[src.id];
             if (!sp) return null;
-            return <Edge key={`flag:${n.id}:${i}`} x1={sp.x + NW} y1={sp.y + NH / 2} x2={p.x} y2={p.y + NH / 2} color={C_AMBER} dashed opacity={0.55} />;
-          });
-        })}
-        {/* подписи вариантов на связях «Далее» */}
-        {nodes.map((n) => {
-          const p = layout[n.id];
-          if (!p) return null;
-          const opts = n.opts ?? [];
-          return opts.map((o, oi) => {
-            if (!o.next || !byId.has(o.next)) return null;
-            const tp = layout[o.next];
-            if (!tp) return null;
-            const mx = (p.x + (NW * (oi + 1)) / (opts.length + 1) + tp.x + NW / 2) / 2;
-            const myc = (p.y + NH + tp.y) / 2;
-            return <EdgeLabel key={`lb:${n.id}:${oi}`} x={mx} y={myc} text={tr(o.text || '(без текста)', 20)} color={o.ending ? C_GOLD : C_TEAL} />;
+            return <Edge key={`flag:${n.id}:${i}`} x1={sp.x + NW} y1={sp.y + 26} x2={p.x} y2={p.y + 26} color={C_AMBER} dashed opacity={0.55} />;
           });
         })}
         {/* узлы-вопросы */}
@@ -329,6 +513,8 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, he
           const opts = n.opts ?? [];
           const hasSet = opts.some((o) => o.setFlag);
           const hasReq = opts.some((o) => o.reqFlag || o.reqNotFlag);
+          const h = hs[n.id] ?? nodeH(n, editable);
+          const textBottom = p.y + 26 + (lines.length ? lines.length * 13 + 6 : 16);
           return (
             <g
               key={n.id}
@@ -338,30 +524,75 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, he
               onPointerUp={() => nodeUp(n.id)}
               className="cursor-pointer"
             >
-              <rect x={p.x} y={p.y} width={NW} height={NH} rx={5} fill={sel ? '#101a30' : '#0d1124'} stroke={sel ? C_TEAL : C_EDGE} strokeWidth={sel ? 2.5 : 1.6} />
+              <rect x={p.x} y={p.y} width={NW} height={h} rx={5} fill={sel ? '#101a30' : '#0d1124'} stroke={sel ? C_TEAL : C_EDGE} strokeWidth={sel ? 2.5 : 1.6} />
+              {/* вход-приёмник нитей */}
+              <circle cx={p.x} cy={p.y + 26} r={3.2} fill={sel ? C_TEAL : C_EDGE} />
               <text x={p.x + 8} y={p.y + 15} fontSize={10} className="font-display" fill={C_FAINT}>№{i + 1}</text>
               {dialog.root === n.id && (
                 <>
-                  <rect x={p.x + NW - 58} y={p.y + 5} width={52} height={13} rx={3} fill="rgba(255,207,63,0.12)" stroke={C_GOLD} strokeWidth={0.8} />
-                  <text x={p.x + NW - 32} y={p.y + 15} textAnchor="middle" fontSize={8} className="font-display" fill={C_GOLD}>СТАРТ</text>
+                  <rect x={p.x + NW - 58} y={p.y + 4} width={44} height={13} rx={3} fill="rgba(255,207,63,0.12)" stroke={C_GOLD} strokeWidth={0.8} />
+                  <text x={p.x + NW - 36} y={p.y + 14} textAnchor="middle" fontSize={8} className="font-display" fill={C_GOLD}>СТАРТ</text>
                 </>
               )}
+              {ops && nodes.length > 1 && (() => {
+                const bx = p.x + NW - (dialog.root === n.id ? 64 : 16);
+                return (
+                  <g className="cursor-pointer" onPointerDown={(e) => { e.stopPropagation(); ops.delNode(n.id); }}>
+                    <rect x={bx} y={p.y + 4} width={12} height={12} rx={3} fill="rgba(255,93,115,0.1)" stroke="rgba(255,93,115,0.55)" strokeWidth={0.8} />
+                    <text x={bx + 6} y={p.y + 13} textAnchor="middle" fontSize={8} fill="#ff5d73">✕</text>
+                    <title>Удалить узел (ссылки на него очистятся)</title>
+                  </g>
+                );
+              })()}
               {lines.length === 0 && <text x={p.x + 8} y={p.y + 36} fontSize={9.5} className="font-pixel" fill={C_FAINT}>(пустая реплика)</text>}
               {lines.map((ln, li) => (
                 <text key={li} x={p.x + 8} y={p.y + 34 + li * 13} fontSize={9.5} className="font-pixel" fill="#c7cdf0">{ln}</text>
               ))}
-              <text x={p.x + 8} y={p.y + NH - 8} fontSize={8.5} className="font-display" fill={opts.length ? C_TEAL : '#ff5d73'}>{opts.length} отв.</text>
-              {hasSet && <text x={p.x + NW - 46} y={p.y + NH - 8} fontSize={9}>🚩</text>}
-              {hasReq && <text x={p.x + NW - 28} y={p.y + NH - 8} fontSize={9}>🔒</text>}
+              <line x1={p.x + 6} y1={textBottom - 4} x2={p.x + NW - 6} y2={textBottom - 4} stroke={C_EDGE} strokeWidth={1} />
+              {opts.map((o, oi) => {
+                const ry = textBottom + oi * ROW_H + ROW_H / 2;
+                return (
+                  <g key={oi}>
+                    {ops && (
+                      <g className="cursor-pointer" onPointerDown={(e) => { e.stopPropagation(); ops.delOpt(n.id, oi); }}>
+                        <text x={p.x + 8} y={ry + 3} fontSize={8} fill="#5a6491">✕</text>
+                        <title>Удалить вариант</title>
+                      </g>
+                    )}
+                    <text x={p.x + (ops ? 20 : 8)} y={ry + 3} fontSize={8.5} className="font-pixel" fill={o.ending ? C_GOLD : '#9aa3c7'}>
+                      {tr(`${o.reqFlag || o.reqNotFlag ? '🔒' : ''}${o.setFlag ? '🚩' : ''}${o.text || '(без текста)'}`, 28)}
+                    </text>
+                    {/* сокет: тянуть из него нить */}
+                    <circle
+                      cx={p.x + NW - 12} cy={ry} r={5}
+                      fill={o.ending ? 'rgba(255,207,63,0.25)' : 'rgba(46,230,168,0.25)'}
+                      stroke={o.ending ? C_GOLD : C_TEAL} strokeWidth={1.4}
+                      className={ops ? 'cursor-crosshair' : ''}
+                      onPointerDown={ops ? linkDown(n.id, oi) : undefined}
+                      onPointerMove={ops ? linkMove : undefined}
+                      onPointerUp={ops ? linkUp : undefined}
+                    />
+                    <title>{ops ? 'Тяните нить: бросьте на узел — привязать «Далее», на концовку — назначить концовку, на пустое место — новый узел' : ''}</title>
+                  </g>
+                );
+              })}
+              {ops && (
+                <g className="cursor-pointer" onPointerDown={(e) => { e.stopPropagation(); ops.addOpt(n.id); }}>
+                  <text x={p.x + 8} y={textBottom + opts.length * ROW_H + 12} fontSize={9} className="font-display" fill={C_TEAL}>＋ ответ</text>
+                  <title>Добавить вариант ответа</title>
+                </g>
+              )}
+              <text x={p.x + 8} y={p.y + h - 4} fontSize={8.5} className="font-display" fill={opts.length ? C_TEAL : '#ff5d73'}>{opts.length} отв.</text>
+              {(hasSet || hasReq) && <text x={p.x + NW - 40} y={p.y + h - 4} fontSize={8}>{hasSet ? '🚩' : ''}{hasReq ? '🔒' : ''}</text>}
               {orphan && <text x={p.x + NW - 14} y={p.y + 15} fontSize={9} fill="#ff5d73">⚠</text>}
             </g>
           );
         })}
-        {/* концовки — золотые плашки в нижнем ряду */}
+        {/* концовки — золотые плашки в нижнем ряду (в них можно бросать нити) */}
         {usedEndings.map((u, i) => {
           const ex = 40 + i * 236;
           return (
-            <g key={u.id}>
+            <g key={u.id} data-node="1">
               <rect x={ex} y={endY - 44} width={216} height={40} rx={5} fill="#191204" stroke={C_GOLD} strokeWidth={1.8} />
               <text x={ex + 10} y={endY - 30} fontSize={9} className="font-display" fill={C_GOLD}>🎬 КОНЦОВКА</text>
               <text x={ex + 10} y={endY - 15} fontSize={9.5} className="font-pixel" fill="#ffe9ad">{tr(u.e.name || '(без названия)', 28)}</text>
@@ -373,24 +604,31 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, he
   );
 }
 
-/* ---------- ОБЩАЯ СХЕМА КАРТЫ: все NPC + квесты + концовки ---------- */
-export function QuestMapGraph({ map, pos, onPos, onSelectNpc, height = 560 }: {
+const NH_MIN = 96; // минимальная высота узла (для bbox, когда узлы без реплик)
+/* ---------- ОБЩАЯ СХЕМА КАРТЫ: все NPC + квесты + концовки (v0.51: концовки СТАВЯТСЯ здесь) ---------- */
+export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, selEndingId, ops, height = 560 }: {
   map: GameMap;
   pos?: DlgPosMap;
   onPos?: (p: DlgPosMap | null) => void;
   onSelectNpc?: (npcId: string) => void;
+  onSelectEnding?: (endingId: string) => void; // v0.51: клик по концовке — редактировать в панели под схемой
+  selEndingId?: string | null;
+  ops?: DlgEditOpsMap;                          // v0.51: editing — соединение нитей, «＋ Концовка», удаление
   height?: number;
 }) {
   const zoomRef = useRef(1);
+  const vtRef = useRef<VtRef>({ x: 0, y: 0, z: 1, svg: null });
   const dragRef = useRef<{ key: string; sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null);
+  const linkRef = useRef<{ npcId: string; nodeId: string; optIdx: number; x: number; y: number } | null>(null);
   const [, bump] = useState(0);
   const npcs = useMemo(() => (map.npcs ?? []).filter((n) => n.dialog && n.dialog.nodes.length > 0), [map]);
   const endings = map.endings ?? [];
   const QW = 190, QH = 40; // плашки NPC и квестов
+  const editable = !!ops;
 
   /* раскладка: каждый NPC — свой кластер-колонка; дерево — его layoutDialog;
      плашки NPC/квестов и концовки можно тащить отдельно (ключи npc:/q:/e:/n:) */
-  const { layout, clusterX, bbox } = useMemo(() => {
+  const { layout, bbox } = useMemo(() => {
     const layout: DlgPosMap = { ...(pos ?? {}) };
     const clusterX: Record<string, number> = {};
     let x = 40;
@@ -410,7 +648,12 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, height = 560 }: {
       (npc.quests ?? []).forEach((q, qi) => {
         if (!layout[`q:${q.id}`]) layout[`q:${q.id}`] = { x, y: 70 + qi * (QH + 12) };
       });
-      maxBottom = Math.max(maxBottom, 130 + maxLocalY + NH + (npc.quests ?? []).length * 0);
+      let maxNodeBottom = 0;
+      for (const n of dlg.nodes) {
+        const p = layout[`n:${n.id}`];
+        if (p) maxNodeBottom = Math.max(maxNodeBottom, p.y + nodeH(n, editable));
+      }
+      maxBottom = Math.max(maxBottom, 130 + maxLocalY + nodeH(dlg.nodes[0] ?? { id: '', text: '', opts: [] }, editable), maxNodeBottom);
       x += wTree + GAP;
     }
     /* концовки — колонкой справа от всех кластеров */
@@ -420,8 +663,8 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, height = 560 }: {
     });
     const totalW = Math.max(endX + 240, 780);
     const totalH = Math.max(maxBottom + 50, height);
-    return { layout, clusterX, bbox: { x0: 0, y0: 0, x1: totalW, y1: totalH } };
-  }, [npcs, endings, pos, height]);
+    return { layout, bbox: { x0: 0, y0: 0, x1: totalW, y1: totalH } as BBox };
+  }, [npcs, endings, pos, height, editable]);
 
   const keyDown = (key: string) => (e: React.PointerEvent) => {
     e.stopPropagation();
@@ -438,10 +681,81 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, height = 560 }: {
     layout[d.key] = { x: d.ox + dx, y: d.oy + dy };
     bump((n) => n + 1);
   };
-  const keyUp = () => {
+  const keyUp = (key?: string) => {
     const d = dragRef.current;
     dragRef.current = null;
     if (d && d.moved && onPos) onPos({ ...(pos ?? {}), [d.key]: { ...layout[d.key] } });
+    if (key && onSelectNpc) onSelectNpc(key);
+  };
+
+  const toCanvas = (clientX: number, clientY: number): { x: number; y: number } => {
+    const v = vtRef.current;
+    const r = v.svg?.getBoundingClientRect();
+    if (!r) return { x: 0, y: 0 };
+    return { x: (clientX - r.left - v.x) / v.z, y: (clientY - r.top - v.y) / v.z };
+  };
+  const nodeOfKey = (nid: string): { npcId: string; node: DialogNode } | null => {
+    for (const npc of npcs) {
+      const n = (npc.dialog as NpcDialog).nodes.find((x) => x.id === nid);
+      if (n) return { npcId: npc.id, node: n };
+    }
+    return null;
+  };
+  const hitNodeKey = (pt: { x: number; y: number }): string | null => {
+    for (const npc of npcs) {
+      const dlg = npc.dialog as NpcDialog;
+      for (const n of dlg.nodes) {
+        const p = layout[`n:${n.id}`];
+        if (!p) continue;
+        const h = nodeH(n, editable);
+        if (pt.x >= p.x && pt.x <= p.x + NW && pt.y >= p.y && pt.y <= p.y + h) return n.id;
+      }
+    }
+    return null;
+  };
+  const hitEndingKey = (pt: { x: number; y: number }): string | null => {
+    for (const e of endings) {
+      const p = layout[`e:${e.id}`];
+      if (!p) continue;
+      if (pt.x >= p.x && pt.x <= p.x + 216 && pt.y >= p.y && pt.y <= p.y + 44) return e.id;
+    }
+    return null;
+  };
+  const linkDown = (npcId: string, nodeId: string, optIdx: number) => (e: React.PointerEvent) => {
+    if (!ops) return;
+    e.stopPropagation();
+    const c = toCanvas(e.clientX, e.clientY);
+    linkRef.current = { npcId, nodeId, optIdx, x: c.x, y: c.y };
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    bump((n) => n + 1);
+  };
+  const linkMove = (e: React.PointerEvent) => {
+    if (!linkRef.current) return;
+    const c = toCanvas(e.clientX, e.clientY);
+    linkRef.current = { ...linkRef.current, x: c.x, y: c.y };
+    bump((n) => n + 1);
+  };
+  const linkUp = (e: React.PointerEvent) => {
+    const lk = linkRef.current;
+    linkRef.current = null;
+    bump((n) => n + 1);
+    if (!lk || !ops) return;
+    const src = nodeOfKey(lk.nodeId);
+    if (!src) return;
+    const sp = layout[`n:${lk.nodeId}`];
+    if (!sp) return;
+    const pt = toCanvas(e.clientX, e.clientY);
+    const start = { x: sp.x + NW - 12, y: optRowY(src.node, sp, lk.optIdx) };
+    if (Math.hypot(pt.x - start.x, pt.y - start.y) < 16) return;
+    const endId = hitNodeKey(pt);
+    if (endId && endId !== lk.nodeId) {
+      const dst = nodeOfKey(endId);
+      if (dst && dst.npcId === lk.npcId) { ops.setNext(lk.npcId, lk.nodeId, lk.optIdx, endId); return; }
+      return; // чужой NPC: дерево ведётся в его личном редакторе
+    }
+    const endE = hitEndingKey(pt);
+    if (endE) { ops.setEnding(lk.npcId, lk.nodeId, lk.optIdx, endE); return; }
+    ops.addNode(lk.npcId, { x: pt.x - NW / 2, y: pt.y - 20 }, { nodeId: lk.nodeId, optIdx: lk.optIdx });
   };
 
   if (npcs.length === 0 && endings.length === 0) {
@@ -456,14 +770,31 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, height = 560 }: {
     <div className="space-y-1">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="tick-label text-teal">🗺 Схема карты</span>
-        <span className="tick-label text-faint">
+        <span className="tick-label text-faint hidden md:inline">
           <span style={{ color: C_TEAL }}>— далее</span> · <span style={{ color: C_GOLD }}>— к концовке</span> · <span style={{ color: C_AMBER }}>⬚ флаг открывает</span> · клик по узлу — открыть NPC
         </span>
-        {onPos && (
-          <button onClick={() => onPos(null)} className="ml-auto px-2 py-0.5 border-2 border-edge text-faint font-display text-[9px] uppercase hover:text-teal cursor-pointer" title="Сбросить сохранённые позиции и разложить заново">⌖ Собрать</button>
-        )}
+        <span className="ml-auto flex items-center gap-1">
+          {ops?.addEnding && (
+            <button
+              onClick={() => ops.addEnding && ops.addEnding()}
+              className="px-2 py-0.5 border-2 border-gold/60 text-gold font-display text-[9px] uppercase hover:bg-gold/10 cursor-pointer"
+              title="Поставить концовку на схему — потом бросьте на неё нить варианта ответа"
+            >＋ Концовка</button>
+          )}
+          {onPos && (
+            <button onClick={() => onPos(null)} className="px-2 py-0.5 border-2 border-edge text-faint font-display text-[9px] uppercase hover:text-teal cursor-pointer" title="Сбросить сохранённые позиции и разложить заново">⌖ Собрать</button>
+          )}
+        </span>
       </div>
-      <GraphViewport height={height} bbox={bbox} fitKey={`map|${npcs.length}|${endings.length}`} zoomRef={zoomRef}>
+      <GraphViewport height={height} bbox={bbox} fitKey={`map|${npcs.length}|${endings.length}`} zoomRef={zoomRef} vtRef={vtRef}>
+        {/* временная нить */}
+        {linkRef.current && (() => {
+          const lk = linkRef.current;
+          const src = nodeOfKey(lk.nodeId);
+          const p = layout[`n:${lk.nodeId}`];
+          if (!src || !p) return null;
+          return <Edge x1={p.x + NW - 12} y1={optRowY(src.node, p, lk.optIdx)} x2={lk.x} y2={lk.y} color={C_TEAL} dashed opacity={0.9} />;
+        })()}
         {/* плашки NPC, квестов и связи с корнем дерева */}
         {npcs.map((npc) => {
           const dlg = npc.dialog as NpcDialog;
@@ -474,7 +805,7 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, height = 560 }: {
           const quests = npc.quests ?? [];
           return (
             <g key={npc.id}>
-              <g data-node="1" className="cursor-pointer" onPointerDown={keyDown(`npc:${npc.id}`)} onPointerMove={keyMove} onPointerUp={() => { keyUp(); onSelectNpc?.(npc.id); }}>
+              <g data-node="1" className="cursor-pointer" onPointerDown={keyDown(`npc:${npc.id}`)} onPointerMove={keyMove} onPointerUp={() => keyUp(npc.id)}>
                 <rect x={kp.x} y={kp.y} width={QW} height={34} rx={5} fill="#0e1a2e" stroke={C_TEAL} strokeWidth={1.8} />
                 <text x={kp.x + 9} y={kp.y + 15} fontSize={9} className="font-display" fill={C_TEAL}>🧑 NPC · {(dlg.nodes).length} узл.</text>
                 <text x={kp.x + 9} y={kp.y + 29} fontSize={10} className="font-pixel" fill="#c7cdf0">{tr(def?.name || 'NPC', 24)}</text>
@@ -484,7 +815,7 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, height = 560 }: {
                 if (!qp) return null;
                 return (
                   <g key={q.id}>
-                    <g data-node="1" className="cursor-pointer" onPointerDown={keyDown(`q:${q.id}`)} onPointerMove={keyMove} onPointerUp={() => { keyUp(); onSelectNpc?.(npc.id); }}>
+                    <g data-node="1" className="cursor-pointer" onPointerDown={keyDown(`q:${q.id}`)} onPointerMove={keyMove} onPointerUp={() => keyUp(npc.id)}>
                       <rect x={qp.x} y={qp.y} width={QW} height={QH} rx={5} fill="#101726" stroke="#4d7cd6" strokeWidth={1.4} />
                       <text x={qp.x + 8} y={qp.y + 16} fontSize={8.5} className="font-display" fill="#7fb1ff">📜 КВЕСТ</text>
                       <text x={qp.x + 8} y={qp.y + 32} fontSize={9.5} className="font-pixel" fill="#c7cdf0">{tr(q.title || '(без названия)', 26)}</text>
@@ -509,17 +840,30 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, height = 560 }: {
                 if (!p) return null;
                 const opts = n.opts ?? [];
                 return opts.map((o, oi) => {
-                  const sx = p.x + (NW * (oi + 1)) / (opts.length + 1);
-                  const sy = p.y + NH;
+                  const sx = p.x + NW - 12;
+                  const sy = optRowY(n, p, oi);
                   if (o.next && byId.has(o.next)) {
                     const tp = P(o.next);
                     if (!tp) return null;
-                    return <Edge key={`${n.id}:${oi}`} x1={sx} y1={sy} x2={tp.x + NW / 2} y2={tp.y} color={o.ending ? C_GOLD : C_TEAL} opacity={0.8} />;
+                    const mx = (sx + tp.x) / 2, my = (sy + tp.y + 26) / 2;
+                    return (
+                      <g key={`${n.id}:${oi}`}>
+                        <Edge x1={sx} y1={sy} x2={tp.x} y2={tp.y + 26} color={o.ending ? C_GOLD : C_TEAL} opacity={0.8} />
+                        {ops && <EdgeCut x={mx} y={my} color={o.ending ? C_GOLD : C_TEAL} onCut={() => ops.setNext(npc.id, n.id, oi, undefined)} title="Разъединить" />}
+                        <EdgeLabel x={mx} y={my - 11} text={tr(o.text || '(без текста)', 18)} color={o.ending ? C_GOLD : C_TEAL} />
+                      </g>
+                    );
                   }
                   if (o.ending && endings.some((e) => e.id === o.ending)) {
                     const tp = layout[`e:${o.ending}`];
                     if (!tp) return null;
-                    return <Edge key={`${n.id}:${oi}:e`} x1={sx} y1={sy} x2={tp.x + 108} y2={tp.y} color={C_GOLD} opacity={0.85} />;
+                    const mx = (sx + tp.x + 108) / 2, my = (sy + tp.y + 22) / 2;
+                    return (
+                      <g key={`${n.id}:${oi}:e`}>
+                        <Edge x1={sx} y1={sy} x2={tp.x + 108} y2={tp.y + 22} color={C_GOLD} opacity={0.85} />
+                        {ops && <EdgeCut x={mx} y={my} color={C_GOLD} onCut={() => ops.setEnding(npc.id, n.id, oi, undefined)} title="Снять концовку" />}
+                      </g>
+                    );
                   }
                   return (
                     <g key={`${n.id}:${oi}:x`} opacity={0.55}>
@@ -537,20 +881,7 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, height = 560 }: {
                   if (!src) return null;
                   const sp = P(src.id);
                   if (!sp) return null;
-                  return <Edge key={`f:${n.id}:${i}`} x1={sp.x + NW} y1={sp.y + NH / 2} x2={p.x} y2={p.y + NH / 2} color={C_AMBER} dashed opacity={0.5} />;
-                });
-              })}
-              {dlg.nodes.map((n) => {
-                const p = P(n.id);
-                if (!p) return null;
-                const opts = n.opts ?? [];
-                return opts.map((o, oi) => {
-                  if (!o.next || !byId.has(o.next)) return null;
-                  const tp = P(o.next);
-                  if (!tp) return null;
-                  const mx = (p.x + (NW * (oi + 1)) / (opts.length + 1) + tp.x + NW / 2) / 2;
-                  const myc = (p.y + NH + tp.y) / 2;
-                  return <EdgeLabel key={`l:${n.id}:${oi}`} x={mx} y={myc} text={tr(o.text || '(без текста)', 18)} color={o.ending ? C_GOLD : C_TEAL} />;
+                  return <Edge key={`f:${n.id}:${i}`} x1={sp.x + NW} y1={sp.y + 26} x2={p.x} y2={p.y + 26} color={C_AMBER} dashed opacity={0.5} />;
                 });
               })}
             </g>
@@ -565,38 +896,69 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, height = 560 }: {
             const orphan = dlg.root !== n.id && incoming(dlg, n.id) === 0 && dlg.nodes.length > 1;
             const lines = wrap(n.text);
             const opts = n.opts ?? [];
+            const h = nodeH(n, editable);
+            const textBottom = p.y + 26 + (lines.length ? lines.length * 13 + 6 : 16);
             return (
-              <g key={n.id} data-node="1" className="cursor-pointer" onPointerDown={keyDown(`n:${n.id}`)} onPointerMove={keyMove} onPointerUp={() => { keyUp(); onSelectNpc?.(npc.id); }}>
-                <rect x={p.x} y={p.y} width={NW} height={NH} rx={5} fill="#0d1124" stroke={C_EDGE} strokeWidth={1.5} />
+              <g key={n.id} data-node="1" className="cursor-pointer" onPointerDown={keyDown(`n:${n.id}`)} onPointerMove={keyMove} onPointerUp={() => keyUp(npc.id)}>
+                <rect x={p.x} y={p.y} width={NW} height={h} rx={5} fill="#0d1124" stroke={C_EDGE} strokeWidth={1.5} />
+                <circle cx={p.x} cy={p.y + 26} r={3.2} fill={C_EDGE} />
                 <text x={p.x + 8} y={p.y + 15} fontSize={9.5} className="font-display" fill={C_FAINT}>№{ni + 1}</text>
                 {dlg.root === n.id && <text x={p.x + NW - 44} y={p.y + 15} fontSize={8} className="font-display" fill={C_GOLD}>СТАРТ</text>}
                 {lines.length === 0 && <text x={p.x + 8} y={p.y + 36} fontSize={9} className="font-pixel" fill={C_FAINT}>(пустая реплика)</text>}
                 {lines.map((ln, li) => (
                   <text key={li} x={p.x + 8} y={p.y + 34 + li * 13} fontSize={9} className="font-pixel" fill="#c7cdf0">{ln}</text>
                 ))}
-                <text x={p.x + 8} y={p.y + NH - 7} fontSize={8.5} className="font-display" fill={opts.length ? C_TEAL : '#ff5d73'}>{opts.length} отв.</text>
-                {opts.some((o) => o.setFlag) && <text x={p.x + NW - 44} y={p.y + NH - 7} fontSize={8.5}>🚩</text>}
-                {opts.some((o) => o.reqFlag || o.reqNotFlag) && <text x={p.x + NW - 26} y={p.y + NH - 7} fontSize={8.5}>🔒</text>}
+                <line x1={p.x + 6} y1={textBottom - 4} x2={p.x + NW - 6} y2={textBottom - 4} stroke={C_EDGE} strokeWidth={1} />
+                {opts.map((o, oi) => {
+                  const ry = textBottom + oi * ROW_H + ROW_H / 2;
+                  return (
+                    <g key={oi}>
+                      <text x={p.x + 8} y={ry + 3} fontSize={8} className="font-pixel" fill={o.ending ? C_GOLD : '#9aa3c7'}>
+                        {tr(`${o.reqFlag || o.reqNotFlag ? '🔒' : ''}${o.setFlag ? '🚩' : ''}${o.text || '(без текста)'}`, 28)}
+                      </text>
+                      <circle
+                        cx={p.x + NW - 12} cy={ry} r={5}
+                        fill={o.ending ? 'rgba(255,207,63,0.25)' : 'rgba(46,230,168,0.25)'}
+                        stroke={o.ending ? C_GOLD : C_TEAL} strokeWidth={1.4}
+                        className={ops ? 'cursor-crosshair' : ''}
+                        onPointerDown={ops ? linkDown(npc.id, n.id, oi) : undefined}
+                        onPointerMove={ops ? linkMove : undefined}
+                        onPointerUp={ops ? linkUp : undefined}
+                      />
+                    </g>
+                  );
+                })}
+                <text x={p.x + 8} y={p.y + h - 4} fontSize={8.5} className="font-display" fill={opts.length ? C_TEAL : '#ff5d73'}>{opts.length} отв.</text>
+                {opts.some((o) => o.setFlag) && <text x={p.x + NW - 44} y={p.y + h - 4} fontSize={8.5}>🚩</text>}
+                {opts.some((o) => o.reqFlag || o.reqNotFlag) && <text x={p.x + NW - 26} y={p.y + h - 4} fontSize={8.5}>🔒</text>}
                 {orphan && <text x={p.x + NW - 13} y={p.y + 15} fontSize={9} fill="#ff5d73">⚠</text>}
               </g>
             );
           });
         })}
-        {/* концовки */}
+        {/* концовки — ставятся кнопкой «＋ Концовка», в них бросаются нити вариантов */}
         {endings.map((e) => {
           const p = layout[`e:${e.id}`];
           if (!p) return null;
+          const sel = selEndingId === e.id;
           return (
-            <g key={e.id} data-node="1" className="cursor-pointer" onPointerDown={keyDown(`e:${e.id}`)} onPointerMove={keyMove} onPointerUp={keyUp}>
-              <rect x={p.x} y={p.y} width={216} height={44} rx={5} fill="#191204" stroke={C_GOLD} strokeWidth={1.8} />
+            <g key={e.id} data-node="1" className="cursor-pointer" onPointerDown={keyDown(`e:${e.id}`)} onPointerMove={keyMove} onPointerUp={() => { keyUp(); onSelectEnding?.(e.id); }}>
+              <rect x={p.x} y={p.y} width={216} height={44} rx={5} fill="#191204" stroke={C_GOLD} strokeWidth={sel ? 2.6 : 1.8} />
               <text x={p.x + 10} y={p.y + 16} fontSize={9} className="font-display" fill={C_GOLD}>🎬 КОНЦОВКА{e.goal && e.goal.kind !== 'none' ? ' · есть условие' : ''}</text>
               <text x={p.x + 10} y={p.y + 34} fontSize={9.5} className="font-pixel" fill="#ffe9ad">{tr(e.name || '(без названия)', 28)}</text>
+              {ops?.delEnding && (
+                <g className="cursor-pointer" onPointerDown={(ev) => { ev.stopPropagation(); ops.delEnding && ops.delEnding(e.id); }}>
+                  <rect x={p.x + 202} y={p.y + 4} width={12} height={12} rx={3} fill="rgba(255,93,115,0.12)" stroke="rgba(255,93,115,0.55)" strokeWidth={0.8} />
+                  <text x={p.x + 208} y={p.y + 13} textAnchor="middle" fontSize={8} fill="#ff5d73">✕</text>
+                  <title>Удалить концовку (нити к ней отсоединятся)</title>
+                </g>
+              )}
             </g>
           );
         })}
       </GraphViewport>
       <p className="text-[9px] text-faint leading-tight">
-        Золотые стрелки показывают, какой вариант ответа ведёт к КОНЦОВКЕ; синие плашки — КВЕСТЫ NPC (условия и награды — на вкладке «NPC и диалоги»); янтарный пунктир — флаг: вариант слева его ставит, вариант справа без него скрыт. Узлы перетаскиваются — схема сохранится в карту.
+        Золотые стрелки показывают, какой вариант ответа ведёт к КОНЦОВКЕ; синие плашки — КВЕСТЫ NPC; янтарный пунктир — флаг: вариант слева его ставит, вариант справа без него скрыт{ops ? '. Нить из сокета ○ бросьте на КОНЦОВКУ — назначите её варианту; на пустое место — создадится узел у этого NPC' : ''}. Узлы перетаскиваются — схема сохранится в карту.
       </p>
     </div>
   );

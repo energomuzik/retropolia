@@ -3,9 +3,12 @@ import { useApp } from '../store';
 import { AnimPreview, GhostBtn, Ic, PxBtn, Stepper, Coin } from '../ui';
 import { DialogTreeEditor } from './DialogTreeEditor';
 import { QuestMapGraph } from './DialogueGraph';
+import type { DlgEditOpsMap } from './DialogueGraph';
+import { TradeShopEditor } from './TradeEditor';
+import { ensureQuestDialog, ensureShopDialog } from '../dialogHubs';
 import { idbPut, uid } from '../db';
-import type { GameMap, MapEnding, NpcLibEntry, NpcQuest, NpcShopOffer, PlacedNpc, QuestGoalKind, RubgItemKind } from '../types';
-import { isQuestMode, questGoalText, RUBG_ITEMS } from '../types';
+import type { GameMap, MapEnding, NpcDialog, NpcLibEntry, NpcQuest, PlacedNpc, QuestGoal, QuestGoalKind } from '../types';
+import { isQuestMode, questGoalText } from '../types';
 import { HoldDeleteButton } from '../delGuard';
 import { sfx } from '../sound';
 
@@ -21,6 +24,9 @@ export default function QuestEditor() {
   const dirtyRef = useRef(false);
   const [tab, setTab] = useState<'npc' | 'ends' | 'map'>('npc');
   const [selId, setSelId] = useState<string | null>(null);
+  const [dlgWinOpen, setDlgWinOpen] = useState(false); // v0.51: окно «Редактор диалогов» NPC (всё на схеме)
+  const [tradeWinOpen, setTradeWinOpen] = useState(false); // v0.51: окно «Витрина торговца»
+  const [selEnding, setSelEnding] = useState<string | null>(null); // v0.51: выбранная концовка на схеме карты
 
   /* Автосохранение при уходе с экрана: правки квест-контента не теряются */
   useEffect(() => () => {
@@ -45,11 +51,6 @@ export default function QuestEditor() {
     const n = map?.npcs?.[idx];
     if (!n) return;
     updNpc(idx, { quests: (n.quests ?? []).map((q) => (q.id === qid ? { ...q, ...patch } : q)) });
-  };
-  const updShopOffer = (idx: number, oid: string, patch: Partial<NpcShopOffer>) => {
-    const n = map?.npcs?.[idx];
-    if (!n) return;
-    updNpc(idx, { shop: (n.shop ?? []).map((o) => (o.id === oid ? { ...o, ...patch } : o)) });
   };
 
   const persist = async (silent = false) => {
@@ -222,10 +223,10 @@ export default function QuestEditor() {
                     </div>
                   </div>
 
-                  {/* ---------- ДЕРЕВО ДИАЛОГОВ (общий редактор v0.46.0) ---------- */}
+                  {/* ---------- ДИАЛОГИ (v0.51): всё на схеме в большом окне ---------- */}
                   <div className="border-2 border-edge px-2 py-2 space-y-2">
                     <div className="flex items-center justify-between">
-                      <span className="tick-label text-gold">💬 Дерево диалогов</span>
+                      <span className="tick-label text-gold">💬 Диалоги{selNpc.dialog ? ` · ${selNpc.dialog.nodes.length} узл.` : ''}</span>
                       {selNpc.dialog && (
                         <button
                           onClick={() => { updNpc(selIdx, { dialog: undefined }); sfx.fail(); }}
@@ -236,17 +237,15 @@ export default function QuestEditor() {
                     </div>
                     {!selNpc.dialog ? (
                       <button
-                        onClick={() => { const nid = uid('dn'); updNpc(selIdx, { dialog: { root: nid, nodes: [{ id: nid, text: 'Приветствую, путник…', opts: [{ text: '' }] }] } }); sfx.coin(); }}
+                        onClick={() => { const nid = uid('dn'); updNpc(selIdx, { dialog: { root: nid, nodes: [{ id: nid, text: 'Приветствую, путник…', opts: [] }] } }); sfx.coin(); setDlgWinOpen(true); }}
                         className="w-full py-1.5 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
                       >+ Создать диалог</button>
                     ) : (
-                      <DialogTreeEditor
-                        dialog={selNpc.dialog}
-                        endings={map.endings ?? []}
-                        onChange={(d) => updNpc(selIdx, { dialog: d })}
-                        posStore={map.dlgPos}
-                        onPosStore={(p) => updMap({ dlgPos: p ?? undefined })}
-                      />
+                      <button
+                        onClick={() => { setDlgWinOpen(true); sfx.click(); }}
+                        title="Большое окно со схемой дерева диалогов ЭТОГО NPC: создавайте узлы, соединяйте и разъединяйте нити прямо на схеме"
+                        className="w-full py-2 border-2 border-teal bg-teal/10 text-teal font-display text-[11px] uppercase tracking-wide hover:bg-teal/20 cursor-pointer"
+                      >💬 Редактор диалогов</button>
                     )}
                   </div>
 
@@ -333,57 +332,33 @@ export default function QuestEditor() {
                       </div>
                     ))}
                     <button
-                      onClick={() => { updNpc(selIdx, { quests: [...(selNpc.quests ?? []), { id: uid('qst'), title: 'НОВЫЙ КВЕСТ', desc: '', goal: { kind: 'tasks', count: 3 }, reward: {} }] }); sfx.coin(); }}
+                      onClick={() => {
+                        /* v0.51: квестов — СКОЛЬКО УГОДНО; новый квест растит ветку «Есть ли для меня работа?» */
+                        const q: NpcQuest = { id: uid('qst'), title: 'НОВЫЙ КВЕСТ', desc: '', goal: { kind: 'tasks', count: 3 }, reward: {} };
+                        const next = ensureQuestDialog({ ...selNpc, quests: [...(selNpc.quests ?? []), q] });
+                        updNpc(selIdx, next);
+                        sfx.coin();
+                      }}
                       className="w-full py-1.5 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
                     >+ добавить квест</button>
-                    <p className="text-[10px] text-faint leading-tight">Выполнив условие, игрок приходит к NPC и сдаёт квест в диалоге: получает награду; назначенные стены ИСЧЕЗАЮТ с карты для всех.</p>
+                    <p className="text-[10px] text-faint leading-tight">Квестов — сколько угодно; добавление выращивает в диалоге ветку «Есть ли для меня работа?». Выполнив условие, игрок приходит к NPC и сдаёт квест: получает награду; назначенные стены ИСЧЕЗАЮТ с карты для всех.</p>
                   </div>
 
-                  {/* ---------- ТОРГОВЛЯ NPC ---------- */}
+                  {/* ---------- ТОРГОВЛЯ NPC (v0.51): витрина в большом окне ---------- */}
                   <div className="border-2 border-[#ffcf3f]/40 px-2 py-2 space-y-2">
-                    <span className="tick-label text-gold">🛒 Торговля ({(selNpc.shop ?? []).length})</span>
-                    {(selNpc.shop ?? []).map((off) => (
-                      <div key={off.id} className="border-2 border-edge px-2 py-1.5 space-y-1.5">
-                        <div className="flex items-center gap-1">
-                          <select
-                            className="field-in flex-1 min-w-0 px-1 py-1 text-[10px]"
-                            value={off.kind}
-                            onChange={(ev) => {
-                              const k = ev.target.value as NpcShopOffer['kind'];
-                              updShopOffer(selIdx, off.id, k === 'item' ? { kind: k, item: off.item ?? 'medkit' } : { kind: k, res: off.res ?? 'time', amount: off.amount ?? 5 });
-                            }}
-                          >
-                            <option value="item">вещь (каталог предметов)</option>
-                            <option value="res">ресурс</option>
-                          </select>
-                          <button onClick={() => { updNpc(selIdx, { shop: (selNpc.shop ?? []).filter((x) => x.id !== off.id) }); sfx.fail(); }} className="text-faint hover:text-coral cursor-pointer px-0.5 text-[10px]">✕</button>
-                        </div>
-                        {off.kind === 'item' ? (
-                          <select className="field-in w-full px-1 py-1 text-[10px]" value={off.item ?? 'medkit'} onChange={(ev) => updShopOffer(selIdx, off.id, { item: ev.target.value as RubgItemKind })}>
-                            {Object.entries(RUBG_ITEMS).map(([k, m]) => <option key={k} value={k}>{m.icon} {m.name}</option>)}
-                          </select>
-                        ) : (
-                          <div className="flex items-center gap-1 flex-wrap">
-                            <select className="field-in px-1 py-1 text-[10px]" value={off.res ?? 'time'} onChange={(ev) => updShopOffer(selIdx, off.id, { res: ev.target.value as 'time' | 'tries' | 'hp' })}>
-                              <option value="time">время, мин</option>
-                              <option value="tries">попытки</option>
-                              <option value="hp">HP %</option>
-                            </select>
-                            <Stepper value={off.amount ?? 5} onChange={(v) => updShopOffer(selIdx, off.id, { amount: v })} min={1} max={99999} step={(off.res ?? 'time') === 'hp' ? 5 : 1} />
-                          </div>
-                        )}
-                        <input className="field-in w-full px-1.5 py-1 text-[10px]" maxLength={40} placeholder="Своё название (необязательно)" value={off.title ?? ''} onChange={(ev) => updShopOffer(selIdx, off.id, { title: ev.target.value || undefined })} />
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-[9px] text-dim shrink-0">Цена:</span>
-                          <Stepper value={off.price ?? 0} onChange={(v) => updShopOffer(selIdx, off.id, { price: v })} min={0} max={99999} step={5} suffix=" бр" />
-                        </div>
-                      </div>
-                    ))}
+                    <span className="tick-label text-gold">🛒 Торговля{selNpc.shop ? ` · ${(selNpc.shop).length} товар.` : ''}</span>
                     <button
-                      onClick={() => { updNpc(selIdx, { shop: [...(selNpc.shop ?? []), { id: uid('shp'), kind: 'item', item: 'medkit', price: 50 }] }); sfx.coin(); }}
-                      className="w-full py-1.5 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
-                    >+ добавить товар</button>
-                    <p className="text-[9px] text-faint leading-tight">Игроки покупают за монеты в диалоге NPC. Работает, когда на карте включён ресурс «монеты» (Ресурс игроков → Монеты). Вещи падают в инвентарь (рюкзак), ресурс — сразу в капитал.</p>
+                      onClick={() => {
+                        if (!selNpc.shop) {
+                          updNpc(selIdx, ensureShopDialog({ ...selNpc, shop: [{ id: uid('shp'), kind: 'item', item: 'medkit', price: 50 }] }));
+                        }
+                        setTradeWinOpen(true);
+                        sfx.click();
+                      }}
+                      title="Окно витрины: предметы и их количество на полке, касса торговца для выкупа и скидки за выполненные квесты"
+                      className="w-full py-2 border-2 border-[#ffcf3f] bg-[#ffcf3f]/10 text-[#ffcf3f] font-display text-[11px] uppercase tracking-wide hover:bg-[#ffcf3f]/20 cursor-pointer"
+                    >{selNpc.shop ? '🏪 Витрина торговца' : '+ Добавить торговлю'}</button>
+                    <p className="text-[9px] text-faint leading-tight">Витрина: товары с ценой и количеством, КАССА (выкуп вещей игрока) и СКИДКИ за квесты. В игре — окно из трёх окон: товары / сделка / рюкзак. Нужен ресурс «Монеты».</p>
                   </div>
                 </div>
               </div>
@@ -391,24 +366,138 @@ export default function QuestEditor() {
           </div>
         )}
 
-        {/* ============ ВКЛАДКА СХЕМА КАРТЫ (v0.50.0): граф как в ComfyUI ============ */}
-        {tab === 'map' && (
-          <div className="space-y-2">
-            <p className="text-[11px] text-dim leading-tight">
-              ОБЩАЯ КАРТИНА: все NPC с их деревьями диалогов, КВЕСТЫ и КОНЦОВКИ на одном холсте — видно, что из чего растёт:
-              какие варианты ответов ведут к концовкам (золотые стрелки), где игрок получает флаг и какой вариант без него скрыт
-              (янтарный пунктир). Клик по любому узлу — открыть этого NPC на вкладке «NPC и диалоги». Схему можно масштабировать,
-              панорамировать и раскладывать узлы под себя (сохраняется в карту).
-            </p>
-            <QuestMapGraph
-              map={map}
-              pos={map.dlgPos}
-              onPos={(p) => updMap({ dlgPos: p ?? undefined })}
-              onSelectNpc={(id) => { setSelId(id); setTab('npc'); sfx.hover(); }}
-              height={560}
-            />
-          </div>
-        )}
+        {/* ============ ВКЛАДКА СХЕМА КАРТЫ (v0.51): РЕДАКТИРУЕМЫЙ граф как в ComfyUI ============ */}
+        {tab === 'map' && (() => {
+          /* операции на общей схеме: нити «Далее», концовки, узлы — всё правится здесь */
+          const updNpcById = (npcId: string, patch: Partial<PlacedNpc>) => {
+            const idx = (map.npcs ?? []).findIndex((n) => n.id === npcId);
+            if (idx >= 0) updNpc(idx, patch);
+          };
+          const updDlg = (npcId: string, mut: (d: NpcDialog) => NpcDialog) => {
+            const npc = (map.npcs ?? []).find((n) => n.id === npcId);
+            if (!npc?.dialog) return;
+            updNpcById(npcId, { dialog: mut(npc.dialog) });
+          };
+          const ops: DlgEditOpsMap = {
+            setNext: (npcId, nodeId, oi, next) => { updDlg(npcId, (d) => ({ ...d, nodes: d.nodes.map((n) => (n.id === nodeId ? { ...n, opts: (n.opts ?? []).map((o, i) => (i === oi ? { ...o, next } : o)) } : n)) })); sfx.hover(); },
+            setEnding: (npcId, nodeId, oi, ending) => { updDlg(npcId, (d) => ({ ...d, nodes: d.nodes.map((n) => (n.id === nodeId ? { ...n, opts: (n.opts ?? []).map((o, i) => (i === oi ? { ...o, ending } : o)) } : n)) })); sfx.hover(); },
+            addNode: (npcId, at, linkFrom) => {
+              const nid = uid('dn');
+              updDlg(npcId, (d) => ({
+                ...d,
+                nodes: d.nodes
+                  .map((n) => (linkFrom && n.id === linkFrom.nodeId
+                    ? { ...n, opts: (n.opts ?? []).map((o, i) => (i === linkFrom.optIdx ? { ...o, next: nid } : o)) }
+                    : n))
+                  .concat([{ id: nid, text: '', opts: [] }]),
+              }));
+              updMap({ dlgPos: { ...(map.dlgPos ?? {}), [`n:${nid}`]: { x: Math.max(0, at.x), y: Math.max(0, at.y) } } });
+              sfx.coin();
+            },
+            delNode: (npcId, nodeId) => {
+              updDlg(npcId, (d) => {
+                const rest = d.nodes.filter((n) => n.id !== nodeId);
+                if (!rest.length) return d;
+                const cleaned = rest.map((n) => ({ ...n, opts: (n.opts ?? []).map((o) => (o.next === nodeId ? { ...o, next: undefined } : o)) }));
+                return { root: d.root === nodeId ? rest[0].id : d.root, nodes: cleaned };
+              });
+              sfx.fail();
+            },
+            addOpt: (npcId, nodeId) => { updDlg(npcId, (d) => ({ ...d, nodes: d.nodes.map((n) => (n.id === nodeId ? { ...n, opts: [...(n.opts ?? []), { text: '' }] } : n)) })); sfx.coin(); },
+            delOpt: (npcId, nodeId, oi) => { updDlg(npcId, (d) => ({ ...d, nodes: d.nodes.map((n) => (n.id === nodeId ? { ...n, opts: (n.opts ?? []).filter((_, i) => i !== oi) } : n)) })); sfx.fail(); },
+            addEnding: (at) => {
+              const eid = uid('end');
+              const ends: MapEnding[] = [...(map.endings ?? []), { id: eid, name: `КОНЦОВКА ${(map.endings ?? []).length + 1}`, desc: '' }];
+              const pos = at ?? { x: 40 + (map.npcs ?? []).length * 310, y: 24 + (map.endings ?? []).length * 58 };
+              updMap({ endings: ends, dlgPos: { ...(map.dlgPos ?? {}), [`e:${eid}`]: { x: Math.max(0, pos.x), y: Math.max(0, pos.y) } } });
+              setSelEnding(eid);
+              sfx.coin();
+            },
+            delEnding: (id) => {
+              /* удалить концовку и подчистить ссылки «Концовка:» у вариантов всех NPC */
+              updMap({
+                endings: (map.endings ?? []).filter((x) => x.id !== id),
+                npcs: (map.npcs ?? []).map((n) => (n.dialog ? { ...n, dialog: { ...n.dialog, nodes: n.dialog.nodes.map((nd) => ({ ...nd, opts: (nd.opts ?? []).map((o) => (o.ending === id ? { ...o, ending: undefined } : o)) })) } } : n)),
+              });
+              if (selEnding === id) setSelEnding(null);
+              sfx.fail();
+            },
+          };
+          const selEnd = (map.endings ?? []).find((e) => e.id === selEnding) ?? null;
+          const updSelEnd = (patch: Partial<MapEnding>) => {
+            if (!selEnd) return;
+            updMap({ endings: (map.endings ?? []).map((x) => (x.id === selEnd.id ? { ...x, ...patch } : x)) });
+          };
+          const updSelEndGoal = (g: QuestGoal | undefined) => {
+            if (!selEnd) return;
+            updMap({ endings: (map.endings ?? []).map((x) => (x.id === selEnd.id ? { ...x, goal: g } : x)) });
+          };
+          return (
+            <div className="space-y-2">
+              <p className="text-[11px] text-dim leading-tight">
+                ОБЩАЯ КАРТИНА — и её можно ПРАВИТЬ: все NPC с деревьями, КВЕСТЫ и КОНЦОВКИ на одном холсте.
+                Нить из сокета варианта бросьте на КОНЦОВКУ — ответ ведёт к ней (✕ на нити — разъединить);
+                кнопка «＋ Концовка» ставит новую; клик по концовке — редактирование ниже; клик по узлу — открыть его NPC.
+              </p>
+              <QuestMapGraph
+                map={map}
+                pos={map.dlgPos}
+                onPos={(p) => updMap({ dlgPos: p ?? undefined })}
+                onSelectNpc={(id) => { setSelId(id); setSelEnding(null); setTab('npc'); sfx.hover(); }}
+                onSelectEnding={(id) => { setSelEnding((v) => (v === id ? null : id)); sfx.hover(); }}
+                selEndingId={selEnding}
+                ops={ops}
+                height={560}
+              />
+              {/* ПАНЕЛЬ ВЫБРАННОЙ КОНЦОВКИ (v0.51): правится прямо на вкладке схемы */}
+              {selEnd && (
+                <div className="border-2 border-gold/60 px-3 py-2.5 space-y-2 pixel-panel pixel-corners">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-display text-[10px] text-gold">🎬 КОНЦОВКА на схеме</span>
+                    <button onClick={() => setSelEnding(null)} className="text-[10px] text-faint hover:text-coral cursor-pointer px-1">закрыть</button>
+                  </div>
+                  <input className="field-in w-full px-2 py-1 text-[11px]" maxLength={28} value={selEnd.name} placeholder="НАЗВАНИЕ КОНЦОВКИ" onChange={(ev) => updSelEnd({ name: ev.target.value.toUpperCase() })} />
+                  <input className="field-in w-full px-2 py-1 text-[11px]" maxLength={140} value={selEnd.desc} placeholder="Описание (покажется на экране победы)" onChange={(ev) => updSelEnd({ desc: ev.target.value })} />
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="tick-label text-faint shrink-0">Условие:</span>
+                    <select
+                      className="field-in px-1.5 py-1 text-[10px]"
+                      value={selEnd.goal?.kind ?? 'none'}
+                      onChange={(ev) => {
+                        const k = ev.target.value as QuestGoalKind;
+                        updSelEndGoal(k === 'none' ? undefined : { kind: k, count: k === 'tasks' ? 3 : k === 'bosses' ? 1 : k === 'coins' ? 500 : k === 'hp' ? 100 : k === 'time' ? 900 : 10, bossId: (map.bosses ?? [])[0]?.id });
+                      }}
+                    >
+                      <option value="none">только через диалог NPC</option>
+                      <option value="boss">победить босса (конкретного)</option>
+                      <option value="bosses">победить N боссов (любых)</option>
+                      <option value="tasks">победить N заданий</option>
+                      <option value="coins">собрать монет</option>
+                      <option value="hp">иметь HP %</option>
+                      <option value="time">запас времени, мин</option>
+                      <option value="tries">запас попыток</option>
+                    </select>
+                    {selEnd.goal?.kind === 'boss' && (
+                      <select className="field-in px-1.5 py-1 text-[10px]" value={selEnd.goal.bossId ?? ''} onChange={(ev) => updSelEndGoal({ ...selEnd.goal!, bossId: ev.target.value })}>
+                        {(map.bosses ?? []).length === 0 && <option value="">нет боссов</option>}
+                        {(map.bosses ?? []).map((b) => {
+                          const bd = (map.bossLib ?? []).find((x) => x.id === b.bid);
+                          return <option key={b.id} value={b.id}>{bd?.name ?? b.id}</option>;
+                        })}
+                      </select>
+                    )}
+                    {selEnd.goal && selEnd.goal.kind !== 'boss' && (selEnd.goal.kind === 'time' ? (
+                      <Stepper value={Math.max(1, Math.round((selEnd.goal.count ?? 60) / 60))} onChange={(v) => updSelEndGoal({ ...selEnd.goal!, count: Math.max(1, v) * 60 })} min={1} max={180} step={1} suffix=" мин" />
+                    ) : (
+                      <Stepper value={selEnd.goal.count ?? 1} onChange={(v) => updSelEndGoal({ ...selEnd.goal!, count: v })} min={1} max={99999} step={selEnd.goal.kind === 'coins' ? 25 : 1} />
+                    ))}
+                  </div>
+                  <p className="text-[9px] text-faint leading-tight">{questGoalText(selEnd.goal, map)}</p>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* ============ ВКЛАДКА КОНЦОВКИ ============ */}
         {tab === 'ends' && (
@@ -471,6 +560,40 @@ export default function QuestEditor() {
             </div>
             <p className="text-[9px] text-faint leading-tight">0 — только истощение ресурсов. Иначе игрок вылетает, когда провалит (или проиграет) столько заданий.</p>
           </div>
+        )}
+
+        {/* ---------- ОКНО «РЕДАКТОР ДИАЛОГОВ» NPC (v0.51): всё на схеме ---------- */}
+        {dlgWinOpen && map && selNpc && selIdx >= 0 && selNpc.dialog && (
+          <div className="fixed inset-0 z-[96] flex items-center justify-center p-3 sm:p-4">
+            <div className="absolute inset-0 bg-[rgba(4,6,14,0.9)]" onClick={() => setDlgWinOpen(false)} />
+            <div className="relative pixel-panel pixel-corners w-full max-w-5xl max-h-[94vh] overflow-y-auto p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="font-display uppercase tracking-wider text-teal text-sm truncate">
+                  💬 Редактор диалогов — {libOf(selNpc)?.name ?? 'NPC'}
+                </span>
+                <span className="tick-label text-faint hidden sm:inline">узлов: {selNpc.dialog.nodes.length} · создавайте узлы, соединяйте и рвите нити прямо на схеме</span>
+                <GhostBtn small className="ml-auto shrink-0" onClick={() => setDlgWinOpen(false)}>{Ic.cross(12)} Закрыть</GhostBtn>
+              </div>
+              <DialogTreeEditor
+                dialog={selNpc.dialog}
+                endings={map.endings ?? []}
+                height={470}
+                onChange={(d) => updNpc(selIdx, { dialog: d })}
+                posStore={map.dlgPos}
+                onPosStore={(p) => updMap({ dlgPos: p ?? undefined })}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* ---------- ОКНО «ВИТРИНА ТОРГОВЦА» (v0.51) ---------- */}
+        {tradeWinOpen && map && selNpc && selIdx >= 0 && (
+          <TradeShopEditor
+            map={map}
+            npc={selNpc}
+            onChange={(patch) => updNpc(selIdx, patch)}
+            onClose={() => setTradeWinOpen(false)}
+          />
         )}
       </div>
     </div>

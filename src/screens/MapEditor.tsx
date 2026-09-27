@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../store';
 import { AnimPreview, GhostBtn, Ic, Modal, PxBtn, Stepper, Coin } from '../ui';
 import { DialogTreeEditor } from './DialogTreeEditor';
+import { TradeShopEditor } from './TradeEditor';
+import { ensureQuestDialog, ensureShopDialog } from '../dialogHubs';
 import {
   CELL, mapSize, drawBoard, fitView, cellAtPoint, stampAtPoint, animAtPoint, bossAtPoint, cellBox, cellCenter,
   renumberByPath, normCellsLegacy, fixLinksAfterDelete, startCellIdx,
@@ -161,7 +163,8 @@ export default function MapEditor() {
   const [selAnim, setSelAnim] = useState<string | null>(null); // выбранная размещённая анимация
   const [placeNpcId, setPlaceNpcId] = useState(''); // вшитый NPC, выбранный для размещения
   const [selNpc, setSelNpc] = useState<string | null>(null); // выбранный размещённый NPC
-  const [dlgWinOpen, setDlgWinOpen] = useState(false); // окно личного дерева диалогов NPC (с граф-схемой)
+  const [dlgWinOpen, setDlgWinOpen] = useState(false); // окно «Редактор диалогов» NPC (всё на схеме, v0.51)
+  const [tradeWinOpen, setTradeWinOpen] = useState(false); // окно «Витрина торговца» (v0.51)
   const [placeBossId, setPlaceBossId] = useState(''); // вшитый босс, выбранный для размещения
   const [selBoss, setSelBoss] = useState<string | null>(null); // выбранный размещённый босс
   const [selWall, setSelWall] = useState<number | null>(null); // выбранная стена (индекс)
@@ -3998,40 +4001,29 @@ export default function MapEditor() {
                     <p className="text-[10px] text-teal leading-tight">Внутри круга игрок слышит звук NPC и может открыть диалог (кнопка «ДИАЛОГ» или клавиша E). 0 = молчит и не говорит.</p>
                   </div>
 
-                  {/* ---------- ДЕРЕВО ДИАЛОГОВ (общий редактор v0.46.0) ---------- */}
+                  {/* ---------- ДИАЛОГИ (v0.51): всё делается на схеме в большом окне ---------- */}
                   <div className="border-2 border-edge px-2 py-2 space-y-2">
                     <div className="flex items-center justify-between">
-                      <span className="tick-label text-gold">💬 Дерево диалогов</span>
-                      <div className="flex items-center gap-1">
-                        {selNpcDef.dialog && (
-                          <button
-                            onClick={() => { setDlgWinOpen(true); sfx.click(); }}
-                            title="Открыть личное дерево диалогов этого NPC в большом окне — с граф-схемой (как в ComfyUI)"
-                            className="text-[10px] text-teal hover:text-paper cursor-pointer px-1 border-2 border-teal/50"
-                          >🖼 Окно</button>
-                        )}
-                        {selNpcDef.dialog && (
-                          <button
-                            onClick={() => { updNpc(selNpcIdx, { dialog: undefined }); dirtyRef.current = true; sfx.fail(); }}
-                            title="Удалить диалог целиком"
-                            className="text-[10px] text-faint hover:text-coral cursor-pointer px-1"
-                          >удалить</button>
-                        )}
-                      </div>
+                      <span className="tick-label text-gold">💬 Диалоги{selNpcDef.dialog ? ` · ${selNpcDef.dialog.nodes.length} узл.` : ''}</span>
+                      {selNpcDef.dialog && (
+                        <button
+                          onClick={() => { updNpc(selNpcIdx, { dialog: undefined }); dirtyRef.current = true; sfx.fail(); }}
+                          title="Удалить диалог целиком"
+                          className="text-[10px] text-faint hover:text-coral cursor-pointer px-1"
+                        >удалить</button>
+                      )}
                     </div>
                     {!selNpcDef.dialog ? (
                       <button
-                        onClick={() => { const nid = uid('dn'); updNpc(selNpcIdx, { dialog: { root: nid, nodes: [{ id: nid, text: 'Приветствую, путник…', opts: [{ text: '' }] }] } }); dirtyRef.current = true; sfx.coin(); }}
+                        onClick={() => { const nid = uid('dn'); updNpc(selNpcIdx, { dialog: { root: nid, nodes: [{ id: nid, text: 'Приветствую, путник…', opts: [] }] } }); dirtyRef.current = true; sfx.coin(); setDlgWinOpen(true); }}
                         className="w-full py-1.5 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
                       >+ Создать диалог</button>
                     ) : (
-                      <DialogTreeEditor
-                        dialog={selNpcDef.dialog}
-                        endings={map.endings ?? []}
-                        onChange={(d) => { updNpc(selNpcIdx, { dialog: d }); dirtyRef.current = true; }}
-                        posStore={map.dlgPos}
-                        onPosStore={(p) => { updMap({ dlgPos: p ?? undefined }); dirtyRef.current = true; }}
-                      />
+                      <button
+                        onClick={() => { setDlgWinOpen(true); sfx.click(); }}
+                        title="Открыть большое окно со схемой дерева диалогов ЭТОГО NPC: узлы создаются, соединяются и разъединяются прямо на схеме"
+                        className="w-full py-2 border-2 border-teal bg-teal/10 text-teal font-display text-[11px] uppercase tracking-wide hover:bg-teal/20 cursor-pointer"
+                      >💬 Редактор диалогов</button>
                     )}
                   </div>
 
@@ -4118,58 +4110,38 @@ export default function MapEditor() {
                       </div>
                     ))}
                     <button
-                      onClick={() => { updNpc(selNpcIdx, { quests: [...(selNpcDef.quests ?? []), { id: uid('qst'), title: 'НОВЫЙ КВЕСТ', desc: '', goal: { kind: 'tasks', count: 3 }, reward: {} }] }); dirtyRef.current = true; sfx.coin(); }}
+                      onClick={() => {
+                        /* v0.51: квесты — СКОЛЬКО УГОДНО; каждый новый квест ещё и растит в диалоге
+                           ветку «Есть ли для меня работа?» (если её ещё нет) */
+                        const q: NpcQuest = { id: uid('qst'), title: 'НОВЫЙ КВЕСТ', desc: '', goal: { kind: 'tasks', count: 3 }, reward: {} };
+                        const next = ensureQuestDialog({ ...selNpcDef, quests: [...(selNpcDef.quests ?? []), q] });
+                        updNpc(selNpcIdx, next);
+                        dirtyRef.current = true;
+                        sfx.coin();
+                      }}
                       className="w-full py-1.5 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
                     >+ добавить квест</button>
-                    <p className="text-[10px] text-faint leading-tight">Выполнив условие, игрок приходит к NPC и сдаёт квест в диалоге: получает награду; назначенные стены ИСЧЕЗАЮТ с карты для всех. Когда ВСЕ квесты NPC сданы — он играет клип «✅ КВЕСТ ВЫПОЛНЕН».</p>
+                    <p className="text-[10px] text-faint leading-tight">Квестов может быть СКОЛЬКО УГОДНО. Добавление квеста выращивает в диалоге ветку «Есть ли для меня работа?» (меняется в «Редакторе диалогов»). Выполнив условие, игрок приходит к NPC и сдаёт квест: получает награду; назначенные стены ИСЧЕЗАЮТ с карты для всех. Когда ВСЕ квесты сданы — NPC играет клип «✅ КВЕСТ ВЫПОЛНЕН».</p>
                   </div>
 
-                  {/* ---------- ТОРГОВЛЯ NPC ---------- */}
+                  {/* ---------- ТОРГОВЛЯ NPC (v0.51): витрина в большом окне ---------- */}
                   <div className="border-2 border-[#ffcf3f]/40 px-2 py-2 space-y-2">
-                    <span className="tick-label text-gold">🛒 Торговля ({(selNpcDef.shop ?? []).length})</span>
-                    {(selNpcDef.shop ?? []).map((off) => (
-                      <div key={off.id} className="border-2 border-edge px-2 py-1.5 space-y-1.5">
-                        <div className="flex items-center gap-1">
-                          <select
-                            className="field-in flex-1 min-w-0 px-1 py-1 text-[10px]"
-                            value={off.kind}
-                            onChange={(ev) => {
-                              const k = ev.target.value as NpcShopOffer['kind'];
-                              updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).map((x) => x.id === off.id ? (k === 'item' ? { ...x, kind: k, item: x.item ?? 'medkit' } : { ...x, kind: k, res: x.res ?? 'time', amount: x.amount ?? 5 }) : x) });
-                              dirtyRef.current = true;
-                            }}
-                          >
-                            <option value="item">вещь (каталог предметов)</option>
-                            <option value="res">ресурс</option>
-                          </select>
-                          <button onClick={() => { updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).filter((x) => x.id !== off.id) }); dirtyRef.current = true; sfx.fail(); }} className="text-faint hover:text-coral cursor-pointer px-0.5 text-[10px]">✕</button>
-                        </div>
-                        {off.kind === 'item' ? (
-                          <select className="field-in w-full px-1 py-1 text-[10px]" value={off.item ?? 'medkit'} onChange={(ev) => { updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).map((x) => x.id === off.id ? { ...x, item: ev.target.value as RubgItemKind } : x) }); dirtyRef.current = true; }}>
-                            {Object.entries(RUBG_ITEMS).map(([k, m]) => <option key={k} value={k}>{m.icon} {m.name}</option>)}
-                          </select>
-                        ) : (
-                          <div className="flex items-center gap-1 flex-wrap">
-                            <select className="field-in px-1 py-1 text-[10px]" value={off.res ?? 'time'} onChange={(ev) => { updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).map((x) => x.id === off.id ? { ...x, res: ev.target.value as 'time' | 'tries' | 'hp' } : x) }); dirtyRef.current = true; }}>
-                              <option value="time">время, мин</option>
-                              <option value="tries">попытки</option>
-                              <option value="hp">HP %</option>
-                            </select>
-                            <Stepper value={off.amount ?? 5} onChange={(v) => { updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).map((x) => x.id === off.id ? { ...x, amount: v } : x) }); dirtyRef.current = true; }} min={1} max={99999} step={(off.res ?? 'time') === 'hp' ? 5 : 1} />
-                          </div>
-                        )}
-                        <input className="field-in w-full px-1.5 py-1 text-[10px]" maxLength={40} placeholder="Своё название (необязательно)" value={off.title ?? ''} onChange={(ev) => { updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).map((x) => x.id === off.id ? { ...x, title: ev.target.value || undefined } : x) }); dirtyRef.current = true; }} />
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-[9px] text-dim shrink-0">Цена:</span>
-                          <Stepper value={off.price ?? 0} onChange={(v) => { updNpc(selNpcIdx, { shop: (selNpcDef.shop ?? []).map((x) => x.id === off.id ? { ...x, price: v } : x) }); dirtyRef.current = true; }} min={0} max={99999} step={5} suffix=" бр" />
-                        </div>
-                      </div>
-                    ))}
+                    <span className="tick-label text-gold">🛒 Торговля{selNpcDef.shop ? ` · ${(selNpcDef.shop).length} товар.` : ''}</span>
                     <button
-                      onClick={() => { updNpc(selNpcIdx, { shop: [...(selNpcDef.shop ?? []), { id: uid('shp'), kind: 'item', item: 'medkit', price: 50 }] }); dirtyRef.current = true; sfx.coin(); }}
-                      className="w-full py-1.5 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
-                    >+ добавить товар</button>
-                    <p className="text-[9px] text-faint leading-tight">Игроки покупают за монеты в диалоге NPC. Работает, когда на карте включён ресурс «монеты» (Ресурс игроков → Монеты). Вещи падают в инвентарь (рюкзак), ресурс — сразу в капитал.</p>
+                      onClick={() => {
+                        /* v0.51: «Добавить торговлю» — создаёт торговлю (со стартовым товаром) и ветку
+                           «Можно ли поторговать с тобой?» в диалоге, затем открывает ВИТРИНУ торговца */
+                        if (!selNpcDef.shop) {
+                          updNpc(selNpcIdx, ensureShopDialog({ ...selNpcDef, shop: [{ id: uid('shp'), kind: 'item', item: 'medkit', price: 50 }] }));
+                          dirtyRef.current = true;
+                        }
+                        setTradeWinOpen(true);
+                        sfx.click();
+                      }}
+                      title="Окно витрины: разместите предметы и их количество, задайте кассу для выкупа вещей и скидки за выполненные квесты"
+                      className="w-full py-2 border-2 border-[#ffcf3f] bg-[#ffcf3f]/10 text-[#ffcf3f] font-display text-[11px] uppercase tracking-wide hover:bg-[#ffcf3f]/20 cursor-pointer"
+                    >{selNpcDef.shop ? '🏪 Витрина торговца' : '+ Добавить торговлю'}</button>
+                    <p className="text-[9px] text-faint leading-tight">Витрина: товары с ЦЕНОЙ и КОЛИЧЕСТВОМ на полке, КАССА торговца (выкуп вещей игрока) и СКИДКИ за выполненные квесты. В игре игроки торгуют в трёх окнах — товары / сделка / рюкзак. Нужен ресурс «Монеты».</p>
                   </div>
 
                   <div className="grid grid-cols-2 gap-1.5">
@@ -4316,29 +4288,38 @@ export default function MapEditor() {
         </Modal>
       )}
 
-      {/* ---------- ОКНО ЛИЧНОГО ДЕРЕВА ДИАЛОГОВ NPC (v0.50.0) ---------- */}
+      {/* ---------- ОКНО «РЕДАКТОР ДИАЛОГОВ» NPC (v0.51): всё делается на схеме ---------- */}
       {dlgWinOpen && map && selNpcDef?.dialog && (
-        <div className="fixed inset-0 z-[96] flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[96] flex items-center justify-center p-3 sm:p-4">
           <div className="absolute inset-0 bg-[rgba(4,6,14,0.9)]" onClick={() => setDlgWinOpen(false)} />
-          <div className="relative pixel-panel pixel-corners w-full max-w-4xl max-h-[94vh] overflow-y-auto p-4 space-y-3">
+          <div className="relative pixel-panel pixel-corners w-full max-w-5xl max-h-[94vh] overflow-y-auto p-4 space-y-3">
             <div className="flex items-center gap-2">
               <span className="font-display uppercase tracking-wider text-teal text-sm truncate">
-                💬 Дерево диалогов — {selNpcLib?.name ?? 'NPC'}
+                💬 Редактор диалогов — {selNpcLib?.name ?? 'NPC'}
               </span>
-              <span className="tick-label text-faint hidden sm:inline">узлов: {selNpcDef.dialog.nodes.length}</span>
+              <span className="tick-label text-faint hidden sm:inline">узлов: {selNpcDef.dialog.nodes.length} · создавайте узлы, соединяйте нити, рвите нити — прямо на схеме</span>
               <GhostBtn small className="ml-auto shrink-0" onClick={() => setDlgWinOpen(false)}>{Ic.cross(12)} Закрыть</GhostBtn>
             </div>
             <DialogTreeEditor
               dialog={selNpcDef.dialog}
               endings={map.endings ?? []}
-              openGraph
-              graphHeight={430}
+              height={470}
               onChange={(d) => { updNpc(selNpcIdx, { dialog: d }); dirtyRef.current = true; }}
               posStore={map.dlgPos}
               onPosStore={(p) => { updMap({ dlgPos: p ?? undefined }); dirtyRef.current = true; }}
             />
           </div>
         </div>
+      )}
+
+      {/* ---------- ОКНО «ВИТРИНА ТОРГОВЦА» (v0.51) ---------- */}
+      {tradeWinOpen && map && selNpcDef && (
+        <TradeShopEditor
+          map={map}
+          npc={selNpcDef}
+          onChange={(patch) => { updNpc(selNpcIdx, patch); dirtyRef.current = true; }}
+          onClose={() => setTradeWinOpen(false)}
+        />
       )}
     </div>
   );

@@ -1,4 +1,4 @@
-import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, NpcReward, PlayerState, QuestGoal, RubgItemKind, RubgZonePhasePlan, TaskDef, TradeOffer, TokenDir } from './types';
+import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, NpcReward, NpcShopOffer, PlayerState, QuestGoal, RubgItemKind, RubgZonePhasePlan, TaskDef, TradeOffer, TokenDir } from './types';
 import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, isQuestMode, questGoalText, tileAt, tileRectOf, coinsStr, normResMode, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, RUBG_ZONE_DEFAULT_SEC, rubgFmtZone, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx } from './types';
 import type { RubgItem } from './types';
 import type { JoyId } from './types';
@@ -79,7 +79,8 @@ export type Action =
   | { t: 'qCardAck'; id: string } // QUEST: игрок подтвердил выпавшую карточку бонуса/ловушки
   | { t: 'dialogPick'; id: string; npcId: string; nodeId: string; optIdx: number } // QUEST: выбор игрока в диалоге NPC (награда/флаг/переход/концовка)
   | { t: 'npcClaim'; id: string; npcId: string; questId: string } // QUEST: сдача квеста NPC — награда + снятие стен
-  | { t: 'npcBuy'; id: string; npcId: string; offerId: string } // QUEST: покупка товара у NPC (торговля в диалоге): списание монет, вещь в инвентарь или ресурс
+  | { t: 'npcBuy'; id: string; npcId: string; offerId: string } // QUEST: быстрая покупка одного товара (делегирует в npcTrade) — совместимость
+  | { t: 'npcTrade'; id: string; npcId: string; buys: { offerId: string; qty: number }[]; sells: string[] } // QUEST v0.51: СДЕЛКА с торговцем — купить товары (со скидками за квесты) и/или продать вещи из рюкзака (в кассу торговца), одним действием
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const rnd6 = () => 1 + Math.floor(Math.random() * 6);
@@ -511,6 +512,96 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     inv.push(it);
     return it;
   };
+
+  /* ---------- ТОРГОВЛЯ NPC (v0.51): СДЕЛКА целиком — купить и/или продать ----------
+     • скидки за хорошее отношение: суммируются по СДАННЫМ игроком квестам из
+       npc.discounts, потолок 90 %;
+     • витрина с лимитом (offer.qty): запас хранится в s.npcShop и ТРАТИТСЯ партией;
+     • касса (npc.shopCoins): торговец платит за выкуп вещей sellPct % от справочной
+       цены RUBG_ITEMS[kind].cost; касса пуста — выкуп стоит;
+     • сделка атомарна: не проходит целиком — откатывается целиком. */
+  const doTrade = (s: GameSession, map: GameMap, p: PlayerState, npcId: string, buys: { offerId: string; qty: number }[], sells: string[]) => {
+    if (map.startCoins === undefined) { log('🛒 Торговля недоступна: на карте не включён ресурс «монеты» (Ресурс игроков → Монеты).'); return; }
+    const npc = (map.npcs ?? []).find((x) => x.id === npcId);
+    if (!npc || !(npc.shop ?? []).length) return;
+    const npcName = (map.npcLib ?? []).find((x) => x.id === npc.nid)?.name ?? 'NPC';
+    /* живое состояние витрины (заводится при первой сделке с этим NPC) */
+    const shopAll = s.npcShop = s.npcShop ?? {};
+    const st = shopAll[npc.id] = shopAll[npc.id] ?? {
+      ...(npc.shopCoins !== undefined ? { coins: npc.shopCoins } : {}),
+      qty: Object.fromEntries((npc.shop ?? []).filter((o) => !!o.qty && o.qty > 0).map((o) => [o.id, o.qty as number])),
+    } as { coins?: number; qty: { [offerId: string]: number } };
+    /* скидка игрока: сданные квесты → сумма процентов, потолок 90 */
+    const mine = s.qFlags?.[p.id] ?? {};
+    let disc = 0;
+    for (const d of npc.discounts ?? []) {
+      if (!d.questId) continue;
+      if (mine[`quest:${d.questId}`]) disc += Math.max(0, Math.floor(d.pct));
+    }
+    disc = Math.min(90, disc);
+    /* --- собираем и валидируем сделку (ничего не меняя) --- */
+    type BuyLine = { off: NonNullable<NpcShopOffer>; qty: number; unit: number };
+    const buyLines: BuyLine[] = [];
+    const seenOffers = new Set<string>();
+    for (const b of buys) {
+      const qty = Math.max(1, Math.floor(b.qty || 0));
+      if (!qty) continue;
+      const off = (npc.shop ?? []).find((x) => x.id === b.offerId);
+      if (!off || seenOffers.has(off.id)) { log(`🛒 ${p.name}: сделка отклонена — товар не найден.`); return; }
+      seenOffers.add(off.id);
+      if (off.qty !== undefined && off.qty > 0) {
+        const have = st.qty?.[off.id] ?? off.qty;
+        if (have < qty) { log(`🛒 ${p.name}: на витрине «${off.title?.trim() || (off.item ? RUBG_ITEMS[off.item].name : 'товар')}» осталось ${have} шт — столько не купить.`); return; }
+      }
+      const unit = Math.max(0, Math.floor((off.price || 0) * (100 - disc) / 100));
+      buyLines.push({ off, qty, unit });
+    }
+    const inv = p.items ?? [];
+    const sellLines: { it: (typeof inv)[number]; gain: number }[] = [];
+    const seenItems = new Set<string>();
+    for (const itemId of sells) {
+      const it = inv.find((x) => x.id === itemId);
+      if (!it || seenItems.has(it.id)) { log(`🛒 ${p.name}: сделка отклонена — предмет не найден.`); return; }
+      seenItems.add(it.id);
+      const sellPct = npc.sellPct ?? 50;
+      sellLines.push({ it, gain: Math.max(0, Math.floor(RUBG_ITEMS[it.kind].cost * sellPct / 100)) });
+    }
+    if (!buyLines.length && !sellLines.length) return;
+    const pay = buyLines.reduce((a, l) => a + l.unit * l.qty, 0);
+    const gain = sellLines.reduce((a, l) => a + l.gain, 0);
+    const finalCoins = (p.coinsLeft ?? 0) - pay + gain;
+    if (finalCoins < 0) { log(`🛒 ${p.name}: не хватает монет на сделку — нужно ещё ${coinsStr(-finalCoins)}, в кармане ${coinsStr(p.coinsLeft ?? 0)}.`); return; }
+    if (npc.shopCoins !== undefined) {
+      const finalPool = (st.coins ?? npc.shopCoins) - gain + pay;
+      if (finalPool < 0) { log(`🛒 ${npcName}: в кассе только ${coinsStr(st.coins ?? npc.shopCoins)} — на выкуп ваших вещей не хватает. Продайте что-то подешевле.`); return; }
+    }
+    /* --- применяем --- */
+    p.coinsLeft = finalCoins;
+    for (const l of buyLines) {
+      if (l.off.qty !== undefined && l.off.qty > 0) st.qty = st.qty ?? {};
+      if (l.off.qty !== undefined && l.off.qty > 0 && st.qty) st.qty[l.off.id] = Math.max(0, (st.qty[l.off.id] ?? l.off.qty) - l.qty);
+      const what = l.off.title?.trim() || (l.off.kind === 'item' && l.off.item ? RUBG_ITEMS[l.off.item].name : '');
+      if (l.off.kind === 'item' && l.off.item) {
+        for (let i = 0; i < l.qty; i++) rubgGiveItem(p, l.off.item);
+        log(`🛒 ${p.name} купил у «${npcName}» ${RUBG_ITEMS[l.off.item].icon} «${what}»×${l.qty} за ${coinsStr(l.unit * l.qty)}${disc ? ` (скидка ${disc} %)` : ''}`);
+      } else if (l.off.res) {
+        const amt = Math.max(1, Math.floor(l.off.amount ?? 0)) * l.qty;
+        if (l.off.res === 'time') p.secLeft += amt;
+        else if (l.off.res === 'tries') p.triesLeft += amt;
+        else if (l.off.res === 'hp') p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? RUBG_HP_MAX) + amt);
+        log(`🛒 ${p.name} купил у «${npcName}» «${what || (l.off.res === 'tries' ? `+${amt} попыток` : l.off.res === 'hp' ? `+${amt}% HP` : `+${Math.round(amt / 60)} мин времени`)}» за ${coinsStr(l.unit * l.qty)}${disc ? ` (скидка ${disc} %)` : ''}`);
+      }
+    }
+    if (sellLines.length) {
+      const ids = new Set(sellLines.map((l) => l.it.id));
+      p.items = inv.filter((x) => !ids.has(x.id));
+      if (npc.shopCoins !== undefined && st.coins !== undefined) st.coins = st.coins - gain + pay;
+      for (const l of sellLines) log(`🛒 ${p.name} продал «${npcName}» ${RUBG_ITEMS[l.it.kind].icon} «${RUBG_ITEMS[l.it.kind].name}» за ${coinsStr(l.gain)}${npc.shopCoins !== undefined ? ` — касса ${coinsStr(st.coins ?? 0)}` : ''}`);
+    }
+    if (pay + gain > 0) log(`💰 Капитал ${p.name}: ${coinsStr(p.coinsLeft)}`);
+    checkElim(); // монеты/ресурсы могли изменить расклад (в т.ч. выполнить концовку)
+  };
+
 
   /* RUBG: выдать ЛИЧНОЕ задание на ячейке i, если это возможно.
      ОДНА ЯЧЕЙКА — ОДИН ИГРОК: если кто-то УЖЕ играет задание на этой ячейке — отказ
@@ -1953,37 +2044,23 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       break;
     }
     case 'npcBuy': {
-      /* ТОРГОВЛЯ NPC: покупка за монеты в диалоге. Работает, когда на карте включены монеты
-         (map.startCoins задан). Вещь уходит в инвентарь (как лут RUBG), ресурс — в капитал. */
+      /* Быстрая покупка одного товара — делегирует в общий механизм СДЕЛКИ npcTrade:
+       скидки за квесты, запас витрины и касса торговца работают так же. */
       if (s.phase !== 'playing') break;
       const p = actor();
       if (!p || !p.alive || p.spect) break;
-      if (map.startCoins === undefined) break; // монет нет — торговля недоступна
-      const npc = (map.npcs ?? []).find((x) => x.id === a.npcId);
-      const off = npc?.shop?.find((x) => x.id === a.offerId);
-      if (!npc || !off) break;
-      const price = Math.max(0, Math.floor(off.price || 0));
-      if ((p.coinsLeft ?? 0) < price) {
-        log(`🛒 ${p.name}: не хватает монет — нужно ${coinsStr(price)}, в кармане ${coinsStr(p.coinsLeft ?? 0)}`);
-        break;
-      }
-      const npcName = (map.npcLib ?? []).find((x) => x.id === npc.nid)?.name ?? 'NPC';
-      if (off.kind === 'item' && off.item) {
-        const meta = RUBG_ITEMS[off.item];
-        p.coinsLeft = Math.max(0, (p.coinsLeft ?? 0) - price);
-        rubgGiveItem(p, off.item); // на пояс, если есть слот, иначе в общий инвентарь
-        log(`🛒 ${p.name} купил у «${npcName}» ${meta.icon} «${off.title?.trim() || meta.name}» за ${coinsStr(price)} — капитал ${coinsStr(p.coinsLeft)}`);
-      } else {
-        const amt = Math.max(1, Math.floor(off.amount ?? 0));
-        const what = off.title?.trim() || (off.res === 'tries' ? `+${amt} попыток` : off.res === 'hp' ? `+${amt}% HP` : `+${amt} мин времени`);
-        if (off.res === 'time') p.secLeft += amt * 60;
-        else if (off.res === 'tries') p.triesLeft += amt;
-        else if (off.res === 'hp') p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? RUBG_HP_MAX) + amt);
-        else break; // товар без ресурса — ничего не продаём
-        p.coinsLeft = Math.max(0, (p.coinsLeft ?? 0) - price);
-        log(`🛒 ${p.name} купил у «${npcName}» «${what}» за ${coinsStr(price)} — капитал ${coinsStr(p.coinsLeft)}`);
-      }
-      checkElim(); // истраченные монеты/приобретённый ресурс могут изменить расклад (в т.ч. выполнить концовку)
+      doTrade(s, map, p, a.npcId, [{ offerId: a.offerId, qty: 1 }], []);
+      break;
+    }
+    case 'npcTrade': {
+      /* ТОРГОВЛЯ v0.51: СДЕЛКА с торговцем одним действием — КУПИТЬ товары с витрины
+         (цены со скидками за сданные квесты, запас витрины ограничен) и/или ПРОДАТЬ
+         вещи из рюкзака (платит касса торговца). Всё валидируется целиком: если хоть
+         одна часть сделки невозможна — сделка ОТКЛОНЯЕТСЯ целиком, ничего не меняется. */
+      if (s.phase !== 'playing') break;
+      const p = actor();
+      if (!p || !p.alive || p.spect) break;
+      doTrade(s, map, p, a.npcId, a.buys ?? [], a.sells ?? []);
       break;
     }
     case 'rubgUseItem': {
