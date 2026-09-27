@@ -3,23 +3,25 @@ import { uid } from '../db';
 import { sfx } from '../sound';
 import type { DialogNode, DialogOption, MapEnding, NpcDialog } from '../types';
 import { Coin } from '../ui';
-import { DialogueGraph } from './DialogueGraph';
+import { DialogueGraph, tr } from './DialogueGraph';
 import type { DlgEditOps, DlgPosMap } from './DialogueGraph';
 
-/* ОБЩИЙ РЕДАКТОР ДЕРЕВА ДИАЛОГОВ NPC (v0.51.0) — ВСЁ ДЕЛАЕТСЯ НА СХЕМЕ (граф в духе ComfyUI).
+/* ОБЩИЙ РЕДАКТОР ДЕРЕВА ДИАЛОГОВ NPC (v0.52.0) — ТЕКСТ ПРАВИТСЯ ПРЯМО НА СХЕМЕ.
    Один компонент для редактора карт (окно «Редактор диалогов») и для «Редактора квестов
-   и диалогов». Список узлов-плиток УБРАН — дерево растит холст:
+   и диалогов». Список узлов-плиток УБРАН ещё в v0.51; в v0.52 и текст — на холсте:
    • создать узел: «＋ Узел» в шапке схемы, двойной клик по фону или нить из сокета,
      брошенная на пустое место (узел создастся и сразу привяжется);
+   • РЕПЛИКА — двойной клик по узлу: поле ввода открывается ВНУТРИ окна узла;
+   • ОТВЕТ — клик по строке варианта: правка на месте, на схеме;
    • СОЕДИНИТЬ/РАЗЪЕДИНИТЬ: нить из сокета варианта → на узел (привязать «Далее») или
      на золотую плашку КОНЦОВКИ (назначить концовку); ✕ на середине нити — разъединить;
    • на узле: «＋ ответ», ✕ у варианта, ✕ в шапке узла (ссылки очищаются);
-   • клик по узлу выбирает его — панель ниже правит текст и свойства выбранного узла:
-     реплика, варианты (текст, «Далее», концовка, награды, флаги), маркеры
+   • клик по узлу выбирает его — панель ниже правит СВОЙСТВА выбранного узла:
+     «Далее», концовка, награды, ФЛАГИ (с подсказками и списком флагов карты), маркеры
      «🛒 торговля на этом узле» / «📜 квесты на этом узле» (v0.51 — авто-ветки
      «Можно ли поторговать с тобой?» и «Есть ли для меня работа?» создаются сами
      при добавлении торговли/квеста). */
-export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosStore, height = 380, selId, onSelect }: {
+export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosStore, height = 380, selId, onSelect, allFlags = [] }: {
   dialog: NpcDialog;
   endings: MapEnding[];
   onChange: (d: NpcDialog) => void;
@@ -28,6 +30,7 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
   height?: number;                      // высота холста схемы
   selId?: string | null;                // выбранный узел — снаружи (окно NPC продолжает выбор)
   onSelect?: (id: string) => void;
+  allFlags?: string[];                  // v0.52: флаги, уже использованные на карте (подсказка в полях)
 }) {
   const [selRaw, setSel] = useState<string>('');
   const nodes = dialog.nodes;
@@ -123,6 +126,9 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
     delNode,
     addOpt,
     delOpt,
+    /* v0.52: без звуков — вызываются на каждый нажатый символ при правке на схеме */
+    setText: (nid, text) => updNode(nid, { text }),
+    setOptText: (nid, oi, text) => updOpt(nid, oi, { text }),
   };
 
   return (
@@ -154,11 +160,12 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
         fitKey={dialog.root}
       />
 
-      {/* РЕДАКТИРОВАНИЕ ВЫБРАННОГО УЗЛА (выбор — кликом по узлу на схеме) */}
+      {/* РЕДАКТИРОВАНИЕ ВЫБРАННОГО УЗЛА: только СВОЙСТВА — текст реплики и ответов
+          правится ПРЯМО НА СХЕМЕ (двойной клик по узлу / клик по варианту) */}
       {selNode && (
         <div className="border-2 border-teal/50 px-2 py-2 space-y-2">
           <div className="flex items-center justify-between">
-            <span className="tick-label text-teal">Узел №{selIdx + 1}{dialog.root === selNode.id ? ' · СТАРТ' : ''}</span>
+            <span className="tick-label text-teal">Узел №{selIdx + 1}{dialog.root === selNode.id ? ' · СТАРТ' : ''} · <span className="text-faint normal-case">реплика — двойной клик по узлу на схеме</span></span>
             <div className="flex items-center gap-1">
               {dialog.root !== selNode.id && (
                 <button
@@ -176,13 +183,6 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
               )}
             </div>
           </div>
-          <textarea
-            className="field-in w-full px-2 py-1 text-[11px] min-h-[42px]"
-            maxLength={280}
-            placeholder="Реплика NPC (что говорит)…"
-            value={selNode.text}
-            onChange={(ev) => updNode(selNode.id, { text: ev.target.value })}
-          />
 
           {/* маркеры узла: что показывать игроку, когда диалог дошёл до этого узла */}
           <div className="flex items-center gap-3 flex-wrap">
@@ -209,18 +209,11 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
           {(selNode.opts ?? []).map((o, oi) => (
             <div key={oi} className="border-2 border-edge px-1.5 py-1.5 space-y-1 bg-[rgba(7,9,18,0.5)]">
               <div className="flex items-center gap-1">
-                <span className="tick-label text-faint shrink-0">{oi + 1}.</span>
-                <input
-                  className="field-in flex-1 min-w-0 px-1.5 py-1 text-[11px]"
-                  maxLength={80}
-                  placeholder="Что отвечает игрок…"
-                  value={o.text}
-                  onChange={(ev) => updOpt(selNode.id, oi, { text: ev.target.value })}
-                />
+                <span className="tick-label text-faint shrink-0">{oi + 1}. <span className="text-dim normal-case">{o.text ? `«${tr(o.text, 24)}»` : 'текст — клик по строке на схеме'}</span></span>
                 <button
                   onClick={() => moveOpt(selNode.id, oi, -1)}
                   disabled={oi === 0}
-                  className={`px-0.5 text-[10px] cursor-pointer ${oi === 0 ? 'text-edge' : 'text-faint hover:text-teal'}`}
+                  className={`ml-auto px-0.5 text-[10px] cursor-pointer ${oi === 0 ? 'text-edge' : 'text-faint hover:text-teal'}`}
                   title="Поднять вариант"
                 >↑</button>
                 <button
@@ -269,35 +262,53 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
                   🎯<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={o.give?.tries ?? 0} onChange={(ev) => updOpt(selNode.id, oi, { give: { ...o.give, tries: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} />
                 </label>
               </div>
-              <div className="space-y-1">
-                <input
-                  className="field-in w-full px-1.5 py-0.5 text-[9px]"
-                  maxLength={24}
-                  placeholder="Ставит флаг (при выборе варианта)"
-                  value={o.setFlag ?? ''}
-                  onChange={(ev) => updOpt(selNode.id, oi, { setFlag: ev.target.value.trim() || undefined })}
-                  title="Флаг ставится игроку при выборе — открывает другие варианты и ветки"
-                />
+              {/* ---------- v0.52: ФЛАГИ — ПОДПИСАННО и С ПОДСКАЗКАМИ ---------- */}
+              <div className="space-y-1 border-2 border-[rgba(255,179,71,0.35)] px-1.5 py-1.5">
+                <div className="text-[9px] text-dim leading-tight">
+                  <b className="text-[#ffb347]">🚩 Флаг</b> — метка, которую игрок получает, выбрав вариант. По меткам другие варианты можно ПОКАЗЫВАТЬ или СКРЫВАТЬ: например, вариант «рассказать пароль» виден только после того, как в другом узле игрок его узнал.
+                </div>
                 <div className="flex items-center gap-1">
+                  <span className="tick-label text-[#ffb347] shrink-0 w-[150px]" title="При выборе ЭТОГО варианта игроку ставится флаг с этим именем">🚩 ставит флаг:</span>
                   <input
                     className="field-in flex-1 min-w-0 px-1.5 py-0.5 text-[9px]"
                     maxLength={24}
-                    placeholder="Виден только при флаге"
-                    value={o.reqFlag ?? ''}
-                    onChange={(ev) => updOpt(selNode.id, oi, { reqFlag: ev.target.value.trim() || undefined })}
-                    title="Вариант виден ТОЛЬКО если флаг стоит (пусто — виден всегда)"
-                  />
-                  <input
-                    className="field-in flex-1 min-w-0 px-1.5 py-0.5 text-[9px]"
-                    maxLength={24}
-                    placeholder="Скрыт при флаге"
-                    value={o.reqNotFlag ?? ''}
-                    onChange={(ev) => updOpt(selNode.id, oi, { reqNotFlag: ev.target.value.trim() || undefined })}
-                    title="Вариант виден ТОЛЬКО если флага НЕТ (пусто — виден всегда)"
+                    placeholder="имя флага, напр. знает_пароль"
+                    list="dlg-flags-list"
+                    value={o.setFlag ?? ''}
+                    onChange={(ev) => updOpt(selNode.id, oi, { setFlag: ev.target.value.trim() || undefined })}
+                    title="При выборе этого варианта игрок получит флаг с этим именем (пусто — не ставит)"
                   />
                 </div>
+                <div className="flex items-center gap-1">
+                  <span className="tick-label text-teal shrink-0 w-[150px]" title="Вариант виден, ТОЛЬКО если флаг уже стоит (пусто — виден всегда)">🔒 показывать только при флаге:</span>
+                  <input
+                    className="field-in flex-1 min-w-0 px-1.5 py-0.5 text-[9px]"
+                    maxLength={24}
+                    placeholder="имя флага или пусто — виден всегда"
+                    list="dlg-flags-list"
+                    value={o.reqFlag ?? ''}
+                    onChange={(ev) => updOpt(selNode.id, oi, { reqFlag: ev.target.value.trim() || undefined })}
+                    title="Вариант виден ТОЛЬКО если у игрока стоит этот флаг. Пусто — вариант виден всегда."
+                  />
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="tick-label text-coral shrink-0 w-[150px]" title="Вариант исчезает, когда флаг стоит (пусто — виден всегда)">🚫 скрыть при флаге:</span>
+                  <input
+                    className="field-in flex-1 min-w-0 px-1.5 py-0.5 text-[9px]"
+                    maxLength={24}
+                    placeholder="имя флага или пусто — виден всегда"
+                    list="dlg-flags-list"
+                    value={o.reqNotFlag ?? ''}
+                    onChange={(ev) => updOpt(selNode.id, oi, { reqNotFlag: ev.target.value.trim() || undefined })}
+                    title="Вариант виден ТОЛЬКО пока у игрока НЕТ этого флага (исчезает, когда флаг поставлен). Пусто — вариант виден всегда."
+                  />
+                </div>
+                <datalist id="dlg-flags-list">
+                  {allFlags.map((f) => <option key={f} value={f} />)}
+                </datalist>
+                <p className="text-[8.5px] text-faint leading-tight">Имена флагов подсказываются из уже использованных на карте. «Показывать только при флаге» и «Скрыть при флаге» работают наоборот друг к другу — достаточно одного из двух.</p>
                 {(o.reqFlag || o.reqNotFlag) && (
-                  <p className="text-[9px] text-magma leading-tight">⚠ Этот вариант скрыт от игроков, пока условие флага не выполнено, — если вариант «пропал», проверьте поля флагов.</p>
+                  <p className="text-[9px] text-magma leading-tight">⚠ Вариант скрыт от игроков, пока условие флага не выполнено, — если вариант «пропал», проверьте поля флагов выше.</p>
                 )}
               </div>
             </div>

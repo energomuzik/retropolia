@@ -1,5 +1,5 @@
 import { uid } from './db';
-import type { DialogNode, NpcDialog, PlacedNpc } from './types';
+import type { DialogNode, GameMap, NpcDialog, PlacedNpc } from './types';
 
 /* АВТО-ВЕТКИ ДИАЛОГА NPC (v0.51.0) — торговля и квесты ЖИВУТ В ДИАЛОГЕ.
    Когда создатель добавляет NPC ТОРГОВЛЮ — в дерево диалога выращивается ветка
@@ -77,3 +77,19 @@ export const nodeShowsShop = (npc: PlacedNpc, node: DialogNode): boolean =>
 /** Показывать блок КВЕСТОВ на этом узле в игре: маркер узла или (для старых карт без маркеров) всегда. */
 export const nodeShowsQuests = (npc: PlacedNpc, node: DialogNode): boolean =>
   !!node.showQuests || (!dialogHasMarkers(npc) && (npc.quests?.length ?? 0) > 0);
+
+/* v0.52: все имена ФЛАГОВ, уже использованные в диалогах карты, — подсказка в полях
+   «ставит флаг / показывать только при флаге / скрыть при флаге» редактора дерева. */
+export const allDlgFlags = (map: Pick<GameMap, 'npcs'>): string[] => {
+  const set = new Set<string>();
+  for (const n of map.npcs ?? []) {
+    for (const nd of n.dialog?.nodes ?? []) {
+      for (const o of nd.opts ?? []) {
+        if (o.setFlag) set.add(o.setFlag);
+        if (o.reqFlag) set.add(o.reqFlag);
+        if (o.reqNotFlag) set.add(o.reqNotFlag);
+      }
+    }
+  }
+  return [...set].sort();
+};

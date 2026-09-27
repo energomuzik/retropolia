@@ -1,5 +1,6 @@
 import type { AnimClip, CellDef, GameMap, NpcLibEntry, PlacedNpc, TileDef, TileImg, TokenAnim, TokenDir } from './types';
 import { getImage } from './assets';
+import { patrolPos } from './patrol';
 
 export const CELL = 64;
 
@@ -327,6 +328,15 @@ export interface BoardDrawOpts {
    Передаётся из игры только в общем плане/заглядывании карты мира: все плитки, НЕ вошедшие
    в список, рисуются ПОСЛЕДНИМ слоем залитыми темнотой (карта заполняется по мере исследования). */
   visitedPlates?: number[] | null;
+  /* ---------- ПАТРУЛИРОВАНИЕ (v0.52.0) ----------
+   patrolBase — синхронный тик отсчёта (s.startedAt партии); patrolNow — текущий момент.
+   Передаются только из игры: у боссов/NPC с маршрутом позиция считается формулой patrolPos.
+   В редакторе НЕ передаются — персонаж стоит на месте, а маршрут рисуется пунктиром
+   (patrolRoutes — только редактор: пунктирные линии + точки-кружки с номерами). */
+  patrolBase?: number;
+  patrolNow?: number;
+  patrolFreeze?: Record<string, number>; // PlacedBoss.id → момент (мс), в который босс погиб и замер
+  patrolRoutes?: { pts: { x: number; y: number }[]; color: string }[];
 }
 
 function px(ctx: CanvasRenderingContext2D, x: number, y: number, s: number, pattern: string[], color: string) {
@@ -954,14 +964,53 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
   // включая клип гибели bossDef); повержённый — замер на последнем кадре клипа defeated
   // (у старых боссов без него — на последнем кадре win)
   const blibDraw = new Map((map.bossLib ?? []).map((b) => [b.id, b]));
+  /* маршрутные линии патрулей — только в редакторе карт (в игре маршрут не виден) */
+  if (o.sndRadii && o.patrolRoutes?.length) {
+    for (const rt of o.patrolRoutes) {
+      const pts = (rt.pts ?? []).filter((p) => Number.isFinite(p?.x) && Number.isFinite(p?.y));
+      if (pts.length < 2) continue;
+      ctx.save();
+      ctx.setLineDash([8, 6]);
+      ctx.strokeStyle = rt.color;
+      ctx.lineWidth = 2 / Math.max(0.05, view.zoom);
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      pts.forEach((p, i) => {
+        const rr = 9 / Math.max(0.05, view.zoom);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, rr, 0, Math.PI * 2);
+        ctx.fillStyle = '#0b0e1c';
+        ctx.fill();
+        ctx.lineWidth = 1.6 / Math.max(0.05, view.zoom);
+        ctx.stroke();
+        ctx.fillStyle = rt.color;
+        ctx.font = `bold ${Math.max(9, 10 / Math.max(0.05, view.zoom))}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(i + 1), p.x, p.y + 0.5);
+      });
+      ctx.restore();
+    }
+  }
   for (const pb of map.bosses ?? []) {
     const def = blibDraw.get(pb.bid);
     if (!def) continue;
+    /* ПАТРУЛЬ: живой босс стоит в точке маршрута (формула от времени партии);
+       повержённый замерает в точке гибели (patrolFreeze — ts fx bossDef) */
+    const pp = pb.patrol && o.patrolBase !== undefined
+      ? patrolPos(pb.patrol, o.patrolBase, o.patrolNow ?? 0, o.bossDown?.[pb.id] ? o.patrolFreeze?.[pb.id] : undefined)
+      : null;
+    const bx = pp ? pp.x : pb.x;
+    const by = pp ? pp.y : pb.y;
     // круг радиуса — только в редакторе карт (радиус работает и для реакций, и для звука ожидания)
     if (o.sndRadii && pb.r && pb.r > 0) {
       ctx.save();
       ctx.beginPath();
-      ctx.arc(pb.x, pb.y, pb.r, 0, Math.PI * 2);
+      ctx.arc(bx, by, pb.r, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(192,122,255,0.06)';
       ctx.fill();
       ctx.setLineDash([10, 7]);
@@ -996,7 +1045,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const img = getImage(frames[idx]);
     if (!img) continue;
     ctx.save();
-    ctx.translate(pb.x, pb.y);
+    ctx.translate(bx, by);
     ctx.imageSmoothingEnabled = true;
     if (o.bossDown?.[pb.id] && !fxC) ctx.globalAlpha = 0.85; // побеждённый — чуть приглушён
     ctx.drawImage(img, -pb.w / 2, -pb.h / 2, pb.w, pb.h);
@@ -1009,10 +1058,15 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
   // Круг радиуса (звук + диалог) — только в редакторе карт.
   for (const it of o.npcs ?? []) {
     const { npc, def, done } = it;
+    /* ПАТРУЛЬ: NPC с маршрутом рисуется в текущей точке (формула от времени партии);
+       без маршрута — на своём месте (npc.x/y) */
+    const pp = npc.patrol && o.patrolBase !== undefined ? patrolPos(npc.patrol, o.patrolBase, o.patrolNow ?? 0) : null;
+    const nx = pp ? pp.x : npc.x;
+    const ny = pp ? pp.y : npc.y;
     if (o.sndRadii && npc.r && npc.r > 0) {
       ctx.save();
       ctx.beginPath();
-      ctx.arc(npc.x, npc.y, npc.r, 0, Math.PI * 2);
+      ctx.arc(nx, ny, npc.r, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(46,230,168,0.05)';
       ctx.fill();
       ctx.setLineDash([9, 7]);
@@ -1027,7 +1081,7 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const img = getImage(clip.frames[idx]);
     if (!img) continue;
     ctx.save();
-    ctx.translate(npc.x, npc.y);
+    ctx.translate(nx, ny);
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(img, -npc.w / 2, -npc.h / 2, npc.w, npc.h);
     // значок диалога над NPC с диалогом (в игре и в редакторе — видно, что с ним можно говорить)

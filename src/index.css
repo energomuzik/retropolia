@@ -272,3 +272,72 @@ input[type="range"] { accent-color: var(--color-gold); }
   55% { opacity: 0.35; }
   100% { opacity: 0; }
 }
+
+/* ---------- ТОРГОВЛЯ КАРТИНКАМИ (v0.52.0) ----------
+   Карточка-«монополия» для товаров торговца и вещей рюкзака: крупный рисунок
+   БЕЗ подписи, цена под картинкой, запас — уголком. Клик = выбор (золотая рамка),
+   при выборе название/описание предмета пишутся внизу окна торговли. */
+.trade-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  min-height: 84px;
+  padding: 6px 4px 4px;
+  border: 2px solid #313c72;
+  background: linear-gradient(160deg, #131a36 0%, #0d1124 55%, #0a0d1c 100%);
+  box-shadow: inset 0 0 14px rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+  transition: transform 0.1s, border-color 0.1s, box-shadow 0.1s;
+  user-select: none;
+}
+.trade-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(46, 230, 168, 0.75);
+  box-shadow: inset 0 0 14px rgba(0, 0, 0, 0.55), 0 0 10px rgba(46, 230, 168, 0.18);
+}
+.trade-card-sel {
+  border-color: #ffcf3f !important;
+  box-shadow: inset 0 0 14px rgba(0, 0, 0, 0.55), 0 0 12px rgba(255, 207, 63, 0.3) !important;
+}
+.trade-card-off { opacity: 0.45; filter: grayscale(0.75); cursor: not-allowed; }
+.trade-card[draggable='true'] { cursor: grab; }
+.trade-card[draggable='true']:active { cursor: grabbing; }
+
+/* крупный рисунок предмета — emoji каталога с тенью, без текста */
+.trade-art {
+  font-size: 32px;
+  line-height: 1.15;
+  filter: drop-shadow(0 3px 5px rgba(0, 0, 0, 0.7));
+  pointer-events: none;
+}
+
+/* уголок запаса: «×3» или «∞» */
+.trade-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  padding: 0 3px;
+  font-family: 'Courier New', monospace;
+  font-size: 8.5px;
+  font-weight: bold;
+  line-height: 13px;
+  color: #ffcf3f;
+  background: rgba(11, 14, 28, 0.9);
+  border: 1px solid rgba(255, 207, 63, 0.5);
+  pointer-events: none;
+}
+
+/* мини-карточка на столе СДЕЛКИ: только рисунок + количество */
+.trade-mini {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: 2px solid #313c72;
+  background: linear-gradient(160deg, #131a36 0%, #0d1124 100%);
+}

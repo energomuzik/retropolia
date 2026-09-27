@@ -1989,6 +1989,13 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const mine = flags[p.id] = flags[p.id] ?? {};
       if (opt.reqFlag && !mine[opt.reqFlag]) break; // вариант недоступен без флага
       if (opt.reqNotFlag && mine[opt.reqNotFlag]) break;
+      /* v0.52: текст этого узла игрок УЖЕ ВИДЕЛ (и ответил) — помечаем «сказанное»;
+         следующий узел (opt.next) показывается сразу — помечаем и его. По этим меткам
+         в окне диалога работает тумблер «скрывать сказанное». */
+      const seenAll = s.dlgSeen = s.dlgSeen ?? {};
+      const seen = seenAll[p.id] = seenAll[p.id] ?? {};
+      seen[node.id] = 1;
+      if (opt.next) seen[opt.next] = 1;
       if (opt.give) giveReward(p, opt.give, 'награда от NPC');
       if (opt.setFlag) mine[opt.setFlag] = true;
       if (opt.ending) {

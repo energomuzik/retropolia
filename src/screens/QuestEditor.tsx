@@ -5,7 +5,7 @@ import { DialogTreeEditor } from './DialogTreeEditor';
 import { QuestMapGraph } from './DialogueGraph';
 import type { DlgEditOpsMap } from './DialogueGraph';
 import { TradeShopEditor } from './TradeEditor';
-import { ensureQuestDialog, ensureShopDialog } from '../dialogHubs';
+import { allDlgFlags, ensureQuestDialog, ensureShopDialog } from '../dialogHubs';
 import { idbPut, uid } from '../db';
 import type { GameMap, MapEnding, NpcDialog, NpcLibEntry, NpcQuest, PlacedNpc, QuestGoal, QuestGoalKind } from '../types';
 import { isQuestMode, questGoalText } from '../types';
@@ -381,6 +381,9 @@ export default function QuestEditor() {
           const ops: DlgEditOpsMap = {
             setNext: (npcId, nodeId, oi, next) => { updDlg(npcId, (d) => ({ ...d, nodes: d.nodes.map((n) => (n.id === nodeId ? { ...n, opts: (n.opts ?? []).map((o, i) => (i === oi ? { ...o, next } : o)) } : n)) })); sfx.hover(); },
             setEnding: (npcId, nodeId, oi, ending) => { updDlg(npcId, (d) => ({ ...d, nodes: d.nodes.map((n) => (n.id === nodeId ? { ...n, opts: (n.opts ?? []).map((o, i) => (i === oi ? { ...o, ending } : o)) } : n)) })); sfx.hover(); },
+            /* v0.52: без звуков — вызываются на каждый нажатый символ при правке на схеме */
+            setText: (npcId, nodeId, text) => { updDlg(npcId, (d) => ({ ...d, nodes: d.nodes.map((n) => (n.id === nodeId ? { ...n, text } : n)) })); },
+            setOptText: (npcId, nodeId, oi, text) => { updDlg(npcId, (d) => ({ ...d, nodes: d.nodes.map((n) => (n.id === nodeId ? { ...n, opts: (n.opts ?? []).map((o, i) => (i === oi ? { ...o, text } : o)) } : n)) })); },
             addNode: (npcId, at, linkFrom) => {
               const nid = uid('dn');
               updDlg(npcId, (d) => ({
@@ -578,6 +581,7 @@ export default function QuestEditor() {
                 dialog={selNpc.dialog}
                 endings={map.endings ?? []}
                 height={470}
+                allFlags={allDlgFlags(map)}
                 onChange={(d) => updNpc(selIdx, { dialog: d })}
                 posStore={map.dlgPos}
                 onPosStore={(p) => updMap({ dlgPos: p ?? undefined })}

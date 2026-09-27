@@ -43,6 +43,9 @@ export type DlgEditOps = {
   delNode: (nodeId: string) => void;
   addOpt: (nodeId: string) => void;
   delOpt: (nodeId: string, optIdx: number) => void;
+  /* v0.52: правка текста ПРЯМО В ОКНЕ УЗЛА на схеме (без панели внизу) */
+  setText: (nodeId: string, text: string) => void;
+  setOptText: (nodeId: string, optIdx: number, text: string) => void;
 };
 
 /* Операции ОБЩЕЙ схемы (для QuestMapGraph): всё то же, но с указанием NPC. */
@@ -53,6 +56,9 @@ export type DlgEditOpsMap = {
   delNode: (npcId: string, nodeId: string) => void;
   addOpt: (npcId: string, nodeId: string) => void;
   delOpt: (npcId: string, nodeId: string, optIdx: number) => void;
+  /* v0.52: правка текста прямо на узлах общей схемы */
+  setText: (npcId: string, nodeId: string, text: string) => void;
+  setOptText: (npcId: string, nodeId: string, optIdx: number, text: string) => void;
   addEnding?: (at?: { x: number; y: number }) => void;
   delEnding?: (id: string) => void;
 };
@@ -62,11 +68,12 @@ export const nodeH = (n: DialogNode, editable: boolean): number => {
   const lines = wrap(n.text);
   return 26 + (lines.length ? lines.length * 13 + 6 : 16) + (n.opts ?? []).length * ROW_H + (editable ? ROW_H : 0) + 8;
 };
-/* y центра строки варианта oi на узле в позиции p (для сокетов) */
-const optRowY = (n: DialogNode, p: DlgPos, oi: number): number =>
-  p.y + 26 + (wrap(n.text).length ? wrap(n.text).length * 13 + 6 : 16) + oi * ROW_H + ROW_H / 2;
+/* y центра строки варианта oi на узле в позиции p (для сокетов);
+   extra — добавка к высоте блока реплики, пока текст узла правится НА САМОМ УЗЛЕ */
+const optRowY = (n: DialogNode, p: DlgPos, oi: number, extra = 0): number =>
+  p.y + 26 + extra + (wrap(n.text).length ? wrap(n.text).length * 13 + 6 : 16) + oi * ROW_H + ROW_H / 2;
 
-const tr = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+export const tr = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 /** Разбивка реплики на строки ≤ w символов, максимум 3 строки (дальше — многоточие). */
 export function wrap(s: string, w = 32): string[] {
   const words = (s || '').split(/\s+/).filter(Boolean);
@@ -261,6 +268,88 @@ function EdgeLabel({ x, y, text, color }: { x: number; y: number; text: string; 
   );
 }
 
+/* ---------- v0.52: ПРАВКА ТЕКСТА ПРЯМО В ОКНЕ УЗЛА ----------
+   Реплика — двойной клик по узлу: появляется поле ввода ВНУТРИ узла, текст меняется на лету.
+   Вариант ответа — клик по его строке: однострочное поле вместо строки. Панель внизу больше
+   не нужна для текста — только для наград, флагов и связей. */
+function InlineTextarea({ x, y, w, value, onChange, onClose, onHeight }: {
+  x: number; y: number; w: number; value: string;
+  onChange: (v: string) => void;
+  onClose: () => void;
+  onHeight: (h: number) => void;
+}) {
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  const fit = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = '0px';
+    el.style.height = `${Math.min(140, Math.max(16, el.scrollHeight))}px`;
+    onHeight(el.scrollHeight);
+  }, [onHeight]);
+  useEffect(() => {
+    const el = ref.current;
+    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+    fit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return (
+    <foreignObject x={x} y={y} width={w} height={26} style={{ overflow: 'visible' }}>
+      <div
+        onPointerDown={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
+        <textarea
+          ref={ref}
+          value={value}
+          onChange={(e) => { onChange(e.target.value); fit(); }}
+          onBlur={onClose}
+          onKeyDown={(e) => { if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); onClose(); } }}
+          placeholder="Реплика NPC…"
+          className="w-full resize-none leading-snug"
+          style={{
+            background: 'rgba(46,230,168,0.07)', border: '1px dashed rgba(46,230,168,0.7)', outline: 'none',
+            color: '#e6ebff', font: '9.5px "Courier New", monospace', padding: '1px 3px', borderRadius: 3, overflow: 'hidden',
+          }}
+        />
+      </div>
+    </foreignObject>
+  );
+}
+
+function InlineInput({ x, y, w, value, onChange, onClose }: {
+  x: number; y: number; w: number; value: string;
+  onChange: (v: string) => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+  }, []);
+  return (
+    <foreignObject x={x} y={y} width={w} height={16} style={{ overflow: 'visible' }}>
+      <div
+        onPointerDown={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
+        <input
+          ref={ref}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={onClose}
+          onKeyDown={(e) => { if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); onClose(); } }}
+          placeholder="Текст ответа…"
+          className="w-full"
+          style={{
+            background: 'rgba(46,230,168,0.07)', border: '1px dashed rgba(46,230,168,0.7)', outline: 'none',
+            color: '#e6ebff', font: '9px "Courier New", monospace', padding: '0 3px', borderRadius: 3, height: 15,
+          }}
+        />
+      </div>
+    </foreignObject>
+  );
+}
+
 /* ✕ на середине нити — РАЗЪЕДИНИТЬ (v0.51) */
 function EdgeCut({ x, y, color, onCut, title }: { x: number; y: number; color: string; onCut: () => void; title: string }) {
   return (
@@ -289,11 +378,24 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
   const dragRef = useRef<{ id: string; sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null);
   const linkRef = useRef<{ nodeId: string; optIdx: number; x: number; y: number } | null>(null);
   const [, bump] = useState(0); // перерисовка при перетаскивании узла/нити
+  /* v0.52: правка текста ПРЯМО В ОКНЕ УЗЛА — что правим и текущая высота поля реплики */
+  const [edit, setEdit] = useState<{ id: string; kind: 'text' | 'opt'; oi: number } | null>(null);
+  const [editH, setEditH] = useState(0);
 
   const editable = !!ops;
   const nodes = dialog.nodes;
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   const idxOf = useMemo(() => new Map(nodes.map((n, i) => [n.id, i])), [nodes]);
+
+  /* добавка к высоте блока реплики у узла, который сейчас правится на схеме */
+  const extraOf = (nid: string): number => {
+    if (!edit || edit.id !== nid || edit.kind !== 'text') return 0;
+    const n = byId.get(nid);
+    if (!n) return 0;
+    const base = wrap(n.text).length ? wrap(n.text).length * 13 + 6 : 16;
+    return Math.max(0, editH - base);
+  };
+  const closeEdit = () => { setEdit(null); setEditH(0); };
 
   /* концовки, выбранные вариантами этого дерева, — золотые плашки в нижнем ряду */
   const usedEndings = useMemo(() => {
@@ -390,7 +492,7 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
     const src = nodes.find((n) => n.id === lk.nodeId);
     if (!src) return;
     const pt = toCanvas(e.clientX, e.clientY);
-    const start = { x: layout[lk.nodeId].x + NW - 12, y: optRowY(src, layout[lk.nodeId], lk.optIdx) };
+    const start = { x: layout[lk.nodeId].x + NW - 12, y: optRowY(src, layout[lk.nodeId], lk.optIdx, extraOf(lk.nodeId)) };
     if (Math.hypot(pt.x - start.x, pt.y - start.y) < 16) return; // вернули в сокет — отмена
     const endId = hitNode(pt);
     if (endId && endId !== lk.nodeId) { ops.setNext(lk.nodeId, lk.optIdx, endId); return; }
@@ -414,7 +516,7 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
       <div className="flex items-center gap-2 flex-wrap">
         <span className="tick-label text-teal">🌳 Схема дерева</span>
         <span className="tick-label text-faint hidden md:inline">
-          <span style={{ color: C_TEAL }}>— далее</span> · <span style={{ color: C_GOLD }}>— концовка</span> · <span style={{ color: C_AMBER }}>⬚ флаг</span> · тяните нить из ○
+          <span style={{ color: C_TEAL }}>— далее</span> · <span style={{ color: C_GOLD }}>— концовка</span> · <span style={{ color: C_AMBER }}>⬚ флаг</span> · тяните нить из ○ · двойной клик по узлу — править реплику · клик по ответу — править его
         </span>
         <span className="ml-auto flex items-center gap-1">
           {ops && (
@@ -456,7 +558,7 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
           const opts = n.opts ?? [];
           return opts.map((o, oi) => {
             const sx = p.x + NW - 12;
-            const sy = optRowY(n, p, oi);
+            const sy = optRowY(n, p, oi, extraOf(n.id));
             if (o.next && byId.has(o.next)) {
               const tp = layout[o.next];
               if (!tp) return null;
@@ -513,8 +615,11 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
           const opts = n.opts ?? [];
           const hasSet = opts.some((o) => o.setFlag);
           const hasReq = opts.some((o) => o.reqFlag || o.reqNotFlag);
-          const h = hs[n.id] ?? nodeH(n, editable);
-          const textBottom = p.y + 26 + (lines.length ? lines.length * 13 + 6 : 16);
+          const editingText = editable && edit?.id === n.id && edit.kind === 'text';
+          const baseTextH = lines.length ? lines.length * 13 + 6 : 16;
+          const textH = editingText ? Math.max(baseTextH, editH) : baseTextH;
+          const h = (hs[n.id] ?? nodeH(n, editable)) + (textH - baseTextH);
+          const textBottom = p.y + 26 + textH;
           return (
             <g
               key={n.id}
@@ -544,24 +649,65 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
                   </g>
                 );
               })()}
-              {lines.length === 0 && <text x={p.x + 8} y={p.y + 36} fontSize={9.5} className="font-pixel" fill={C_FAINT}>(пустая реплика)</text>}
-              {lines.map((ln, li) => (
-                <text key={li} x={p.x + 8} y={p.y + 34 + li * 13} fontSize={9.5} className="font-pixel" fill="#c7cdf0">{ln}</text>
-              ))}
+              {/* v0.52: РЕПЛИКА ПРЯМО В ОКНЕ УЗЛА — двойной клик открывает поле ввода внутри узла;
+                  пока правим, текст заменяется полем, узел растёт по высоте */}
+              {editingText ? (
+                <InlineTextarea
+                  x={p.x + 6} y={p.y + 30} w={NW - 12} value={n.text}
+                  onChange={(v) => ops && ops.setText(n.id, v)}
+                  onClose={closeEdit}
+                  onHeight={setEditH}
+                />
+              ) : (
+                <>
+                  {lines.length === 0 && <text x={p.x + 8} y={p.y + 36} fontSize={9.5} className="font-pixel" fill={C_FAINT}>(пустая реплика)</text>}
+                  {lines.map((ln, li) => (
+                    <text key={li} x={p.x + 8} y={p.y + 34 + li * 13} fontSize={9.5} className="font-pixel" fill="#c7cdf0">{ln}</text>
+                  ))}
+                  {editable && (
+                    <rect
+                      x={p.x} y={p.y + 26} width={NW} height={textH} fill="none" pointerEvents="all" style={{ cursor: 'text' }}
+                      onDoubleClick={(e) => { e.stopPropagation(); setEdit({ id: n.id, kind: 'text', oi: -1 }); setEditH(baseTextH); }}
+                    >
+                      <title>Двойной клик — написать реплику ПРЯМО В ОКНЕ узла</title>
+                    </rect>
+                  )}
+                </>
+              )}
               <line x1={p.x + 6} y1={textBottom - 4} x2={p.x + NW - 6} y2={textBottom - 4} stroke={C_EDGE} strokeWidth={1} />
               {opts.map((o, oi) => {
                 const ry = textBottom + oi * ROW_H + ROW_H / 2;
+                const editingOpt = editable && edit?.id === n.id && edit.kind === 'opt' && edit.oi === oi;
                 return (
                   <g key={oi}>
-                    {ops && (
-                      <g className="cursor-pointer" onPointerDown={(e) => { e.stopPropagation(); ops.delOpt(n.id, oi); }}>
+                    {ops && !editingOpt && (
+                      <g className="cursor-pointer" onPointerDown={(e) => { e.stopPropagation(); ops.delOpt(n.id, oi); }} onDoubleClick={(e) => e.stopPropagation()}>
                         <text x={p.x + 8} y={ry + 3} fontSize={8} fill="#5a6491">✕</text>
                         <title>Удалить вариант</title>
                       </g>
                     )}
-                    <text x={p.x + (ops ? 20 : 8)} y={ry + 3} fontSize={8.5} className="font-pixel" fill={o.ending ? C_GOLD : '#9aa3c7'}>
-                      {tr(`${o.reqFlag || o.reqNotFlag ? '🔒' : ''}${o.setFlag ? '🚩' : ''}${o.text || '(без текста)'}`, 28)}
-                    </text>
+                    {editingOpt ? (
+                      <InlineInput
+                        x={p.x + 16} y={ry - 8} w={NW - 38} value={o.text}
+                        onChange={(v) => ops && ops.setOptText(n.id, oi, v)}
+                        onClose={closeEdit}
+                      />
+                    ) : (
+                      <>
+                        <text x={p.x + (ops ? 20 : 8)} y={ry + 3} fontSize={8.5} className="font-pixel" fill={o.ending ? C_GOLD : '#9aa3c7'}>
+                          {tr(`${o.reqFlag || o.reqNotFlag ? '🔒' : ''}${o.setFlag ? '🚩' : ''}${o.text || '(без текста)'}`, 28)}
+                        </text>
+                        {editable && (
+                          <rect
+                            x={p.x + (ops ? 16 : 4)} y={ry - ROW_H / 2} width={NW - (ops ? 40 : 20)} height={ROW_H} fill="none" pointerEvents="all" style={{ cursor: 'text' }}
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onClick={() => { setEdit({ id: n.id, kind: 'opt', oi }); }}
+                          >
+                            <title>Клик — править текст ответа прямо на схеме</title>
+                          </rect>
+                        )}
+                      </>
+                    )}
                     {/* сокет: тянуть из него нить */}
                     <circle
                       cx={p.x + NW - 12} cy={ry} r={5}
@@ -621,6 +767,9 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
   const dragRef = useRef<{ key: string; sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null);
   const linkRef = useRef<{ npcId: string; nodeId: string; optIdx: number; x: number; y: number } | null>(null);
   const [, bump] = useState(0);
+  /* v0.52: правка текста прямо на узлах общей схемы */
+  const [edit, setEdit] = useState<{ id: string; kind: 'text' | 'opt'; oi: number } | null>(null);
+  const [editH, setEditH] = useState(0);
   const npcs = useMemo(() => (map.npcs ?? []).filter((n) => n.dialog && n.dialog.nodes.length > 0), [map]);
   const endings = map.endings ?? [];
   const QW = 190, QH = 40; // плашки NPC и квестов
@@ -688,6 +837,20 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
     if (key && onSelectNpc) onSelectNpc(key);
   };
 
+  /* добавка к высоте блока реплики у узла, который сейчас правится на схеме */
+  const extraOf = (nid: string): number => {
+    if (!edit || edit.id !== nid || edit.kind !== 'text') return 0;
+    for (const npc of npcs) {
+      const n = (npc.dialog as NpcDialog).nodes.find((x) => x.id === nid);
+      if (n) {
+        const base = wrap(n.text).length ? wrap(n.text).length * 13 + 6 : 16;
+        return Math.max(0, editH - base);
+      }
+    }
+    return 0;
+  };
+  const closeEdit = () => { setEdit(null); setEditH(0); };
+
   const toCanvas = (clientX: number, clientY: number): { x: number; y: number } => {
     const v = vtRef.current;
     const r = v.svg?.getBoundingClientRect();
@@ -745,7 +908,7 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
     const sp = layout[`n:${lk.nodeId}`];
     if (!sp) return;
     const pt = toCanvas(e.clientX, e.clientY);
-    const start = { x: sp.x + NW - 12, y: optRowY(src.node, sp, lk.optIdx) };
+    const start = { x: sp.x + NW - 12, y: optRowY(src.node, sp, lk.optIdx, extraOf(lk.nodeId)) };
     if (Math.hypot(pt.x - start.x, pt.y - start.y) < 16) return;
     const endId = hitNodeKey(pt);
     if (endId && endId !== lk.nodeId) {
@@ -841,7 +1004,7 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
                 const opts = n.opts ?? [];
                 return opts.map((o, oi) => {
                   const sx = p.x + NW - 12;
-                  const sy = optRowY(n, p, oi);
+                  const sy = optRowY(n, p, oi, extraOf(n.id));
                   if (o.next && byId.has(o.next)) {
                     const tp = P(o.next);
                     if (!tp) return null;
@@ -896,26 +1059,68 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
             const orphan = dlg.root !== n.id && incoming(dlg, n.id) === 0 && dlg.nodes.length > 1;
             const lines = wrap(n.text);
             const opts = n.opts ?? [];
-            const h = nodeH(n, editable);
-            const textBottom = p.y + 26 + (lines.length ? lines.length * 13 + 6 : 16);
+            const editingText = editable && edit?.id === n.id && edit.kind === 'text';
+            const baseTextH = lines.length ? lines.length * 13 + 6 : 16;
+            const textH = editingText ? Math.max(baseTextH, editH) : baseTextH;
+            const h = nodeH(n, editable) + (textH - baseTextH);
+            const textBottom = p.y + 26 + textH;
             return (
               <g key={n.id} data-node="1" className="cursor-pointer" onPointerDown={keyDown(`n:${n.id}`)} onPointerMove={keyMove} onPointerUp={() => keyUp(npc.id)}>
                 <rect x={p.x} y={p.y} width={NW} height={h} rx={5} fill="#0d1124" stroke={C_EDGE} strokeWidth={1.5} />
                 <circle cx={p.x} cy={p.y + 26} r={3.2} fill={C_EDGE} />
                 <text x={p.x + 8} y={p.y + 15} fontSize={9.5} className="font-display" fill={C_FAINT}>№{ni + 1}</text>
                 {dlg.root === n.id && <text x={p.x + NW - 44} y={p.y + 15} fontSize={8} className="font-display" fill={C_GOLD}>СТАРТ</text>}
-                {lines.length === 0 && <text x={p.x + 8} y={p.y + 36} fontSize={9} className="font-pixel" fill={C_FAINT}>(пустая реплика)</text>}
-                {lines.map((ln, li) => (
-                  <text key={li} x={p.x + 8} y={p.y + 34 + li * 13} fontSize={9} className="font-pixel" fill="#c7cdf0">{ln}</text>
-                ))}
+                {editingText ? (
+                  <InlineTextarea
+                    x={p.x + 6} y={p.y + 30} w={NW - 12} value={n.text}
+                    onChange={(v) => ops && ops.setText(npc.id, n.id, v)}
+                    onClose={closeEdit}
+                    onHeight={setEditH}
+                  />
+                ) : (
+                  <>
+                    {lines.length === 0 && <text x={p.x + 8} y={p.y + 36} fontSize={9} className="font-pixel" fill={C_FAINT}>(пустая реплика)</text>}
+                    {lines.map((ln, li) => (
+                      <text key={li} x={p.x + 8} y={p.y + 34 + li * 13} fontSize={9} className="font-pixel" fill="#c7cdf0">{ln}</text>
+                    ))}
+                    {editable && (
+                      <rect
+                        x={p.x} y={p.y + 26} width={NW} height={textH} fill="none" pointerEvents="all" style={{ cursor: 'text' }}
+                        onDoubleClick={(e) => { e.stopPropagation(); setEdit({ id: n.id, kind: 'text', oi: -1 }); setEditH(baseTextH); }}
+                      >
+                        <title>Двойной клик — написать реплику ПРЯМО В ОКНЕ узла</title>
+                      </rect>
+                    )}
+                  </>
+                )}
                 <line x1={p.x + 6} y1={textBottom - 4} x2={p.x + NW - 6} y2={textBottom - 4} stroke={C_EDGE} strokeWidth={1} />
                 {opts.map((o, oi) => {
                   const ry = textBottom + oi * ROW_H + ROW_H / 2;
+                  const editingOpt = editable && edit?.id === n.id && edit.kind === 'opt' && edit.oi === oi;
                   return (
                     <g key={oi}>
-                      <text x={p.x + 8} y={ry + 3} fontSize={8} className="font-pixel" fill={o.ending ? C_GOLD : '#9aa3c7'}>
-                        {tr(`${o.reqFlag || o.reqNotFlag ? '🔒' : ''}${o.setFlag ? '🚩' : ''}${o.text || '(без текста)'}`, 28)}
-                      </text>
+                      {editingOpt ? (
+                        <InlineInput
+                          x={p.x + 4} y={ry - 8} w={NW - 26} value={o.text}
+                          onChange={(v) => ops && ops.setOptText(npc.id, n.id, oi, v)}
+                          onClose={closeEdit}
+                        />
+                      ) : (
+                        <>
+                          <text x={p.x + 8} y={ry + 3} fontSize={8} className="font-pixel" fill={o.ending ? C_GOLD : '#9aa3c7'}>
+                            {tr(`${o.reqFlag || o.reqNotFlag ? '🔒' : ''}${o.setFlag ? '🚩' : ''}${o.text || '(без текста)'}`, 28)}
+                          </text>
+                          {editable && (
+                            <rect
+                              x={p.x + 4} y={ry - ROW_H / 2} width={NW - 26} height={ROW_H} fill="none" pointerEvents="all" style={{ cursor: 'text' }}
+                              onPointerDown={(e) => e.stopPropagation()}
+                              onClick={() => { setEdit({ id: n.id, kind: 'opt', oi }); }}
+                            >
+                              <title>Клик — править текст ответа прямо на схеме</title>
+                            </rect>
+                          )}
+                        </>
+                      )}
                       <circle
                         cx={p.x + NW - 12} cy={ry} r={5}
                         fill={o.ending ? 'rgba(255,207,63,0.25)' : 'rgba(46,230,168,0.25)'}
@@ -958,7 +1163,7 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
         })}
       </GraphViewport>
       <p className="text-[9px] text-faint leading-tight">
-        Золотые стрелки показывают, какой вариант ответа ведёт к КОНЦОВКЕ; синие плашки — КВЕСТЫ NPC; янтарный пунктир — флаг: вариант слева его ставит, вариант справа без него скрыт{ops ? '. Нить из сокета ○ бросьте на КОНЦОВКУ — назначите её варианту; на пустое место — создадится узел у этого NPC' : ''}. Узлы перетаскиваются — схема сохранится в карту.
+        Золотые стрелки показывают, какой вариант ответа ведёт к КОНЦОВКЕ; синие плашки — КВЕСТЫ NPC; янтарный пунктир — флаг: вариант слева его ставит, вариант справа без него скрыт{ops ? '. Нить из сокета ○ бросьте на КОНЦОВКУ — назначите её варианту; на пустое место — создадится узел у этого NPC' : ''}. Двойной клик по узлу — править реплику, клик по ответу — править его. Узлы перетаскиваются — схема сохранится в карту.
       </p>
     </div>
   );

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp, getRomData, useBlobImage } from '../store';
 import { dispatch, streamBus, type StreamPacket } from '../useGame';
 import { CELL, cellAtPoint, cellCenter, drawBoard, drawRubgOverlay, fitView, mapSize, plateMetrics, plateNumAt, plateRectOf, smoothPxPerFrame, jumpFrameFactor, DEF_MOVE_SPEED, clampMoveSpeed } from '../render';
+import { patrolPos } from '../patrol';
 import { cellRectOf, cellTaskOf, fmtClock, spentInfo } from '../engine';
 import { effectLabel } from './TaskEditor';
 import { cardArt, cartridgeArt } from '../assets';
@@ -165,7 +166,7 @@ export default function GameScreen() {
   const [saveState, setSaveState] = useState<unknown>(null);
   const [emuKey, setEmuKey] = useState(0);
   const [stream, setStream] = useState<StreamPacket | null>(null);
-  const [, setTick] = useState(0);
+  const [tick, setTick] = useState(0); // тик таймера: перерисовка + двигает nearNpc (патрули)
   const [tplOpen, setTplOpen] = useState(false);
 
   const viewRef = useRef({ x: 0, y: 0, zoom: 1 });
@@ -482,21 +483,41 @@ export default function GameScreen() {
   const nearNpc = useMemo(() => {
     if (!isQuest || !s || s.phase !== 'playing' || !map || !mePlayer || !mePlayer.alive || mePlayer.spect) return null;
     if (!myJourneyPos) return null;
+    /* ПАТРУЛЬ (v0.52): NPC с маршрутом считаем в его ТЕКУЩЕЙ точке (формула от времени партии)
+       — говорить можно с идущим NPC; тик таймера обновляет позицию дважды в секунду */
+    const pBase = s.startedAt || 0;
+    const pNow = Date.now();
     let best: { npc: PlacedNpc; def: NpcLibEntry } | null = null;
     let bestD = 0;
     for (const n of map.npcs ?? []) {
       const def = (map.npcLib ?? []).find((x) => x.id === n.nid);
       if (!def || !n.r || n.r <= 0) continue;
       if (!n.dialog && !(n.quests ?? []).length) continue; // ни диалога, ни квестов — не интерактивен
-      const d = Math.hypot(myJourneyPos.x - n.x, myJourneyPos.y - n.y);
+      const pp = n.patrol ? patrolPos(n.patrol, pBase, pNow) : null;
+      const d = Math.hypot(myJourneyPos.x - (pp ? pp.x : n.x), myJourneyPos.y - (pp ? pp.y : n.y));
       if (d > n.r) continue;
       if (!best || d < bestD) { best = { npc: n, def }; bestD = d; }
     }
     return best;
-  }, [isQuest, s, map, mePlayer, myJourneyPos?.x, myJourneyPos?.y]);
+  }, [isQuest, s, map, mePlayer, myJourneyPos?.x, myJourneyPos?.y, tick]);
   const [dlgNpcId, setDlgNpcId] = useState<string | null>(null);
   const [dlgNode, setDlgNode] = useState<string | null>(null);
   const [tradeNpcId, setTradeNpcId] = useState<string | null>(null); // v0.51: открыто окно торговли с NPC
+  /* v0.52: скрывать реплики, которые персонаж уже отвечал (настройка запоминается);
+     revealSeen — временно показать текст текущего узла кнопкой «показать» */
+  const [hideSeen, setHideSeen] = useState<boolean>(() => {
+    try { return localStorage.getItem('retropolia_hideSeen') !== '0'; } catch { return true; }
+  });
+  const [revealSeen, setRevealSeen] = useState(false);
+  useEffect(() => { setRevealSeen(false); }, [dlgNode, dlgNpcId]);
+  const flipHideSeen = () => {
+    setHideSeen((v) => {
+      const nv = !v;
+      try { localStorage.setItem('retropolia_hideSeen', nv ? '1' : '0'); } catch { /* noop */ }
+      return nv;
+    });
+    sfx.hover();
+  };
   const dlgNpc = nearNpc && dlgNpcId === nearNpc.npc.id ? nearNpc : (dlgNpcId ? (() => {
     const n = (map?.npcs ?? []).find((x) => x.id === dlgNpcId);
     const def = n ? (map?.npcLib ?? []).find((x) => x.id === n.nid) : undefined;
@@ -597,21 +618,27 @@ export default function GameScreen() {
           if (!e?.snd || !pa.r || pa.r <= 0) continue;
           if (Math.hypot(d.x - pa.x, d.y - pa.y) <= pa.r) wanted.set(pa.id, e.snd);
         }
-        /* БОССЫ: звук ожидания живого босса — по тому же радиусу; повержённый молчит */
+        /* БОССЫ: звук ожидания живого босса — по тому же радиусу; повержённый молчит.
+           ПАТРУЛЬ (v0.52): босс с маршрутом слышен в его ТЕКУЩЕЙ точке */
         const blib = new Map((m.bossLib ?? []).map((b) => [b.id, b]));
+        const pBaseA = sess.startedAt || 0;
+        const pNowA = Date.now();
         for (const pb of m.bosses ?? []) {
           if (sess.bossDown?.[pb.id]) continue;
           const def = blib.get(pb.bid);
           if (!def?.idleSnd || !pb.r || pb.r <= 0) continue;
-          if (Math.hypot(d.x - pb.x, d.y - pb.y) <= pb.r) wanted.set('boss-' + pb.id, def.idleSnd);
+          const bpp = pb.patrol ? patrolPos(pb.patrol, pBaseA, pNowA) : null;
+          if (Math.hypot(d.x - (bpp ? bpp.x : pb.x), d.y - (bpp ? bpp.y : pb.y)) <= pb.r) wanted.set('boss-' + pb.id, def.idleSnd);
         }
-        /* NPC (QUEST): звук ожидания — по СВОЕЙ фишке (все ходят одновременно, у каждого свой радиус) */
+        /* NPC (QUEST): звук ожидания — по СВОЕЙ фишке (все ходят одновременно, у каждого свой радиус);
+           ПАТРУЛЬ: NPC с маршрутом слышен в его текущей точке */
         const myPosN = sess.journeyPos?.[cur.selfId];
         if (myPosN && !emuRunning) {
           for (const n of m.npcs ?? []) {
             const ndef = (m.npcLib ?? []).find((x) => x.id === n.nid);
             if (!ndef?.idleSnd || !n.r || n.r <= 0) continue;
-            if (Math.hypot(myPosN.x - n.x, myPosN.y - n.y) <= n.r) wanted.set('npc-' + n.id, ndef.idleSnd);
+            const npp = n.patrol ? patrolPos(n.patrol, pBaseA, pNowA) : null;
+            if (Math.hypot(myPosN.x - (npp ? npp.x : n.x), myPosN.y - (npp ? npp.y : n.y)) <= n.r) wanted.set('npc-' + n.id, ndef.idleSnd);
           }
         }
       }
@@ -1269,7 +1296,11 @@ export default function GameScreen() {
         // клип доиграл — босс ВОЗВРАЩАЕТСЯ к idle (замирает навсегда только побеждённый,
         // его клип гибели bossDef доигрывает и продолжает статичным последним кадром).
         const bossFx: Record<string, { frames: string[]; fps: number; start: number }> = {};
+        /* ПАТРУЛЬ (v0.52): момент гибели босса (ts fx bossDef — Date.now() хоста, синхронно) —
+           повержённый патрульный замирает в той точке маршрута, где его настигли */
+        const patrolFreeze: Record<string, number> = {};
         for (const fx of fxList) {
+          if (fx.kind === 'bossDef' && fx.bossId) patrolFreeze[fx.bossId] = fx.ts;
           if (fx.kind !== 'bossWin' && fx.kind !== 'bossLose' && fx.kind !== 'bossDef') continue;
           const b = (m.bosses ?? []).find((x) => x.id === fx.bossId);
           if (!b) continue;
@@ -1322,6 +1353,11 @@ export default function GameScreen() {
              плитки тоже скрыты темнотой — видны только посещённые комнаты. */
           room: roomsOn && roomNumRef.current ? plateRectOf(m, roomNumRef.current) : null,
           visitedPlates: roomsMap && (viewMode === 'world' || peekMap) ? [...visitedPlatesRef.current] : null,
+          /* ПАТРУЛИРОВАНИЕ (v0.52): боссы и NPC с маршрутом рисуются в текущей точке —
+             позиция считается формулой от синхронного старта партии (без сети) */
+          patrolBase: sess.startedAt || 0,
+          patrolNow: Date.now(),
+          patrolFreeze,
         });
 
         /* RUBG: оверлей поверх поля — безопасная зона, самолёт, маркеры игры, радиус атаки,
@@ -3212,8 +3248,17 @@ export default function GameScreen() {
             <div className="absolute inset-0 bg-[rgba(4,6,14,0.7)]" onClick={closeDialog} />
             <div className="relative pixel-panel pixel-corners pop-in w-full max-w-xl max-h-[88vh] overflow-y-auto p-4 space-y-3">
               <div className="flex items-center justify-between gap-2">
-                <span className="font-display uppercase text-sm text-teal">💬 {dlgNpc.def.name}</span>
-                <button onClick={closeDialog} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
+                <span className="font-display uppercase text-sm text-teal truncate">💬 {dlgNpc.def.name}</span>
+                <span className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    onClick={flipHideSeen}
+                    className={`text-[9px] font-display uppercase px-1.5 py-1 border-2 cursor-pointer ${hideSeen ? 'text-teal border-teal/50' : 'text-faint border-edge'}`}
+                    title={hideSeen
+                      ? 'Реплики, которые этот персонаж уже отвечал, свёрнуты («…уже слышали») — кнопка «показать» вернёт текст. Нажмите, чтобы показывать всё.'
+                      : 'Нажмите, чтобы сворачивать реплики, которые персонаж уже отвечал'}
+                  >{hideSeen ? '🙈 сказанное скрыто' : '👁 сказанное видно'}</button>
+                  <button onClick={closeDialog} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
+                </span>
               </div>
 
               {/* КВЕСТЫ NPC: на узле с маркером «📜 квесты на этом узле» (авто-ветка «Есть ли для меня работа?»).
@@ -3253,9 +3298,28 @@ export default function GameScreen() {
                 >🛒 Торговать{discBadge(dlgNpc.npc, fl) > 0 ? ` · скидка ${discBadge(dlgNpc.npc, fl)} %` : ''}</PxBtn>
               )}
 
-              <div className="border-2 border-teal/40 bg-teal/5 px-3 py-2.5">
-                <div className="text-[13px] text-paper leading-snug">{node.text || '…'}</div>
-              </div>
+              {/* v0.52: реплика узла. Тумблер «🙈 сказанное скрыто» сворачивает тексты,
+                  которые персонаж уже отвечал (s.dlgSeen) — вместо текста «…уже слышали»
+                  с кнопкой «показать». Варианты ответа видны всегда. */}
+              {(() => {
+                const seen = hideSeen && !!(s.dlgSeen?.[me]?.[node.id]);
+                return (
+                  <div className="border-2 border-teal/40 bg-teal/5 px-3 py-2.5">
+                    {seen && !revealSeen ? (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-[12px] text-faint italic leading-snug">…вы это уже слышали</span>
+                        <button
+                          onClick={() => { setRevealSeen(true); sfx.hover(); }}
+                          className="text-[10px] text-teal hover:text-paper underline cursor-pointer shrink-0"
+                          title="Показать реплику целиком"
+                        >показать</button>
+                      </div>
+                    ) : (
+                      <div className="text-[13px] text-paper leading-snug">{node.text || '…'}</div>
+                    )}
+                  </div>
+                );
+              })()}
 
               <div className="space-y-1.5">
                 {opts.map((o, oi) => (

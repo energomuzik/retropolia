@@ -3,7 +3,8 @@ import { useApp } from '../store';
 import { AnimPreview, GhostBtn, Ic, Modal, PxBtn, Stepper, Coin } from '../ui';
 import { DialogTreeEditor } from './DialogTreeEditor';
 import { TradeShopEditor } from './TradeEditor';
-import { ensureQuestDialog, ensureShopDialog } from '../dialogHubs';
+import { allDlgFlags, ensureQuestDialog, ensureShopDialog } from '../dialogHubs';
+import { patrolLen, patrolTimeline } from '../patrol';
 import {
   CELL, mapSize, drawBoard, fitView, cellAtPoint, stampAtPoint, animAtPoint, bossAtPoint, cellBox, cellCenter,
   renumberByPath, normCellsLegacy, fixLinksAfterDelete, startCellIdx,
@@ -11,7 +12,7 @@ import {
 import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, GameMap, MapEnding, NpcAnimDef, NpcLibEntry, NpcQuest, NpcShopOffer, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, RubgItemKind, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
+import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, GameMap, MapEnding, NpcAnimDef, NpcLibEntry, NpcQuest, NpcShopOffer, PatrolDef, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, RubgItemKind, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
 import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, normResMode, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileRectOf, RUBG_ITEMS, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
 import type { MapMode } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
@@ -102,6 +103,83 @@ function migrateMap(m: GameMap, libTiles: { id: string; dataUrl: string; gw: num
 
 type Tool = 'select' | 'tile' | 'cell' | 'link' | 'hop' | 'anim' | 'boss' | 'npc' | 'wall' | 'portal' | 'erase' | 'pan';
 
+/* ---------- v0.52: ПАТРУЛИРОВАНИЕ — общий редактор маршрута для NPC и боссов ----------
+   Точка 1 — «дом» персонажа (там, где он стоит в редакторе); обход по кругу 1→2→…→1.
+   Точки таскаются мышью прямо на карте (инструмент «Выбор», кружки с номерами). */
+function PatrolEditor({ patrol, home, onChange, markDirty, color }: {
+  patrol: PatrolDef | undefined;
+  home: { x: number; y: number };
+  onChange: (p: PatrolDef | undefined) => void;
+  markDirty: () => void;
+  color: string;
+}) {
+  const on = !!patrol;
+  const pts = patrol?.pts ?? [];
+  const tl = on && pts.length >= 2 ? patrolTimeline(patrol!) : null;
+  const upd = (patch: Partial<PatrolDef>) => { if (patrol) { onChange({ ...patrol, ...patch }); markDirty(); } };
+  return (
+    <div className="space-y-1.5 border-2 px-2 py-1.5" style={{ borderColor: on ? color : 'var(--color-edge)' }}>
+      <label className="flex items-center justify-between cursor-pointer">
+        <span className="text-[10px]" style={{ color }}>🚶 Патрулирование (ходит по точкам)</span>
+        <input
+          type="checkbox"
+          checked={on}
+          onChange={(ev) => {
+            markDirty();
+            if (!ev.target.checked) onChange(undefined);
+            else onChange({ pts: [{ x: Math.round(home.x), y: Math.round(home.y) }], speed: 40, pause: 1 }); // точка 1 = «дом»
+          }}
+          title={on ? 'Выключить патрулирование — персонаж будет стоять на месте' : 'Включить: точка 1 появится там, где персонаж стоит'}
+        />
+      </label>
+      {on && (
+        <>
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] text-dim shrink-0">Скорость</span>
+            <Stepper value={patrol!.speed ?? 40} onChange={(v) => upd({ speed: v })} min={8} max={300} step={4} suffix=" px/с" />
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] text-dim shrink-0">Пауза</span>
+            <Stepper value={patrol!.pause ?? 1} onChange={(v) => upd({ pause: v })} min={0} max={10} step={1} suffix=" с" />
+          </div>
+          <div className="space-y-0.5">
+            <div className="flex items-center justify-between">
+              <span className="tick-label text-faint">Точки маршрута ({pts.length})</span>
+              <button
+                onClick={() => { const last = pts[pts.length - 1] ?? home; onChange({ ...(patrol!), pts: [...pts, { x: Math.round(last.x) + CELL, y: Math.round(last.y) }] }); markDirty(); sfx.coin(); }}
+                className="text-[9px] font-display uppercase px-1.5 py-0.5 border-2 text-faint hover:text-teal cursor-pointer"
+                style={{ borderColor: 'var(--color-edge)' }}
+                title="Добавить точку правее последней — потом перетащите её мышью на карте"
+              >＋ точка</button>
+            </div>
+            {pts.map((p, i) => (
+              <div key={i} className="flex items-center gap-1 text-[9px] text-dim">
+                <span className="shrink-0" style={{ color }}>{i === 0 ? '🏠' : `№${i + 1}`}</span>
+                <span className="flex-1 min-w-0 truncate">x {Math.round(p.x)} · y {Math.round(p.y)}{i === 0 ? ' (дом)' : ''}</span>
+                <button
+                  onClick={() => {
+                    const rest = pts.filter((_, j) => j !== i);
+                    onChange(rest.length ? { ...(patrol!), pts: rest } : undefined);
+                    markDirty();
+                    sfx.fail();
+                  }}
+                  className="text-faint hover:text-coral cursor-pointer px-0.5"
+                  title={i === 0 ? 'Удалить точку «дом» (маршрут начнётся со следующей)' : 'Удалить точку'}
+                >✕</button>
+              </div>
+            ))}
+          </div>
+          {tl && (
+            <p className="text-[9px] text-faint leading-tight">
+              Маршрут ~{patrolLen(patrol!)} px, полный круг ~{Math.round(tl.total)} с. В игре персонаж ОБХОДИТ точки по кругу со скоростью и паузами. Кружки с номерами на карте ТАСКАЮТСЯ мышью (инструмент «Выбор»). Позиция считается формулой от старта партии — без сетевых сообщений.
+            </p>
+          )}
+          {pts.length < 2 && <p className="text-[9px] text-magma leading-tight">Добавьте ещё хотя бы одну точку («＋ точка» или перетащите) — иначе персонаж стоит на месте.</p>}
+        </>
+      )}
+    </div>
+  );}
+
 const TOOLS: { key: Tool; label: string; hint: string }[] = [
   { key: 'select', label: 'Выбор', hint: 'клик — выбрать тайл/ячейку/анимацию и тянуть мышью · пустое место — двигать камеру' },
   { key: 'tile', label: 'Тайл', hint: 'клик — поставить выбранный тайл; можно тянуть с зажатой кнопкой' },
@@ -189,7 +267,7 @@ export default function MapEditor() {
   const viewRef = useRef(view); viewRef.current = view;
   const mapRef = useRef(map); mapRef.current = map;
   const dragRef = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
-  const objDragRef = useRef<{ kind: 'cell' | 'stamp' | 'anim' | 'boss' | 'npc' | 'wall' | 'portal'; idx: number; dx: number; dy: number; moved: boolean } | null>(null);
+  const objDragRef = useRef<{ kind: 'cell' | 'stamp' | 'anim' | 'boss' | 'npc' | 'wall' | 'portal' | 'patrolNpc' | 'patrolBoss'; idx: number; ptIdx?: number; dx: number; dy: number; moved: boolean } | null>(null);
   const wallDragRef = useRef<{ sx: number; sy: number; ex: number; ey: number } | null>(null); // протягивание НОВОЙ стены
   const portalDragRef = useRef<{ sx: number; sy: number; ex: number; ey: number } | null>(null); // протягивание НОВОГО портала
   const resizeRef = useRef<{ kind: 'stamp' | 'anim' | 'boss' | 'npc'; idx: number } | null>(null); // ресайз тайла/анимации/босса/NPC за уголок
@@ -1360,6 +1438,35 @@ export default function MapEditor() {
       return;
     }
     if (tool === 'select') {
+      /* v0.52: ПАТРУЛЬНЫЕ ТОЧКИ — тянуть кружки маршрута (проверяем ПЕРЕД телами,
+         чтобы точку возле NPC можно было схватить, а не самого NPC) */
+      {
+        const grab = 11 / viewRef.current.zoom;
+        for (let ni = (m.npcs ?? []).length - 1; ni >= 0; ni--) {
+          const pts = (m.npcs ?? [])[ni]?.patrol?.pts ?? [];
+          for (let pi = pts.length - 1; pi >= 0; pi--) {
+            if (Math.hypot(w.x - pts[pi].x, w.y - pts[pi].y) <= grab) {
+              objDragRef.current = { kind: 'patrolNpc', idx: ni, ptIdx: pi, dx: 0, dy: 0, moved: false };
+              setSelNpc((m.npcs ?? [])[ni].id);
+              setSelBoss(null); setSelAnim(null); setSelCell(null); setSelStamp(null);
+              sfx.hover();
+              return;
+            }
+          }
+        }
+        for (let bi = (m.bosses ?? []).length - 1; bi >= 0; bi--) {
+          const pts = (m.bosses ?? [])[bi]?.patrol?.pts ?? [];
+          for (let pi = pts.length - 1; pi >= 0; pi--) {
+            if (Math.hypot(w.x - pts[pi].x, w.y - pts[pi].y) <= grab) {
+              objDragRef.current = { kind: 'patrolBoss', idx: bi, ptIdx: pi, dx: 0, dy: 0, moved: false };
+              setSelBoss((m.bosses ?? [])[bi].id);
+              setSelNpc(null); setSelAnim(null); setSelCell(null); setSelStamp(null);
+              sfx.hover();
+              return;
+            }
+          }
+        }
+      }
       const bi = bossAtPoint(m, w.x, w.y);
       if (bi >= 0) {
         const pb = (m.bosses ?? [])[bi];
@@ -1696,6 +1803,19 @@ export default function MapEditor() {
       else if (od.kind === 'anim') updAnim(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
       else if (od.kind === 'boss') updBoss(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
       else if (od.kind === 'npc') updNpc(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
+      else if (od.kind === 'patrolNpc') {
+        /* v0.52: точка маршрута NPC — без привязки к сетке (свободное место на карте) */
+        const npc = (m.npcs ?? [])[od.idx];
+        if (npc?.patrol && od.ptIdx !== undefined) {
+          updNpc(od.idx, { patrol: { ...npc.patrol, pts: npc.patrol.pts.map((pp, i) => (i === od.ptIdx ? { x: Math.round(w.x), y: Math.round(w.y) } : pp)) } });
+        }
+      }
+      else if (od.kind === 'patrolBoss') {
+        const boss = (m.bosses ?? [])[od.idx];
+        if (boss?.patrol && od.ptIdx !== undefined) {
+          updBoss(od.idx, { patrol: { ...boss.patrol, pts: boss.patrol.pts.map((pp, i) => (i === od.ptIdx ? { x: Math.round(w.x), y: Math.round(w.y) } : pp)) } });
+        }
+      }
       else if (od.kind === 'wall') updWall(od.idx, { x: Math.round(w.x - od.dx), y: Math.round(w.y - od.dy) }); // стены — без привязки к сетке
       else if (od.kind === 'portal') updPortal(od.idx, { x: Math.round(w.x - od.dx), y: Math.round(w.y - od.dy) }); // порталы — без привязки к сетке (точка перехода остаётся на месте)
       else updStamp(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
@@ -1868,6 +1988,12 @@ export default function MapEditor() {
           hoverCell: null,
           sndRadii: true, // пунктирные круги радиусов звука — только в редакторе
           npcs: (m.npcs ?? []).map((n) => ({ npc: n, def: (m.npcLib ?? []).find((x) => x.id === n.nid), done: false })).filter((x): x is { npc: PlacedNpc; def: NpcLibEntry; done: boolean } => !!x.def),
+          /* ПАТРУЛИРОВАНИЕ (v0.52): пунктирные маршруты с точками-кружками (только редактор);
+             в игре маршрут не виден — там персонажи просто ходят */
+          patrolRoutes: [
+            ...(m.npcs ?? []).filter((n) => (n.patrol?.pts ?? []).length >= 2).map((n) => ({ pts: n.patrol!.pts, color: '#2ee6a8' })),
+            ...(m.bosses ?? []).filter((b) => (b.patrol?.pts ?? []).length >= 2).map((b) => ({ pts: b.patrol!.pts, color: '#c07aff' })),
+          ],
         });
         const v = viewRef.current;
         ctx.save();
@@ -3946,6 +4072,16 @@ export default function MapEditor() {
                     </div>
                     <p className="text-[10px] text-[#c07aff] leading-tight">Игрок ВНУТРИ круга победил/проиграл задание — босс ОДИН раз реагирует клипом со своим звуком. Победили задание на ячейке босса и поставили своё — он повержен и замер статичным кадром. 0 = молчит и не реагирует. Круг виден только в редакторе.</p>
                   </div>
+
+                  {/* v0.52: ПАТРУЛИРОВАНИЕ — босс ходит по точкам, пока жив; повержённый замирает */}
+                  <PatrolEditor
+                    patrol={selBossDef.patrol}
+                    home={{ x: selBossDef.x, y: selBossDef.y }}
+                    color="#c07aff"
+                    markDirty={() => { dirtyRef.current = true; }}
+                    onChange={(p) => updBoss(selBossIdx, { patrol: p })}
+                  />
+
                   <p className="text-[10px] text-gold leading-tight">Тяните жёлтый УГОЛОК рамки — меняете размер мышью. Тяните тело — двигаете босса.</p>
 
                   <div className="grid grid-cols-2 gap-1.5">
@@ -3998,8 +4134,17 @@ export default function MapEditor() {
                       <span className="text-[10px] text-teal">💬 Радиус NPC (звук + диалог)</span>
                       <Stepper value={selNpcDef.r ?? 0} onChange={(v) => { updNpc(selNpcIdx, { r: v }); dirtyRef.current = true; }} min={0} max={3000} step={10} suffix=" px" />
                     </div>
-                    <p className="text-[10px] text-teal leading-tight">Внутри круга игрок слышит звук NPC и может открыть диалог (кнопка «ДИАЛОГ» или клавиша E). 0 = молчит и не говорит.</p>
+                    <p className="text-[10px] text-teal leading-tight">Внутри круга игрок слышит звук NPC и может открыть диалог (кнопка «ДИАЛОГ» или клавиша E). 0 = молчит и не говорит. Радиус ХОДИТ ВМЕСТЕ С NPC, если включено патрулирование.</p>
                   </div>
+
+                  {/* v0.52: ПАТРУЛИРОВАНИЕ — NPC ходит по точкам маршрута, как боссы */}
+                  <PatrolEditor
+                    patrol={selNpcDef.patrol}
+                    home={{ x: selNpcDef.x, y: selNpcDef.y }}
+                    color="#2ee6a8"
+                    markDirty={() => { dirtyRef.current = true; }}
+                    onChange={(p) => updNpc(selNpcIdx, { patrol: p })}
+                  />
 
                   {/* ---------- ДИАЛОГИ (v0.51): всё делается на схеме в большом окне ---------- */}
                   <div className="border-2 border-edge px-2 py-2 space-y-2">
@@ -4304,6 +4449,7 @@ export default function MapEditor() {
               dialog={selNpcDef.dialog}
               endings={map.endings ?? []}
               height={470}
+              allFlags={allDlgFlags(map)}
               onChange={(d) => { updNpc(selNpcIdx, { dialog: d }); dirtyRef.current = true; }}
               posStore={map.dlgPos}
               onPosStore={(p) => { updMap({ dlgPos: p ?? undefined }); dirtyRef.current = true; }}
