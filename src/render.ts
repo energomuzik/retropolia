@@ -328,6 +328,9 @@ export interface BoardDrawOpts {
    Передаётся из игры только в общем плане/заглядывании карты мира: все плитки, НЕ вошедшие
    в список, рисуются ПОСЛЕДНИМ слоем залитыми темнотой (карта заполняется по мере исследования). */
   visitedPlates?: number[] | null;
+  /* v0.53: ХАБ-ПЛИТКА (номер с 1) — видна на карте мира ВСЕГДА, туман её не скрывает;
+     на плане рисуется табличка «ХАБ». Ставится в редакторе карт (map.hubPlate). */
+  hubPlate?: number | null;
   /* ---------- ПАТРУЛИРОВАНИЕ (v0.52.0) ----------
    patrolBase — синхронный тик отсчёта (s.startedAt партии); patrolNow — текущий момент.
    Передаются только из игры: у боссов/NPC с маршрутом позиция считается формулой patrolPos.
@@ -1000,9 +1003,11 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     const def = blibDraw.get(pb.bid);
     if (!def) continue;
     /* ПАТРУЛЬ: живой босс стоит в точке маршрута (формула от времени партии);
-       повержённый замерает в точке гибели (patrolFreeze — ts fx bossDef) */
+       повержённый замерает в точке гибели (patrolFreeze — ts fx bossDef, а в QUEST v0.53 —
+       момент победы из qBossDownAt: побеждённый босс больше не патрулирует) */
+    const frozenTs = o.bossDown?.[pb.id] || o.patrolFreeze?.[pb.id] !== undefined ? o.patrolFreeze?.[pb.id] : undefined;
     const pp = pb.patrol && o.patrolBase !== undefined
-      ? patrolPos(pb.patrol, o.patrolBase, o.patrolNow ?? 0, o.bossDown?.[pb.id] ? o.patrolFreeze?.[pb.id] : undefined)
+      ? patrolPos(pb.patrol, o.patrolBase, o.patrolNow ?? 0, frozenTs)
       : null;
     const bx = pp ? pp.x : pb.x;
     const by = pp ? pp.y : pb.y;
@@ -1207,18 +1212,40 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
      ТОЛЬКО ОТКРЫТЫЕ (посещённые) плитки-комнаты; неоткрытые скрыты темнотой с тусклой
      сиреневой рамкой — как в метроидваниях: карта заполняется по мере исследования.
      Ставится после маски комнаты — работает и когда самой маски нет (общий план). */
+  /* ТУМАН ИССЛЕДОВАНИЯ (карта мира в режиме комнат): неоткрытые плитки скрыты темнотой.
+     v0.53: ХАБ-ПЛИТКА (o.hubPlate) туманом НЕ скрывается — точка сбора видна всем
+     с самого начала — и помечается на плане табличкой «ХАБ». */
   if (o.visitedPlates && o.visitedPlates.length > 0) {
     const pm = plateMetrics(map);
     const seen = new Set(o.visitedPlates);
     ctx.save();
     for (let n = 1; n <= pm.total; n++) {
       if (seen.has(n)) continue; // открытая комната видна
+      if (o.hubPlate === n) continue; // хаб виден ВСЕГДА (v0.53)
       const r = plateRectOf(map, n);
       ctx.fillStyle = 'rgba(3,4,9,0.97)';
       ctx.fillRect(r.x - 1, r.y - 1, r.w + 2, r.h + 2);
       ctx.strokeStyle = 'rgba(167,139,250,0.22)'; // тусклая рамка «здесь есть комната»
       ctx.lineWidth = 1.5 / Math.max(0.05, view.zoom);
       ctx.strokeRect(r.x, r.y, r.w, r.h);
+    }
+    /* табличка «ХАБ» на хаб-плитке (видна и сквозь туман, и на открытой комнате) */
+    if (o.hubPlate && o.hubPlate >= 1 && o.hubPlate <= pm.total) {
+      const hr = plateRectOf(map, o.hubPlate);
+      const label = '🏠 ХАБ';
+      ctx.save();
+      ctx.font = 'bold 13px "Courier New", monospace';
+      const tw = ctx.measureText(label).width + 14;
+      const hx = hr.x + hr.w - tw - 8, hy = hr.y + 8;
+      ctx.fillStyle = 'rgba(7,20,14,0.92)';
+      ctx.fillRect(hx, hy, tw, 22);
+      ctx.strokeStyle = 'rgba(46,230,168,0.85)';
+      ctx.lineWidth = 1.6 / Math.max(0.05, view.zoom);
+      ctx.strokeRect(hx, hy, tw, 22);
+      ctx.fillStyle = '#2ee6a8';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, hx + 7, hy + 12);
+      ctx.restore();
     }
     ctx.restore();
   }

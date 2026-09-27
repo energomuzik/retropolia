@@ -1,23 +1,28 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DialogNode, GameMap, MapEnding, NpcDialog } from '../types';
 
-/* СХЕМА ДЕРЕВЬЕВ ДИАЛОГОВ (v0.51.0) — ГЛАВНАЯ ПОВЕРХНОСТЬ РЕДАКТИРОВАНИЯ, граф в духе ComfyUI.
+/* СХЕМА ДЕРЕВЬЕВ ДИАЛОГОВ (v0.53.0) — ГЛАВНАЯ ПОВЕРХНОСТЬ РЕДАКТИРОВАНИЯ, граф в духе ComfyUI.
    Список узлов-плиток убран — дерево делается ЦЕЛИКОМ на схеме:
-   • создать узел: кнопка «＋ Узел», двойной клик по фону, или перетаскивание нити из
-     сокета варианта на ПУСТОЕ место (узел создастся и сразу привяжется);
+   • создать узел: кнопка «＋ Узел» или ДВОЙНОЙ КЛИК по фону (v0.53: нить, брошенная
+     на пустое место, БОЛЬШЕ НЕ создаёт узел — она просто отменяется);
    • СОЕДИНИТЬ: потяните нить из круглого сокета варианта и бросьте на другой узел —
      вариант «Далее:» привяжется к нему;
    • РАЗЪЕДИНИТЬ: нажмите ✕ на середине нити — вариант снова ведёт в конец диалога;
      нить, брошенная на золотую плашку КОНЦОВКИ, назначает варианту эту концовку
      (✕ на золотой нити — снять концовку);
+   • КОНЦОВКИ (v0.53): внизу схемы — ВСЕ концовки карты; ставятся кнопкой «＋ Концовка»
+     прямо из схемы (и в личном дереве, и на общей схеме карты);
    • на узле: «＋ ответ» добавляет вариант, ✕ у строки удаляет вариант, ✕ в шапке
      удаляет узел (ссылки на него очищаются);
    • клик по узлу выбирает его — текст и свойства правятся в панели под холстом;
    • узлы ПЕРЕТАСКИВАЮТСЯ мышью/пальцем — позиции сохраняются в карту (map.dlgPos);
-   • холст панорамируется перетаскиванием фона, зум — колесом мыши и кнопками «＋/−»;
+   • холст панорамируется перетаскиванием фона; МАСШТАБ — ТОЛЬКО кнопками «＋/−/⤢»
+     (v0.53: зум колесом УБРАН — колесо не уводит окно вверх, прокрутка — ползунком);
    • «Собрать» раскладывает дерево заново по глубине (BFS от стартового узла);
-   • цвета нитей: бирюзовая — «Далее:», золотая — КОНЦОВКА, янтарный пунктир — флаг
-     (вариант слева ставит флаг, вариант справа без него скрыт), серая точка — конец;
+   • ЦВЕТА НИТЕЙ (v0.53): у каждого варианта ответа — СВОЙ цвет (нить, сокет и подпись
+     окрашены одинаково — видно, какая нить куда идёт); золотая — КОНЦОВКА, янтарный
+     пунктир — флаг (вариант слева ставит флаг, вариант справа без него скрыт), серая
+     точка — конец;
    • QuestMapGraph — ОБЩАЯ схема карты: все NPC, их деревья, КВЕСТЫ и КОНЦОВКИ
      на одном холсте — здесь можно СТАВИТЬ концовки и тянуть нити ответов к ним. */
 
@@ -30,6 +35,11 @@ const C_GOLD = '#ffcf3f';
 const C_AMBER = '#ffb347';
 const C_EDGE = '#313c72';
 const C_FAINT = '#5a6491';
+
+/* v0.53: ЦВЕТ НИТИ ПО НОМЕРУ ВАРИАНТА — нити от одного окошка больше не сливаются:
+   у каждого варианта ответа свой цвет (нить, сокет и подпись окрашены одинаково) */
+export const VAR_COLORS = ['#2ee6a8', '#5aa9ff', '#ff8b3f', '#c07aff', '#ffcf3f', '#ff5d73', '#4dd0e1', '#9be84d', '#f6a5c0', '#a7f3eb'];
+export const varColor = (optIdx: number): string => VAR_COLORS[((optIdx % VAR_COLORS.length) + VAR_COLORS.length) % VAR_COLORS.length];
 
 export type DlgPos = { x: number; y: number };
 export type DlgPosMap = { [key: string]: DlgPos };
@@ -46,6 +56,9 @@ export type DlgEditOps = {
   /* v0.52: правка текста ПРЯМО В ОКНЕ УЗЛА на схеме (без панели внизу) */
   setText: (nodeId: string, text: string) => void;
   setOptText: (nodeId: string, optIdx: number, text: string) => void;
+  /* v0.53: КОНЦОВКИ ПРЯМО НА СХЕМЕ — ставятся кнопкой «＋ Концовка» над холстом */
+  addEnding?: () => void;
+  delEnding?: (id: string) => void;
 };
 
 /* Операции ОБЩЕЙ схемы (для QuestMapGraph): всё то же, но с указанием NPC. */
@@ -74,6 +87,11 @@ const optRowY = (n: DialogNode, p: DlgPos, oi: number, extra = 0): number =>
   p.y + 26 + extra + (wrap(n.text).length ? wrap(n.text).length * 13 + 6 : 16) + oi * ROW_H + ROW_H / 2;
 
 export const tr = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+/* hex → rgba с прозрачностью (заливка сокетов цветом своего варианта) */
+const hexA = (hex: string, a: number): string => {
+  const h = hex.replace('#', '');
+  return `rgba(${parseInt(h.slice(0, 2), 16)},${parseInt(h.slice(2, 4), 16)},${parseInt(h.slice(4, 6), 16)},${a})`;
+};
 /** Разбивка реплики на строки ≤ w символов, максимум 3 строки (дальше — многоточие). */
 export function wrap(s: string, w = 32): string[] {
   const words = (s || '').split(/\s+/).filter(Boolean);
@@ -206,10 +224,8 @@ function GraphViewport({ height, bbox, fitKey, zoomRef, vtRef, onBgDblClick, chi
         height={height}
         className="block cursor-grab active:cursor-grabbing"
         style={{ background: 'repeating-conic-gradient(#0a0d1c 0 25%, #0b0e1c 0 50%) 0 0 / 22px 22px', border: '2px solid #23294d' }}
-        onWheel={(e) => {
-          const r = (e.currentTarget as SVGSVGElement).getBoundingClientRect();
-          zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX - r.left, e.clientY - r.top);
-        }}
+        /* v0.53: onWheel УБРАН — колесо мыши больше не масштабирует схему и не уводит
+           окно вверх; масштаб — кнопками «＋/−/⤢» справа вверху, прокрутка окна — ползунком */
         onPointerDown={(e) => {
           if ((e.target as Element).closest('[data-node]')) return; // узлы и нити тянут себя сами
           panRef.current = { sx: e.clientX, sy: e.clientY, vx: vt?.x ?? 0, vy: vt?.y ?? 0 };
@@ -238,7 +254,7 @@ function GraphViewport({ height, bbox, fitKey, zoomRef, vtRef, onBgDblClick, chi
         <button onClick={() => fitRef.current()} className="px-2 py-0.5 border-2 border-edge bg-[rgba(7,9,18,0.9)] text-dim font-display text-[9px] uppercase cursor-pointer hover:text-gold" title="Вписать схему в окно">⤢ Вписать</button>
       </div>
       <div className="absolute left-1.5 bottom-1.5 px-1.5 py-0.5 text-[8px] text-faint font-pixel bg-[rgba(7,9,18,0.85)] border border-[#23294d] pointer-events-none">
-        колесо — масштаб · тяните фон — панорама · тяните узел — переместить · нить из сокета — соединить
+        масштаб — кнопки ＋/− справа вверху · тяните фон — панорама · тяните узел — переместить · нить из сокета — соединить · двойной клик по фону — новый узел
       </div>
     </div>
   );
@@ -257,13 +273,13 @@ function Edge({ x1, y1, x2, y2, color, dashed, opacity = 1 }: {
   );
 }
 
-/* подпись на нити (текст варианта ответа) */
+/* подпись на нити (текст варианта ответа) — окрашена ЦВЕТОМ СВОЕЙ нити */
 function EdgeLabel({ x, y, text, color }: { x: number; y: number; text: string; color: string }) {
   const w = text.length * 5.3 + 10;
   return (
     <g>
       <rect x={x - w / 2} y={y - 8} width={w} height={15} rx={3} fill="#0b0e1c" stroke={color} strokeWidth={0.8} opacity={0.92} />
-      <text x={x} y={y + 3} textAnchor="middle" fontSize={9} className="font-pixel" fill={color === C_GOLD ? C_GOLD : '#9aa3c7'}>{text}</text>
+      <text x={x} y={y + 3} textAnchor="middle" fontSize={9} className="font-pixel" fill={color}>{text}</text>
     </g>
   );
 }
@@ -397,12 +413,15 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
   };
   const closeEdit = () => { setEdit(null); setEditH(0); };
 
-  /* концовки, выбранные вариантами этого дерева, — золотые плашки в нижнем ряду */
-  const usedEndings = useMemo(() => {
-    const ids: string[] = [];
-    for (const n of nodes) for (const o of n.opts ?? []) if (o.ending && !ids.includes(o.ending)) ids.push(o.ending);
-    return ids.map((id) => ({ id, e: endings.find((x) => x.id === id) })).filter((x): x is { id: string; e: MapEnding } => !!x.e);
-  }, [nodes, endings]);
+  /* v0.53: внизу схемы — ВСЕ концовки карты (не только уже привязанные):
+     в любую можно бросить нить варианта; непривязанные — чуть приглушены.
+     usedEndIds — какие концовки уже выбраны вариантами этого дерева */
+  const usedEndIds = useMemo(() => {
+    const sset = new Set<string>();
+    for (const n of nodes) for (const o of n.opts ?? []) if (o.ending) sset.add(o.ending);
+    return sset;
+  }, [nodes]);
+  const endRow = endings;
 
   const hs = useMemo(() => {
     const m: Record<string, number> = {};
@@ -414,12 +433,12 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
   const xs = Object.values(layout).map((p) => p.x);
   const bottomY = (ys.length ? Math.max(...ys) : 0) + Math.max(...Object.values(hs), NH_MIN);
   const endY = bottomY + 78;
-  const endRowW = usedEndings.length ? 40 + usedEndings.length * 236 : 0;
+  const endRowW = endRow.length ? 40 + endRow.length * 236 : 0;
   const bbox: BBox = {
     x0: Math.min(0, ...(xs.length ? xs : [0])) - 20,
     y0: Math.min(0, ...(ys.length ? ys : [0])) - 20,
     x1: Math.max(NW + 80, endRowW, ...(xs.length ? xs.map((x) => x + NW) : [NW + 80])) + 20,
-    y1: usedEndings.length ? endY + 10 : bottomY + 30,
+    y1: endRow.length ? endY + 10 : bottomY + 30,
   };
 
   const toCanvas = (clientX: number, clientY: number): { x: number; y: number } => {
@@ -477,10 +496,9 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
     return null;
   };
   const hitEnding = (pt: { x: number; y: number }): string | null => {
-    for (let i = usedEndings.length - 1; i >= 0; i--) {
-      const u = usedEndings[i];
+    for (let i = endRow.length - 1; i >= 0; i--) {
       const ex = 40 + i * 236;
-      if (pt.x >= ex && pt.x <= ex + 216 && pt.y >= endY - 44 && pt.y <= endY - 4) return u.id;
+      if (pt.x >= ex && pt.x <= ex + 216 && pt.y >= endY - 44 && pt.y <= endY - 4) return endRow[i].id;
     }
     return null;
   };
@@ -498,8 +516,8 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
     if (endId && endId !== lk.nodeId) { ops.setNext(lk.nodeId, lk.optIdx, endId); return; }
     const endE = hitEnding(pt);
     if (endE) { ops.setEnding(lk.nodeId, lk.optIdx, endE); return; }
-    /* бросили на пустое место — создать узел и сразу привязать */
-    ops.addNode({ x: pt.x - NW / 2, y: pt.y - 20 }, { nodeId: lk.nodeId, optIdx: lk.optIdx });
+    /* v0.53: бросили на пустое место — НИЧЕГО НЕ ДЕЛАЕМ (узел больше не создаётся;
+       новый узел — двойной клик по фону или кнопка «＋ Узел») */
   };
 
   const addAtCenter = () => {
@@ -516,7 +534,7 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
       <div className="flex items-center gap-2 flex-wrap">
         <span className="tick-label text-teal">🌳 Схема дерева</span>
         <span className="tick-label text-faint hidden md:inline">
-          <span style={{ color: C_TEAL }}>— далее</span> · <span style={{ color: C_GOLD }}>— концовка</span> · <span style={{ color: C_AMBER }}>⬚ флаг</span> · тяните нить из ○ · двойной клик по узлу — править реплику · клик по ответу — править его
+          <span style={{ color: C_AMBER }}>цвет нити = цвет её варианта</span> · <span style={{ color: C_GOLD }}>— концовка</span> · <span style={{ color: C_AMBER }}>⬚ флаг</span> · тяните нить из ○ · двойной клик по узлу — править реплику · клик по ответу — править его
         </span>
         <span className="ml-auto flex items-center gap-1">
           {ops && (
@@ -525,6 +543,13 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
               className="px-2 py-0.5 border-2 border-teal/60 text-teal font-display text-[9px] uppercase hover:bg-teal/10 cursor-pointer"
               title="Создать узел-вопрос в центре холста (ещё можно двойным кликом по фону)"
             >＋ Узел</button>
+          )}
+          {ops?.addEnding && (
+            <button
+              onClick={() => ops.addEnding && ops.addEnding()}
+              className="px-2 py-0.5 border-2 border-gold/60 text-gold font-display text-[9px] uppercase hover:bg-gold/10 cursor-pointer"
+              title="Поставить НОВУЮ концовку карты — она появится золотой плашкой внизу схемы; бросьте на неё нить варианта"
+            >＋ Концовка</button>
           )}
           {onPos && (
             <button
@@ -543,15 +568,16 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
         vtRef={vtRef}
         onBgDblClick={ops ? (p) => ops.addNode({ x: p.x - NW / 2, y: p.y - 20 }) : undefined}
       >
-        {/* временная нить под курсором */}
+        {/* временная нить под курсором — цвета СВОЕГО варианта (v0.53) */}
         {linkRef.current && (() => {
           const lk = linkRef.current;
           const src = nodes.find((n) => n.id === lk.nodeId);
           const p = layout[lk.nodeId];
           if (!src || !p) return null;
-          return <Edge x1={p.x + NW - 12} y1={optRowY(src, p, lk.optIdx)} x2={lk.x} y2={lk.y} color={C_TEAL} dashed opacity={0.9} />;
+          const lkOpt = (src.opts ?? [])[lk.optIdx];
+          return <Edge x1={p.x + NW - 12} y1={optRowY(src, p, lk.optIdx)} x2={lk.x} y2={lk.y} color={lkOpt?.ending ? C_GOLD : varColor(lk.optIdx)} dashed opacity={0.9} />;
         })()}
-        {/* связи «Далее», концы и концовки */}
+        {/* связи «Далее», концы и концовки — ЦВЕТ НИТИ = ЦВЕТ ВАРИАНТА (v0.53) */}
         {nodes.map((n) => {
           const p = layout[n.id];
           if (!p) return null;
@@ -559,20 +585,21 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
           return opts.map((o, oi) => {
             const sx = p.x + NW - 12;
             const sy = optRowY(n, p, oi, extraOf(n.id));
+            const vc = o.ending ? C_GOLD : varColor(oi); // цвет нити этого варианта
             if (o.next && byId.has(o.next)) {
               const tp = layout[o.next];
               if (!tp) return null;
               const mx = (sx + tp.x) / 2, my = (sy + tp.y + 26) / 2;
               return (
                 <g key={`${n.id}:${oi}`}>
-                  <Edge x1={sx} y1={sy} x2={tp.x} y2={tp.y + 26} color={o.ending ? C_GOLD : C_TEAL} opacity={0.85} />
-                  {ops && <EdgeCut x={mx} y={my} color={o.ending ? C_GOLD : C_TEAL} onCut={() => ops.setNext(n.id, oi, undefined)} title="Разъединить: вариант снова ведёт в конец диалога" />}
-                  <EdgeLabel x={mx} y={my - 11} text={tr(o.text || '(без текста)', 20)} color={o.ending ? C_GOLD : C_TEAL} />
+                  <Edge x1={sx} y1={sy} x2={tp.x} y2={tp.y + 26} color={vc} opacity={0.85} />
+                  {ops && <EdgeCut x={mx} y={my} color={vc} onCut={() => ops.setNext(n.id, oi, undefined)} title="Разъединить: вариант снова ведёт в конец диалога" />}
+                  <EdgeLabel x={mx} y={my - 11} text={tr(o.text || '(без текста)', 20)} color={vc} />
                 </g>
               );
             }
-            if (o.ending && usedEndings.some((u) => u.id === o.ending)) {
-              const i = usedEndings.findIndex((u) => u.id === o.ending);
+            if (o.ending && endRow.some((u) => u.id === o.ending)) {
+              const i = endRow.findIndex((u) => u.id === o.ending);
               const ex = 40 + i * 236 + 108;
               const ey = endY - 44;
               const mx = (sx + ex) / 2, my = (sy + ey) / 2;
@@ -708,17 +735,17 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
                         )}
                       </>
                     )}
-                    {/* сокет: тянуть из него нить */}
+                    {/* сокет: тянуть из него нить — окрашен ЦВЕТОМ СВОЕГО ВАРИАНТА (v0.53) */}
                     <circle
                       cx={p.x + NW - 12} cy={ry} r={5}
-                      fill={o.ending ? 'rgba(255,207,63,0.25)' : 'rgba(46,230,168,0.25)'}
-                      stroke={o.ending ? C_GOLD : C_TEAL} strokeWidth={1.4}
+                      fill={o.ending ? 'rgba(255,207,63,0.25)' : hexA(varColor(oi), 0.25)}
+                      stroke={o.ending ? C_GOLD : varColor(oi)} strokeWidth={1.4}
                       className={ops ? 'cursor-crosshair' : ''}
                       onPointerDown={ops ? linkDown(n.id, oi) : undefined}
                       onPointerMove={ops ? linkMove : undefined}
                       onPointerUp={ops ? linkUp : undefined}
                     />
-                    <title>{ops ? 'Тяните нить: бросьте на узел — привязать «Далее», на концовку — назначить концовку, на пустое место — новый узел' : ''}</title>
+                    <title>{ops ? 'Тяните нить: бросьте на узел — привязать «Далее», на золотую плашку — назначить концовку; на пустое место — нить отменится' : ''}</title>
                   </g>
                 );
               })}
@@ -734,14 +761,24 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
             </g>
           );
         })}
-        {/* концовки — золотые плашки в нижнем ряду (в них можно бросать нити) */}
-        {usedEndings.map((u, i) => {
+        {/* концовки — золотые плашки в нижнем ряду: ВСЕ концовки карты (v0.53);
+            в них можно бросать нити вариантов; «＋ Концовка» ставит новую прямо здесь */}
+        {endRow.map((e, i) => {
           const ex = 40 + i * 236;
+          const used = usedEndIds.has(e.id);
           return (
-            <g key={u.id} data-node="1">
+            <g key={e.id} data-node="1" opacity={used ? 1 : 0.55}>
               <rect x={ex} y={endY - 44} width={216} height={40} rx={5} fill="#191204" stroke={C_GOLD} strokeWidth={1.8} />
-              <text x={ex + 10} y={endY - 30} fontSize={9} className="font-display" fill={C_GOLD}>🎬 КОНЦОВКА</text>
-              <text x={ex + 10} y={endY - 15} fontSize={9.5} className="font-pixel" fill="#ffe9ad">{tr(u.e.name || '(без названия)', 28)}</text>
+              <text x={ex + 10} y={endY - 30} fontSize={9} className="font-display" fill={C_GOLD}>🎬 КОНЦОВКА{used ? '' : ' · свободная'}</text>
+              <text x={ex + 10} y={endY - 15} fontSize={9.5} className="font-pixel" fill="#ffe9ad">{tr(e.name || '(без названия)', 28)}</text>
+              <title>{used ? 'Концовка выбрана вариантом этого дерева' : 'Свободная концовка: бросьте на неё нить варианта ответа'}</title>
+              {ops?.delEnding && (
+                <g className="cursor-pointer" onPointerDown={(ev) => { ev.stopPropagation(); ops.delEnding && ops.delEnding(e.id); }}>
+                  <rect x={ex + 200} y={endY - 40} width={12} height={12} rx={3} fill="rgba(255,93,115,0.12)" stroke="rgba(255,93,115,0.55)" strokeWidth={0.8} />
+                  <text x={ex + 206} y={endY - 31} textAnchor="middle" fontSize={8} fill="#ff5d73">✕</text>
+                  <title>Удалить концовку (нити и выбор «Концовка:» у вариантов очистятся)</title>
+                </g>
+              )}
             </g>
           );
         })}
@@ -918,7 +955,8 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
     }
     const endE = hitEndingKey(pt);
     if (endE) { ops.setEnding(lk.npcId, lk.nodeId, lk.optIdx, endE); return; }
-    ops.addNode(lk.npcId, { x: pt.x - NW / 2, y: pt.y - 20 }, { nodeId: lk.nodeId, optIdx: lk.optIdx });
+    /* v0.53: бросили на пустое место — нить ОТМЕНЯЕТСЯ (узлы создаёт двойной клик
+       по фону личного дерева NPC и кнопка «＋ Узел») */
   };
 
   if (npcs.length === 0 && endings.length === 0) {
@@ -934,7 +972,7 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
       <div className="flex items-center gap-2 flex-wrap">
         <span className="tick-label text-teal">🗺 Схема карты</span>
         <span className="tick-label text-faint hidden md:inline">
-          <span style={{ color: C_TEAL }}>— далее</span> · <span style={{ color: C_GOLD }}>— к концовке</span> · <span style={{ color: C_AMBER }}>⬚ флаг открывает</span> · клик по узлу — открыть NPC
+          <span style={{ color: C_AMBER }}>цвет нити = цвет её варианта</span> · <span style={{ color: C_GOLD }}>— к концовке</span> · <span style={{ color: C_AMBER }}>⬚ флаг открывает</span> · клик по узлу — открыть NPC
         </span>
         <span className="ml-auto flex items-center gap-1">
           {ops?.addEnding && (
@@ -950,13 +988,14 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
         </span>
       </div>
       <GraphViewport height={height} bbox={bbox} fitKey={`map|${npcs.length}|${endings.length}`} zoomRef={zoomRef} vtRef={vtRef}>
-        {/* временная нить */}
+        {/* временная нить — цвета СВОЕГО варианта (v0.53) */}
         {linkRef.current && (() => {
           const lk = linkRef.current;
           const src = nodeOfKey(lk.nodeId);
           const p = layout[`n:${lk.nodeId}`];
           if (!src || !p) return null;
-          return <Edge x1={p.x + NW - 12} y1={optRowY(src.node, p, lk.optIdx)} x2={lk.x} y2={lk.y} color={C_TEAL} dashed opacity={0.9} />;
+          const lkOpt = (src.node.opts ?? [])[lk.optIdx];
+          return <Edge x1={p.x + NW - 12} y1={optRowY(src.node, p, lk.optIdx)} x2={lk.x} y2={lk.y} color={lkOpt?.ending ? C_GOLD : varColor(lk.optIdx)} dashed opacity={0.9} />;
         })()}
         {/* плашки NPC, квестов и связи с корнем дерева */}
         {npcs.map((npc) => {
@@ -991,7 +1030,7 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
             </g>
           );
         })}
-        {/* связи деревьев: «Далее», концовки, концы, флаги, подписи */}
+        {/* связи деревьев: «Далее», концовки, концы, флаги, подписи — ЦВЕТ НИТИ = ЦВЕТ ВАРИАНТА (v0.53) */}
         {npcs.map((npc) => {
           const dlg = npc.dialog as NpcDialog;
           const byId = new Map(dlg.nodes.map((n) => [n.id, n]));
@@ -1005,15 +1044,16 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
                 return opts.map((o, oi) => {
                   const sx = p.x + NW - 12;
                   const sy = optRowY(n, p, oi, extraOf(n.id));
+                  const vc = o.ending ? C_GOLD : varColor(oi);
                   if (o.next && byId.has(o.next)) {
                     const tp = P(o.next);
                     if (!tp) return null;
                     const mx = (sx + tp.x) / 2, my = (sy + tp.y + 26) / 2;
                     return (
                       <g key={`${n.id}:${oi}`}>
-                        <Edge x1={sx} y1={sy} x2={tp.x} y2={tp.y + 26} color={o.ending ? C_GOLD : C_TEAL} opacity={0.8} />
-                        {ops && <EdgeCut x={mx} y={my} color={o.ending ? C_GOLD : C_TEAL} onCut={() => ops.setNext(npc.id, n.id, oi, undefined)} title="Разъединить" />}
-                        <EdgeLabel x={mx} y={my - 11} text={tr(o.text || '(без текста)', 18)} color={o.ending ? C_GOLD : C_TEAL} />
+                        <Edge x1={sx} y1={sy} x2={tp.x} y2={tp.y + 26} color={vc} opacity={0.8} />
+                        {ops && <EdgeCut x={mx} y={my} color={vc} onCut={() => ops.setNext(npc.id, n.id, oi, undefined)} title="Разъединить" />}
+                        <EdgeLabel x={mx} y={my - 11} text={tr(o.text || '(без текста)', 18)} color={vc} />
                       </g>
                     );
                   }
@@ -1123,8 +1163,8 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
                       )}
                       <circle
                         cx={p.x + NW - 12} cy={ry} r={5}
-                        fill={o.ending ? 'rgba(255,207,63,0.25)' : 'rgba(46,230,168,0.25)'}
-                        stroke={o.ending ? C_GOLD : C_TEAL} strokeWidth={1.4}
+                        fill={o.ending ? 'rgba(255,207,63,0.25)' : hexA(varColor(oi), 0.25)}
+                        stroke={o.ending ? C_GOLD : varColor(oi)} strokeWidth={1.4}
                         className={ops ? 'cursor-crosshair' : ''}
                         onPointerDown={ops ? linkDown(npc.id, n.id, oi) : undefined}
                         onPointerMove={ops ? linkMove : undefined}
@@ -1163,7 +1203,7 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
         })}
       </GraphViewport>
       <p className="text-[9px] text-faint leading-tight">
-        Золотые стрелки показывают, какой вариант ответа ведёт к КОНЦОВКЕ; синие плашки — КВЕСТЫ NPC; янтарный пунктир — флаг: вариант слева его ставит, вариант справа без него скрыт{ops ? '. Нить из сокета ○ бросьте на КОНЦОВКУ — назначите её варианту; на пустое место — создадится узел у этого NPC' : ''}. Двойной клик по узлу — править реплику, клик по ответу — править его. Узлы перетаскиваются — схема сохранится в карту.
+        Цвет нити = цвет её варианта ответа; золотая стрелка ведёт к КОНЦОВКЕ; синие плашки — КВЕСТЫ NPC; янтарный пунктир — флаг: вариант слева его ставит, вариант справа без него скрыт{ops ? '. Нить из сокета ○ бросьте на КОНЦОВКУ — назначите её варианту. Двойной клик по узлу — править реплику, клик по ответу — править его. Узлы перетаскиваются — схема сохранится в карту.' : ''}
       </p>
     </div>
   );

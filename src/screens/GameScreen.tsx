@@ -503,19 +503,15 @@ export default function GameScreen() {
   const [dlgNpcId, setDlgNpcId] = useState<string | null>(null);
   const [dlgNode, setDlgNode] = useState<string | null>(null);
   const [tradeNpcId, setTradeNpcId] = useState<string | null>(null); // v0.51: открыто окно торговли с NPC
-  /* v0.52: скрывать реплики, которые персонаж уже отвечал (настройка запоминается);
+  /* v0.53: скрывать реплики, которые персонаж уже отвечал (настройка ТОЛЬКО НА ТЕКУЩУЮ
+     СЕССИЮ — между партиями больше не запоминается; при загрузке сохранения метки
+     «уже слышали» возвращаются вместе с партией — они часть сейва);
      revealSeen — временно показать текст текущего узла кнопкой «показать» */
-  const [hideSeen, setHideSeen] = useState<boolean>(() => {
-    try { return localStorage.getItem('retropolia_hideSeen') !== '0'; } catch { return true; }
-  });
+  const [hideSeen, setHideSeen] = useState<boolean>(true);
   const [revealSeen, setRevealSeen] = useState(false);
   useEffect(() => { setRevealSeen(false); }, [dlgNode, dlgNpcId]);
   const flipHideSeen = () => {
-    setHideSeen((v) => {
-      const nv = !v;
-      try { localStorage.setItem('retropolia_hideSeen', nv ? '1' : '0'); } catch { /* noop */ }
-      return nv;
-    });
+    setHideSeen((v) => !v);
     sfx.hover();
   };
   const dlgNpc = nearNpc && dlgNpcId === nearNpc.npc.id ? nearNpc : (dlgNpcId ? (() => {
@@ -624,7 +620,9 @@ export default function GameScreen() {
         const pBaseA = sess.startedAt || 0;
         const pNowA = Date.now();
         for (const pb of m.bosses ?? []) {
-          if (sess.bossDown?.[pb.id]) continue;
+          /* v0.53: повержённый молчит — и в классике (bossDown), и для того, кто
+             победил его в QUEST (свой qBossDown у каждого игрока) */
+          if (sess.bossDown?.[pb.id] || (isQuestMode(m.mode) && (sess.qBossDown?.[cur.selfId] ?? []).includes(pb.id))) continue;
           const def = blib.get(pb.bid);
           if (!def?.idleSnd || !pb.r || pb.r <= 0) continue;
           const bpp = pb.patrol ? patrolPos(pb.patrol, pBaseA, pNowA) : null;
@@ -653,6 +651,53 @@ export default function GameScreen() {
     const t = setInterval(() => setTick((x) => x + 1), 500);
     return () => clearInterval(t);
   }, []);
+
+  /* ---------- v0.53: ЗАХВАТ ИГРОКА ПАТРУЛЬНЫМ БОССОМ ----------
+     Клиент проверяет СВОЮ фишку (каждые ~0.4 с): если живой ДЛЯ МЕНЯ ПАТРУЛЬНЫЙ босс
+     подошёл вплотную (радиус босса b.r или 1.5 клетки) — шлём action bossCapture;
+     хост проверяет дистанцию/кулдаун и мгновенно переносит фишку на СТАРТОВУЮ ячейку
+     (там её ждёт задание) + пишет в лог. Стоячие (не патрульные) боссы не хватают. */
+  const captureCdRef = useRef(0);
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      const cur = useApp.getState();
+      const sess = cur.session;
+      const mp = cur.sessionMap;
+      if (!mp || !sess || sess.phase !== 'playing' || !isQuestMode(mp.mode)) return;
+      const self = sess.players.find((x) => x.id === cur.selfId);
+      if (!self || !self.alive || self.spect) return;
+      const myPos = sess.journeyPos?.[cur.selfId];
+      if (!myPos) return;
+      const now = Date.now();
+      if (now < captureCdRef.current) return;
+      const base = sess.startedAt || 0;
+      for (const b of mp.bosses ?? []) {
+        if (sess.bossDown?.[b.id]) continue;
+        if ((sess.qBossDown?.[cur.selfId] ?? []).includes(b.id)) continue; // мною повержен — не трогает
+        if (!b.patrol || (b.patrol.pts ?? []).length < 2) continue; // не патрулирует — не хватает
+        const bp = patrolPos(b.patrol, base, now);
+        if (!bp) continue;
+        const capR = b.r && b.r > 0 ? b.r : CELL * 1.5;
+        if (Math.hypot(myPos.x - bp.x, myPos.y - bp.y) <= capR) {
+          captureCdRef.current = now + 2000; // не спамим action'ами — хост сам ставит свой кулдаун 6 с
+          dispatch({ t: 'bossCapture', id: cur.selfId, bossId: b.id });
+          break;
+        }
+      }
+    }, 400);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* v0.53: звуковой сигнал и короткая тряска при захвате (факт захвата — s.qCaptureAt) */
+  const lastCaptureRef = useRef(0);
+  const myCaptureTs = isQuest && s ? s.qCaptureAt?.[me] : undefined;
+  useEffect(() => {
+    if (myCaptureTs && myCaptureTs !== lastCaptureRef.current) {
+      lastCaptureRef.current = myCaptureTs;
+      sfx.alarm();
+    }
+  }, [myCaptureTs]);
 
   /* ---------- полный экран эмулятора ---------- */
   useEffect(() => {
@@ -1247,10 +1292,14 @@ export default function GameScreen() {
                 prevRoomRef.current = pn;
               }
               roomNumRef.current = pn;
-              /* ТУМАН ИССЛЕДОВАНИЯ: посещённая комната остаётся ОТКРЫТОЙ на карте мира */
+              /* ТУМАН ИССЛЕДОВАНИЯ: посещённая комната остаётся ОТКРЫТОЙ на карте мира.
+                 v0.53 СИНХРОНИЗАЦИЯ ОТКРЫТЫХ КОМНАТ: открытие уходит хосту (action
+                 plateSeen → s.openPlates), и комната открывается на карте мира
+                 у ВСЕЙ команды — карту исследуем сообща. */
               if (!visitedPlatesRef.current.has(pn)) {
                 visitedPlatesRef.current.add(pn);
                 setVisitedCnt(visitedPlatesRef.current.size);
+                dispatch({ t: 'plateSeen', id: me, plate: pn });
               }
               setRoomNumUi((u) => (u === pn ? u : pn));
               const pr = plateRectOf(m, pn);
@@ -1314,6 +1363,20 @@ export default function GameScreen() {
           if (t - st >= durMs) continue; // реакция доиграла — обратно к idle
           bossFx[b.id] = { frames: clip.frames, fps: clip.fps, start: st };
         }
+        /* v0.53: БОСС БОЛЬШЕ НЕ ПАТРУЛИРУЕТ ПОСЛЕ ПОБЕДЫ. В QUEST у каждого игрока свой
+           прогресс: боссы, повержённые МНОЙ, замирают в точке гибели (момент победы —
+           sess.qBossDownAt, пишется хостом) и показываются мне побеждёнными; у остальных
+           игроков они живы, пока не победят их сами. */
+        const myDownList = isQuest && me ? (sess.qBossDown?.[me] ?? []) : [];
+        const bossDownMerged: Record<string, boolean> = { ...(sess.bossDown ?? {}) };
+        if (myDownList.length) {
+          const myAt = sess.qBossDownAt?.[me] ?? {};
+          for (const bid of myDownList) {
+            bossDownMerged[bid] = true;
+            const ts = myAt[bid];
+            if (ts && patrolFreeze[bid] === undefined) patrolFreeze[bid] = ts;
+          }
+        }
 
         // ЛОКАЛЬНЫЕ моменты разбития ячеек — для короткой анимации осколков.
         // Запоминаем первый кадр, когда ячейка увидена разбитой; убрали — чистим.
@@ -1346,13 +1409,18 @@ export default function GameScreen() {
           mystery: mysteryRef.current,
           broken: sess.broken,
           brokenAt: brokenAtRef.current,
-          bossDown: sess.bossDown,
+          bossDown: bossDownMerged,
           bossFx,
           /* РЕЖИМ КОМНАТ: темнота за пределами текущей плитки-комнаты.
              ТУМАН ИССЛЕДОВАНИЯ: на карте мира (общий план/заглядывание) НЕОТКРЫТЫЕ
-             плитки тоже скрыты темнотой — видны только посещённые комнаты. */
+             плитки тоже скрыты темнотой — видны только посещённые комнаты.
+             v0.53: туман ОБЩИЙ для команды (мои плитки + s.openPlates), а ХАБ-плитка
+             видна на карте мира ВСЕГДА (m.hubPlate — туман её не скрывает). */
           room: roomsOn && roomNumRef.current ? plateRectOf(m, roomNumRef.current) : null,
-          visitedPlates: roomsMap && (viewMode === 'world' || peekMap) ? [...visitedPlatesRef.current] : null,
+          visitedPlates: roomsMap && (viewMode === 'world' || peekMap)
+            ? [...new Set([...visitedPlatesRef.current, ...(sess.openPlates ?? [])])]
+            : null,
+          hubPlate: roomsMap ? (m.hubPlate ?? null) : null,
           /* ПАТРУЛИРОВАНИЕ (v0.52): боссы и NPC с маршрутом рисуются в текущей точке —
              позиция считается формулой от синхронного старта партии (без сети) */
           patrolBase: sess.startedAt || 0,
@@ -1972,7 +2040,7 @@ export default function GameScreen() {
           /* РЕЖИМ КОМНАТ (АЙЗЕК): номер текущей плитки-комнаты — брат «ЛОКАЦИИ» плиточного режима */
           if (!roomsOnUi || !map) return null;
           const pm = plateMetrics(map);
-          return <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-sky" title="Режим комнат (Айзек): видна только текущая плитка; переходы — открытые стыки (ходьбой) и порталы; на карте мира открыты только посещённые комнаты">🧩 ПЛИТКА {roomNumUi ?? '—'}/{pm.total} · открыто {Math.min(visitedCnt, pm.total)}</span>;
+          return <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-sky" title="Режим комнат (Айзек): видна только текущая плитка; переходы — открытые стыки (ходьбой) и порталы; на карте мира открыты только посещённые комнаты. v0.53: открытые одной комнатой открываются у всей команды, а ХАБ виден всегда">🧩 ПЛИТКА {roomNumUi ?? '—'}/{pm.total} · открыто {Math.min(new Set([...visitedPlatesRef.current, ...(s?.openPlates ?? [])]).size, pm.total)}</span>;
         })()}
         {isSkill && s.phase === 'playing' && !s.mapless && (
           <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-gold" title="Лимит ходов хоста в SKILL CHALLENGE">
@@ -3254,7 +3322,7 @@ export default function GameScreen() {
                     onClick={flipHideSeen}
                     className={`text-[9px] font-display uppercase px-1.5 py-1 border-2 cursor-pointer ${hideSeen ? 'text-teal border-teal/50' : 'text-faint border-edge'}`}
                     title={hideSeen
-                      ? 'Реплики, которые этот персонаж уже отвечал, свёрнуты («…уже слышали») — кнопка «показать» вернёт текст. Нажмите, чтобы показывать всё.'
+                      ? 'Реплики, которые этот персонаж уже отвечал, свёрнуты («…уже слышали») — кнопка «показать» вернёт текст; реплики с галочкой автора «показывать всегда» не сворачиваются. Настройка действует до конца партии. Нажмите, чтобы показывать всё.'
                       : 'Нажмите, чтобы сворачивать реплики, которые персонаж уже отвечал'}
                   >{hideSeen ? '🙈 сказанное скрыто' : '👁 сказанное видно'}</button>
                   <button onClick={closeDialog} className="text-dim hover:text-coral cursor-pointer" aria-label="Закрыть">{Ic.cross(14)}</button>
@@ -3302,7 +3370,7 @@ export default function GameScreen() {
                   которые персонаж уже отвечал (s.dlgSeen) — вместо текста «…уже слышали»
                   с кнопкой «показать». Варианты ответа видны всегда. */}
               {(() => {
-                const seen = hideSeen && !!(s.dlgSeen?.[me]?.[node.id]);
+                const seen = hideSeen && !node.alwaysShow && !!(s.dlgSeen?.[me]?.[node.id]);
                 return (
                   <div className="border-2 border-teal/40 bg-teal/5 px-3 py-2.5">
                     {seen && !revealSeen ? (

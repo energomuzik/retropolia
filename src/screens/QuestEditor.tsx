@@ -585,6 +585,20 @@ export default function QuestEditor() {
                 onChange={(d) => updNpc(selIdx, { dialog: d })}
                 posStore={map.dlgPos}
                 onPosStore={(p) => updMap({ dlgPos: p ?? undefined })}
+                onAddEnding={() => {
+                  const eid = uid('end');
+                  const ends: MapEnding[] = [...(map.endings ?? []), { id: eid, name: `КОНЦОВКА ${(map.endings ?? []).length + 1}`, desc: '' }];
+                  updMap({ endings: ends }); // на общей схеме концовка сама встанет в колонку справа
+                  sfx.coin();
+                }}
+                onDelEnding={(id) => {
+                  /* удалить концовку и подчистить ссылки «Концовка:» у вариантов ВСЕХ NPC */
+                  updMap({
+                    endings: (map.endings ?? []).filter((x) => x.id !== id),
+                    npcs: (map.npcs ?? []).map((n) => (n.dialog ? { ...n, dialog: { ...n.dialog, nodes: n.dialog.nodes.map((nd) => ({ ...nd, opts: (nd.opts ?? []).map((o) => (o.ending === id ? { ...o, ending: undefined } : o)) })) } } : n)),
+                  });
+                  sfx.fail();
+                }}
               />
             </div>
           </div>

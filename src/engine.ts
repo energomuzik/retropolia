@@ -3,6 +3,7 @@ import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START
 import type { RubgItem } from './types';
 import type { JoyId } from './types';
 import { CELL, cellAtPoint, cellCenter, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
+import { patrolPos } from './patrol';
 
 /* ПЛИТОЧНЫЙ РЕЖИМ КАРТ: пружка фишки НЕ может покинуть СВОЮ карту-плитку.
    Возвращает координаты, зажатые в прямоугольник карты-плитки, где стоит точка
@@ -81,6 +82,8 @@ export type Action =
   | { t: 'npcClaim'; id: string; npcId: string; questId: string } // QUEST: сдача квеста NPC — награда + снятие стен
   | { t: 'npcBuy'; id: string; npcId: string; offerId: string } // QUEST: быстрая покупка одного товара (делегирует в npcTrade) — совместимость
   | { t: 'npcTrade'; id: string; npcId: string; buys: { offerId: string; qty: number }[]; sells: string[] } // QUEST v0.51: СДЕЛКА с торговцем — купить товары (со скидками за квесты) и/или продать вещи из рюкзака (в кассу торговца), одним действием
+  | { t: 'plateSeen'; id: string; plate: number } // v0.53 СИНХРОНИЗАЦИЯ ОТКРЫТЫХ КОМНАТ: игрок впервые вошёл в комнату-плитку — хост открывает её ВСЕЙ команде (s.openPlates → общий туман карты мира)
+  | { t: 'bossCapture'; id: string; bossId: string } // v0.53 ЗАХВАТ: патрульный босс догнал игрока — хост проверяет дистанцию/кулдаун и мгновенно переносит фишку на СТАРТОВУЮ ячейку (там её ждёт задание)
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const rnd6 = () => 1 + Math.floor(Math.random() * 6);
@@ -222,6 +225,19 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     base.qFlags = base.qFlags ?? {};
     base.qFails = base.qFails ?? {};
     base.qCards = base.qCards ?? {};
+    /* v0.53: поля новых версий + хвосты старых сейвов — восстановление не должно падать */
+    base.npcShop = base.npcShop ?? {};
+    base.dlgSeen = base.dlgSeen ?? {};
+    base.openPlates = Array.isArray(base.openPlates) ? base.openPlates : [];
+    base.qBossDownAt = base.qBossDownAt ?? {};
+    base.qCaptureAt = base.qCaptureAt ?? {};
+    if (base.rubg !== undefined) {
+      base.rubg.jobs = base.rubg.jobs ?? {};
+      base.rubg.looted = base.rubg.looted ?? [];
+      base.rubg.stealth = base.rubg.stealth ?? [];
+      base.rubg.steals = base.rubg.steals ?? {};
+      base.rubg.stopCd = base.rubg.stopCd ?? {};
+    }
     base.wallsRemoved = Array.isArray(base.wallsRemoved) ? base.wallsRemoved : [];
     base.ending = base.ending ?? null;
     for (const pl of base.players) normPlayer(pl);
@@ -256,6 +272,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   if (!s.qCards) s.qCards = {};
   if (!Array.isArray(s.wallsRemoved)) s.wallsRemoved = [];
   if (s.ending === undefined) s.ending = null;
+  if (!s.npcShop) s.npcShop = {};
+  if (!s.dlgSeen) s.dlgSeen = {};
+  if (!Array.isArray(s.openPlates)) s.openPlates = [];
+  if (!s.qBossDownAt) s.qBossDownAt = {};
+  if (!s.qCaptureAt) s.qCaptureAt = {};
   if (s.rubg !== undefined) {
     // старые сессии RUBG без части полей
     s.rubg.jobs = s.rubg.jobs ?? {};
@@ -1942,6 +1963,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           const lst = s.qBossDown[p.id] ?? [];
           if (!lst.includes(b.id)) lst.push(b.id);
           s.qBossDown[p.id] = lst;
+          /* v0.53: момент победы — побеждённый босс замирает в точке гибели и больше
+             НЕ патрулирует (для победителя; у остальных он жив, пока не победят сами) */
+          s.qBossDownAt = s.qBossDownAt ?? {};
+          const downAt = s.qBossDownAt[p.id] = s.qBossDownAt[p.id] ?? {};
+          downAt[b.id] = Date.now();
           const bdef = (map.bossLib ?? []).find((x) => x.id === b.bid);
           const dms = bdef ? clipMs(bdef.defeated) : 0;
           if (bdef && dms) pushFx({ kind: 'bossDef', player: p.id, cellIdx: a.cellIdx, bossId: b.id, ms: dms, after: 'none' });
@@ -2014,6 +2040,49 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         }
       }
       checkElim();
+      break;
+    }
+    case 'plateSeen': {
+      /* v0.53 СИНХРОНИЗАЦИЯ ОТКРЫТЫХ КОМНАТ: открытое одним игроком — открыто всем.
+         Хост просто объединяет номера плиток; туман карты мира рисуется по объединённому
+         списку (мои комнаты + s.openPlates), хаб-плитка видна и без этого списка. */
+      const plate = Math.floor(a.plate);
+      if (!Number.isFinite(plate) || plate < 1) break;
+      s.openPlates = s.openPlates ?? [];
+      if (!s.openPlates.includes(plate)) s.openPlates.push(plate);
+      break;
+    }
+    case 'bossCapture': {
+      /* v0.53 ЗАХВАТ ИГРОКА БОССОМ: только в QUEST, живой для игрока ПАТРУЛЬНЫЙ босс,
+         дистанция сходится, кулдаун 6 с прошёл. Фишка мгновенно переносится на СТАРТОВУЮ
+         ячейку (там автор карты поставит задание), незаконченное задание бросается,
+         в лог — запись, у игрока — уведомление. */
+      if (s.phase !== 'playing' || !isQuestMode(map.mode)) break;
+      const p = s.players.find((x) => x.id === a.id);
+      if (!p || !p.alive || p.spect) break;
+      const b = (map.bosses ?? []).find((x) => x.id === a.bossId);
+      if (!b || !b.patrol || (b.patrol.pts ?? []).length < 2) break; // не патрулирует — не хватает
+      if (s.bossDown?.[b.id]) break;
+      s.qBossDown = s.qBossDown ?? {};
+      if ((s.qBossDown[p.id] ?? []).includes(b.id)) break; // повержен ЭТИМ игроком
+      const now = Date.now();
+      s.qCaptureAt = s.qCaptureAt ?? {};
+      if (now - (s.qCaptureAt[p.id] ?? 0) < 6000) break; // защита от мгновенного повторного захвата
+      const myPos = s.journeyPos?.[p.id];
+      const bpos = patrolPos(b.patrol, s.startedAt || 0, now);
+      if (!myPos || !bpos) break;
+      const capR = b.r && b.r > 0 ? b.r : CELL_PX * 1.5;
+      if (Math.hypot(myPos.x - bpos.x, myPos.y - bpos.y) > capR) break; // на хосте дистанция не подтвердилась
+      const sc = map.cells[startCellIdx(map)];
+      const scx = sc ? (sc.cx ?? (sc.x + (sc.w || 1) / 2) * CELL_PX) : 0;
+      const scy = sc ? (sc.cy ?? (sc.y + (sc.h || 1) / 2) * CELL_PX) : 0;
+      s.journeyPos = s.journeyPos ?? {};
+      s.journeyPos[p.id] = { x: scx, y: scy, ts: now, mv: false };
+      s.qCaptureAt[p.id] = now;
+      if (s.qJobs?.[p.id]) { delete s.qJobs[p.id]; log(`👹 ${p.name} брошен посреди задания — босс утащил его на старт`); }
+      const bdef = (map.bossLib ?? []).find((x) => x.id === b.bid);
+      s.notice = { text: `👹 Босс${bdef ? ` «${bdef.name}»` : ''} поймал вас и оттащил на СТАРТ! Осторожнее с патрулями.`, ts: now };
+      log(`👹 Босс${bdef ? ` «${bdef.name}»` : ''} ПОЙМАЛ игрока ${p.name} и утащил его на стартовую ячейку!`);
       break;
     }
     case 'npcClaim': {

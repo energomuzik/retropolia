@@ -3262,7 +3262,9 @@ export default function MapEditor() {
                                   key={i}
                                   onClick={() => jumpToPlate(col, row)}
                                   className={`relative py-1 text-[9px] font-pixel border-2 cursor-pointer ${curPlateIdx === i ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim'}`}
+                                  title={map.hubPlate === i + 1 ? 'Плитка №' + (i + 1) + ' — ХАБ (точка сбора, видна на карте мира всегда)' : undefined}
                                 >{i + 1}
+                                  {map.hubPlate === i + 1 && <span className="absolute top-0.5 left-0.5 text-[7px] pointer-events-none" title="Хаб-плитка">🏠</span>}
                                   {hasOwnBg && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-sky pointer-events-none" title="У этой плитки свой фон" />}
                                 </button>
                               );
@@ -3278,6 +3280,17 @@ export default function MapEditor() {
                           >{map.roomMode ? '🔒 РЕЖИМ КОМНАТ (АЙЗЕК): ВКЛЮЧЁН — нажми, чтобы выключить' : '🔓 Режим комнат (Айзек): выключен — нажми, чтобы включить'}</button>
                           <p className="text-[9px] text-faint leading-tight mt-1">В игре видна ТОЛЬКО текущая плитка-комната — вокруг темнота; камера и осмотр зажаты в комнате; кнопки «Карта мира» и «Глянуть карту мира» скрыты; в HUD — бейдж «ПЛИТКА n/N». Переходы задаёшь ты: ОТКРЫТЫЙ стык плиток — переход ходьбой (как в Айзеке); стык со СТЕНОЙ — только портал (метроидвания: стены можно снимать квестами NPC). При смене комнаты — затемнение и звук. В RUBG режим не действует.</p>
                         </div>
+                        {/* v0.53: ХАБ-ПЛИТКА + СИНХРОНИЗАЦИЯ ОТКРЫТЫХ КОМНАТ (в режиме комнат) */}
+                        {map.plateSize && map.roomMode && (
+                          <div className="border-t-2 border-edge pt-1.5">
+                            <button
+                              onClick={() => { updMap({ hubPlate: map.hubPlate === curPlateNum ? undefined : curPlateNum }); sfx.click(); }}
+                              className={`w-full px-2 py-1.5 text-[9px] font-pixel border-2 cursor-pointer ${map.hubPlate === curPlateNum ? 'border-teal text-teal bg-teal/10' : 'border-edge text-faint hover:text-dim'}`}
+                              title={map.hubPlate === curPlateNum ? 'Снять отметку хаба с этой плитки' : 'Плитка №' + curPlateNum + ' станет ХАБОМ — точкой сбора команды'}
+                            >{map.hubPlate === curPlateNum ? '🏠 ХАБ — ЭТА ПЛИТКА №' + curPlateNum + ' (нажми, чтобы снять)' : '🏠 Сделать плитку №' + curPlateNum + ' ХАБОМ'}</button>
+                            <p className="text-[9px] text-faint leading-tight mt-1">{map.hubPlate ? (<><span className="text-teal">Хаб — плитка №{map.hubPlate}</span>: точка сбора команды. На карте мира она видна ВСЕГДА, даже если в ней ещё никто не побывал: туман исследования её не скрывает, на плане — пометка «ХАБ».</>) : ('Хаб — точка сбора команды: назначьте стартовую плитку, и она будет видна всем на карте мира с самого начала (туман её не скрывает). Соседи тоже помогают исследованию: комната, открытая одним игроком, открывается на карте мира у ВСЕЙ команды (синхронизация открытых комнат).')}</p>
+                          </div>
+                        )}
                         <PxBtn color="coral" small className="w-full" onClick={disablePlates}>Убрать разбивку (одно поле)</PxBtn>
                       </>
                     )}
@@ -4453,6 +4466,15 @@ export default function MapEditor() {
               onChange={(d) => { updNpc(selNpcIdx, { dialog: d }); dirtyRef.current = true; }}
               posStore={map.dlgPos}
               onPosStore={(p) => { updMap({ dlgPos: p ?? undefined }); dirtyRef.current = true; }}
+              onAddEnding={() => { updMap({ endings: [...(map.endings ?? []), { id: uid('end'), name: `КОНЦОВКА ${(map.endings ?? []).length + 1}`, desc: '' }] }); sfx.coin(); dirtyRef.current = true; }}
+              onDelEnding={(id) => {
+                /* v0.53: удалить концовку прямо из схемы + подчистить выбор «Концовка:» у вариантов ВСЕХ NPC */
+                updMap({
+                  endings: (map.endings ?? []).filter((x) => x.id !== id),
+                  npcs: (map.npcs ?? []).map((n) => (n.dialog ? { ...n, dialog: { ...n.dialog, nodes: n.dialog.nodes.map((nd) => ({ ...nd, opts: (nd.opts ?? []).map((o) => (o.ending === id ? { ...o, ending: undefined } : o)) })) } } : n)),
+                });
+                sfx.fail(); dirtyRef.current = true;
+              }}
             />
           </div>
         </div>

@@ -6,22 +6,24 @@ import { Coin } from '../ui';
 import { DialogueGraph, tr } from './DialogueGraph';
 import type { DlgEditOps, DlgPosMap } from './DialogueGraph';
 
-/* ОБЩИЙ РЕДАКТОР ДЕРЕВА ДИАЛОГОВ NPC (v0.52.0) — ТЕКСТ ПРАВИТСЯ ПРЯМО НА СХЕМЕ.
+/* ОБЩИЙ РЕДАКТОР ДЕРЕВА ДИАЛОГОВ NPC (v0.53.0) — ТЕКСТ ПРАВИТСЯ ПРЯМО НА СХЕМЕ.
    Один компонент для редактора карт (окно «Редактор диалогов») и для «Редактора квестов
    и диалогов». Список узлов-плиток УБРАН ещё в v0.51; в v0.52 и текст — на холсте:
-   • создать узел: «＋ Узел» в шапке схемы, двойной клик по фону или нить из сокета,
-     брошенная на пустое место (узел создастся и сразу привяжется);
+   • создать узел: «＋ Узел» в шапке схемы или ДВОЙНОЙ КЛИК по фону (v0.53: нить,
+     брошенная на пустое место, больше НЕ создаёт узел — она отменяется);
+   • КОНЦОВКИ (v0.53): кнопка «＋ Концовка» в шапке схемы ставит НОВУЮ концовку карты
+     прямо из схемы; внизу холста — ВСЕ концовки карты, в любую можно бросить нить;
    • РЕПЛИКА — двойной клик по узлу: поле ввода открывается ВНУТРИ окна узла;
    • ОТВЕТ — клик по строке варианта: правка на месте, на схеме;
    • СОЕДИНИТЬ/РАЗЪЕДИНИТЬ: нить из сокета варианта → на узел (привязать «Далее») или
      на золотую плашку КОНЦОВКИ (назначить концовку); ✕ на середине нити — разъединить;
    • на узле: «＋ ответ», ✕ у варианта, ✕ в шапке узла (ссылки очищаются);
    • клик по узлу выбирает его — панель ниже правит СВОЙСТВА выбранного узла:
-     «Далее», концовка, награды, ФЛАГИ (с подсказками и списком флагов карты), маркеры
-     «🛒 торговля на этом узле» / «📜 квесты на этом узле» (v0.51 — авто-ветки
-     «Можно ли поторговать с тобой?» и «Есть ли для меня работа?» создаются сами
-     при добавлении торговли/квеста). */
-export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosStore, height = 380, selId, onSelect, allFlags = [] }: {
+     «Далее», концовка, награды, ФЛАГИ (с подсказками, списком флагов карты и
+     ПРИМЕРОМ-объяснением), маркеры «🛒 торговля на этом узле» / «📜 квесты на этом
+     узле» и галочка «📌 показывать всегда» (v0.53: реплика узла не сворачивается
+     в «…уже слышали», даже если игрок её уже видел — решает автор карты). */
+export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosStore, height = 380, selId, onSelect, allFlags = [], onAddEnding, onDelEnding }: {
   dialog: NpcDialog;
   endings: MapEnding[];
   onChange: (d: NpcDialog) => void;
@@ -31,6 +33,8 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
   selId?: string | null;                // выбранный узел — снаружи (окно NPC продолжает выбор)
   onSelect?: (id: string) => void;
   allFlags?: string[];                  // v0.52: флаги, уже использованные на карте (подсказка в полях)
+  onAddEnding?: () => void;             // v0.53: «＋ Концовка» на схеме — новая концовка карты
+  onDelEnding?: (id: string) => void;   // v0.53: ✕ на золотой плашке — удалить концовку
 }) {
   const [selRaw, setSel] = useState<string>('');
   const nodes = dialog.nodes;
@@ -129,6 +133,9 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
     /* v0.52: без звуков — вызываются на каждый нажатый символ при правке на схеме */
     setText: (nid, text) => updNode(nid, { text }),
     setOptText: (nid, oi, text) => updOpt(nid, oi, { text }),
+    /* v0.53: КОНЦОВКИ ПРЯМО НА СХЕМЕ */
+    addEnding: onAddEnding,
+    delEnding: onDelEnding,
   };
 
   return (
@@ -193,6 +200,10 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
             <label className="flex items-center gap-1 text-[10px] text-dim cursor-pointer" title="В игре на этом узле появится список квестов NPC со сдачей. Авто-ветка «Есть ли для меня работа?» ставит маркер сама.">
               <input type="checkbox" checked={!!selNode.showQuests} onChange={(ev) => updNode(selNode.id, { showQuests: ev.target.checked || undefined })} />
               📜 квесты на этом узле
+            </label>
+            <label className="flex items-center gap-1 text-[10px] text-gold cursor-pointer" title="v0.53: реплика этого узла ВСЕГДА показывается целиком — тумблер игрока «сказанное скрыто» её НЕ сворачивает, даже если игрок её уже слышал. Без галочки реплика после первого просмотра схлопывается в «…вы это уже слышали» (кнопка «показать» возвращает текст).">
+              <input type="checkbox" checked={!!selNode.alwaysShow} onChange={(ev) => updNode(selNode.id, { alwaysShow: ev.target.checked || undefined })} />
+              📌 показывать эту реплику всегда
             </label>
           </div>
 
@@ -307,6 +318,15 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
                   {allFlags.map((f) => <option key={f} value={f} />)}
                 </datalist>
                 <p className="text-[8.5px] text-faint leading-tight">Имена флагов подсказываются из уже использованных на карте. «Показывать только при флаге» и «Скрыть при флаге» работают наоборот друг к другу — достаточно одного из двух.</p>
+                {/* v0.53: ГОТОВЫЙ ПРИМЕР — объясняет оба флажковых условия на простом сюжете */}
+                <details className="text-[8.5px] text-dim leading-tight">
+                  <summary className="cursor-pointer hover:text-paper select-none">📖 Пример: флаги на простом сюжете (босс и обиженный NPC)</summary>
+                  <div className="mt-1 space-y-1.5 border-l-2 border-[rgba(255,179,71,0.4)] pl-1.5">
+                    <p><b className="text-teal">ОТКРЫТЬ реплику после события.</b> Узел «Стражник» — вариант «Я победил босса!» → <b>🚩 ставит флаг: boss_down</b>. У торговца — вариант «А есть что-то особенное?» → <b>🔒 показывать только при флаге: boss_down</b>. Пока игрок не победил босса, вариант у торговца скрыт; победил — появился (например, открывает особый товар или награду).</p>
+                    <p><b className="text-coral">СПРЯТАТЬ реплику после события.</b> Вариант «Нагрубить стражнику» → <b>🚩 ставит флаг: obidelsya</b>. У приветствия NPC вариант «Поговорим о деле?» → <b>🚫 скрыть при флаге: obidelsya</b> — после грубости NPC «обиделся» и этот вариант больше не показывает (остаются нейтральные).</p>
+                    <p className="text-faint">Флаг ставит ВЫБОР ИГРОКА (вариант с 🚩). Флаги у каждого игрока СВОИ. Имя — любое слово без пробелов (boss_down); одно и то же имя связывает варианты разных узлов и NPC.</p>
+                  </div>
+                </details>
                 {(o.reqFlag || o.reqNotFlag) && (
                   <p className="text-[9px] text-magma leading-tight">⚠ Вариант скрыт от игроков, пока условие флага не выполнено, — если вариант «пропал», проверьте поля флагов выше.</p>
                 )}
