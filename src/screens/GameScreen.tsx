@@ -18,7 +18,7 @@ import {
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper, Coin, CoinRow } from '../ui';
-import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, isQuestMode, isSoloMode, questGoalText, tileAt, tileRectOf, tileNumOf, coinsStr, normResMode, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS } from '../types';
+import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, isQuestMode, isSoloMode, questGoalText, tileAt, tileRectOf, tileNumOf, coinsStr, normResMode, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS, doorKeyHex, doorKeyName } from '../types';
 import type { AnimClip, CardDef, ChaosKind, GameMap, GameSession, NpcLibEntry, PlacedNpc, PortalZone, PlayerState, QuestGoal, TaskDef, TokenDir, RubgItem } from '../types';
 import Randomizer from './Randomizer';
 import TradeWindow from './TradeWindow';
@@ -32,8 +32,13 @@ const DIRV: Record<TokenDir, [number, number]> = { up: [0, -1], down: [0, 1], le
 
 /* НЕВИДИМЫЕ СТЕНЫ (JOURNEY): точка (центр фишки) внутри прямоугольника стены?
    Стены в игре НЕ рисуются — фишка просто не проходит сквозь них, скользя по краю. */
-const inWall = (m: GameMap, x: number, y: number, removed?: string[]): boolean =>
-  (m.walls ?? []).some((w) => !(w.id && removed?.includes(w.id)) && x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h);
+/* v0.55: у стены может быть key (ДВЕРЬ цвета) — с ключом того же цвета она открыта */
+const inWall = (m: GameMap, x: number, y: number, removed?: string[], keys?: string[]): boolean =>
+  (m.walls ?? []).some((w) => {
+    if (w.id && removed?.includes(w.id)) return false; // снята квестом
+    if (w.key && keys?.includes(w.key)) return false; // дверь открыта ключом
+    return x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h;
+  });
 
 /* QUEST: выполнена ли цель квеста/концовки У ИГРОКА (клиентская копия движка — для UI) */
 const questGoalDoneFor = (sess: GameSession, p: PlayerState, g: QuestGoal | undefined): boolean => {
@@ -216,6 +221,9 @@ export default function GameScreen() {
   const myTurn = !!active && active.id === me;
   const ch = s?.challenge ?? null;
   const isJourney = isJourneyLike(map?.mode); // JOURNEY, JOURNEY SOLO и RUBG — одна механика свободного хождения
+  /* v0.55: SKILL CHALLENGE с тумблером «свободное перемещение» ходит как JOURNEY (хост) */
+  const skillWalk = map?.mode === 'skill' && !!map?.skillFree;
+  const walkFree = isJourney || skillWalk;
   const isSoloJourney = map?.mode === 'journey1p';
   const isSkill = map?.mode === 'skill';
   /* БЕЗ КАРТЫ: только СТАРЫЕ карты-челленджи v0.36.0 (возможность создавать убрана).
@@ -240,8 +248,11 @@ export default function GameScreen() {
   const coinsActive = map?.startCoins !== undefined; // монеты включены на карте
   const coinsOnly = coinsActive && !!map?.coinsOnly; // только монеты — время/попытки не предлагаются
   /* РЕСУРС ПАРТИИ (выбор ОДНОГО в редакторе): hp — «полоска HP» (RUBG и карты с выбором «HP»),
-     coinsOnly — «монеты», иначе — «время и попытки». В HUD показывается только выбранный ресурс. */
-  const hpRes = isRubg || map?.resMode === 'hp';
+     coinsOnly — «монеты», иначе — «время и попытки». В HUD показывается только выбранный ресурс.
+     v0.55 QUEST — СМЕСЬ РЕСУРСОВ: показываем И ПОЛОСКУ HP, И МОНЕТЫ (задания бьют по HP,
+     победы дают монеты, монеты нужны для торговли). */
+  const questMixed = isQuest;
+  const hpRes = isRubg || map?.resMode === 'hp' || questMixed;
   const coinsRes = !hpRes && coinsOnly;
   const skipCoinsNeed = Math.max(0, Math.floor(map?.skipCoins ?? SKIP_COINS_DEFAULT)); // цена пропуска в бронзе
   const task = s && map && ch ? cellTaskOf(s, map, ch.cellIdx) : null;
@@ -504,12 +515,15 @@ export default function GameScreen() {
   const [dlgNode, setDlgNode] = useState<string | null>(null);
   const [tradeNpcId, setTradeNpcId] = useState<string | null>(null); // v0.51: открыто окно торговли с NPC
   /* v0.54: открыты ДИАЛОГ/ТОРГОВЛЯ → NPC-собеседник ЗАМЕР (npcFreeze — не уходит в патруле),
-     боссы вплотную ЖДУТ конца разговора (bossHold on/off), захват приостановлен */
+     боссы вплотную ЖДУТ конца разговора (bossHold on/off), захват приостановлен.
+     v0.55: ИСПРАВЛЕНО — rAF-цикл рисования зарегистрирован ОДИН раз (deps без dlgOpenId),
+     поэтому state dlgOpenId внутри цикла был УСТАРЕВШИМ (всегда null) и заморозка
+     патруля не срабатывала никогда. Теперь цикл читает dlgOpenIdRef — живой ref с id NPC */
   const dlgOpenId = dlgNpcId ?? tradeNpcId;
-  const dlgOpenRef = useRef(false);
+  const dlgOpenIdRef = useRef<string | null>(null);
   const dlgOpenTsRef = useRef(0);
   const heldBossesRef = useRef<Set<string>>(new Set());
-  dlgOpenRef.current = !!dlgOpenId;
+  dlgOpenIdRef.current = dlgOpenId;
   if (dlgOpenId) { if (!dlgOpenTsRef.current) dlgOpenTsRef.current = Date.now(); } else dlgOpenTsRef.current = 0;
   /* v0.53: скрывать реплики, которые персонаж уже отвечал (настройка ТОЛЬКО НА ТЕКУЩУЮ
      СЕССИЮ — между партиями больше не запоминается; при загрузке сохранения метки
@@ -676,7 +690,7 @@ export default function GameScreen() {
       if (!self || !self.alive || self.spect) return;
       const myPos = sess.journeyPos?.[cur.selfId];
       if (!myPos) return;
-      if (dlgOpenRef.current) return; // v0.54: пока открыт диалог/торговля — босс НЕ ЛОВИТ, он ждёт конца разговора
+      if (dlgOpenIdRef.current) return; // v0.54: пока открыт диалог/торговля — босс НЕ ЛОВИТ, он ждёт конца разговора (v0.55: живой ref)
       const now = Date.now();
       if (now < captureCdRef.current) return;
       const base = sess.startedAt || 0;
@@ -961,7 +975,8 @@ export default function GameScreen() {
         // скорость фишек — ТОЛЬКО из карты (кл/с); менять её можно в редакторе карт,
         // прямо во время партии скорость не меняется (не было такой функции и не нужно)
         const cps = clampMoveSpeed(m.moveSpeed ?? DEF_MOVE_SPEED);
-        const journeyMode = isJourneyLike(m.mode);
+        /* v0.55: SKILL со свободным перемещением ходит как JOURNEY */
+        const journeyMode = isJourneyLike(m.mode) || (m.mode === 'skill' && !!m.skillFree);
         const mszJ = journeyMode ? mapSize(m) : null;
         let anyoneMoving = false;
         const mapToks = m.mapTokens ?? [];
@@ -1084,8 +1099,9 @@ export default function GameScreen() {
                   }
                 }
                 const removedWalls = sess.wallsRemoved ?? [];
-                if (!inWall(m, nx, self.y, removedWalls)) self.x = nx;
-                if (!inWall(m, self.x, ny, removedWalls)) self.y = ny;
+                const myKeys = (me && sess.qKeys?.[me]) || []; // v0.55: свои ключи — двери своего цвета открыты
+                if (!inWall(m, nx, self.y, removedWalls, myKeys)) self.x = nx;
+                if (!inWall(m, self.x, ny, removedWalls, myKeys)) self.y = ny;
                 self.dir = Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? 'right' : 'left') : (vy > 0 ? 'down' : 'up');
                 self.moving = true;
                 self.dirty = true;
@@ -1504,14 +1520,18 @@ export default function GameScreen() {
             ? [...new Set([...visitedPlatesRef.current, ...(sess.openPlates ?? [])])]
             : null,
           hubPlate: roomsMap ? (m.hubPlate ?? null) : null,
+          /* v0.55: снятые квестами стены — двери (стены с key) с них не рисуются */
+          wallsRemoved: sess.wallsRemoved,
           /* ПАТРУЛИРОВАНИЕ (v0.52): боссы и NPC с маршрутом рисуются в текущей точке —
              позиция считается формулой от синхронного старта партии (без сети) */
           patrolBase: sess.startedAt || 0,
           patrolNow: Date.now(),
           patrolFreeze,
           /* v0.54: NPC, с которым открыт диалог/торговля, НЕ уходит в патруле —
-             стоит на месте (время заморожено на момент открытия), после разговора патруль продолжается */
-          npcFreeze: dlgOpenId ? { [dlgOpenId]: dlgOpenTsRef.current } : undefined,
+             стоит на месте (время заморожено на момент открытия), после разговора патруль продолжается.
+             v0.55: читаем ЖИВЫЙ ref (state в замыкании rAF-цикла был устаревшим —
+             npcFreeze никогда не доходил до отрисовки, NPC продолжал патрулировать) */
+          npcFreeze: dlgOpenIdRef.current ? { [dlgOpenIdRef.current]: dlgOpenTsRef.current } : undefined,
         });
 
         /* RUBG: оверлей поверх поля — безопасная зона, самолёт, маркеры игры, радиус атаки,
@@ -1959,9 +1979,10 @@ export default function GameScreen() {
     return () => { window.removeEventListener('keydown', dn); window.removeEventListener('keyup', up); };
   });
 
-  /* ---------- JOURNEY: стрелки/WASD двигают фишку напрямую (пока мой ход) ---------- */
+  /* ---------- JOURNEY: стрелки/WASD двигают фишку напрямую (пока мой ход) ----------
+     v0.55: работает и в SKILL CHALLENGE со свободным перемещением (ходит хост) ---------- */
   useEffect(() => {
-    if (!isJourney) return;
+    if (!walkFree) return;
     const dirOf = (code: string): TokenDir | null => {
       if (code === 'ArrowUp' || code === 'KeyW') return 'up';
       if (code === 'ArrowDown' || code === 'KeyS') return 'down';
@@ -1989,14 +2010,14 @@ export default function GameScreen() {
       window.removeEventListener('blur', blur);
       journeyKeys.current.clear();
     };
-  }, [isJourney]);
+  }, [walkFree]);
 
   /* ---------- JOURNEY: СТРЕЛКИ ДЖОЙСТИКА (геймпад) двигают фишку ----------
      Крестовина (кнопки 12..15), ЛЕВЫЙ СТИК и пользовательская раскладка из
      «Управления» (если направление переназначено на другую кнопку). Опрос
      ~15 раз/с; направления складываются с клавиатурой и экранным D-pad. */
   useEffect(() => {
-    if (!isJourney) return;
+    if (!walkFree) return;
     const iv = window.setInterval(() => {
       const prefs = loadEmuPrefs();
       const dirs = new Set<TokenDir>();
@@ -2024,7 +2045,7 @@ export default function GameScreen() {
       journeyPadRef.current = dirs;
     }, 66);
     return () => { clearInterval(iv); journeyPadRef.current.clear(); };
-  }, [isJourney]);
+  }, [walkFree]);
 
   /* ---------- JOURNEY: авто-передача хода УДАЛЕНА ----------
      В новом JOURNEY очередь ходов отсутствует: все фишки ходят одновременно,
@@ -2116,7 +2137,7 @@ export default function GameScreen() {
           const tg = map?.tileGrid;
           if (!tg || !tg.tiles.length) return null;
           const jFree = s.phase === 'playing' && !s.moving && !s.challenge && !s.pendingCard && !s.quiz && !s.awaitPost && !(s.fxs ?? []).some((f) => f.gate);
-          const followId = (isJourney && jFree ? me : active?.id) ?? '';
+          const followId = (walkFree && jFree ? me : active?.id) ?? '';
           const fp = dispRef.current[followId];
           const ft = fp ? tileAt(tg, fp.x, fp.y) : null;
           if (!ft) return null;
@@ -2140,7 +2161,7 @@ export default function GameScreen() {
               key={p.id}
               /* в JOURNEY «золотой» подсветки стоящего игрока нет в свободном режиме —
                  все ходят одновременно; подсветка появляется только у игрока задания */
-              className={`hud-chip pixel-corners px-2.5 py-1.5 flex items-center gap-2 transition-all ${active?.id === p.id && s.phase === 'playing' && !(isJourney && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && !(s.fxs ?? []).some((f) => f.gate)) ? 'border-gold shadow-[0_0_14px_rgba(255,207,63,0.35)]' : ''} ${!p.alive ? 'opacity-40 grayscale' : ''} ${p.spect ? 'opacity-70' : ''}`}
+              className={`hud-chip pixel-corners px-2.5 py-1.5 flex items-center gap-2 transition-all ${active?.id === p.id && s.phase === 'playing' && !(walkFree && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && !(s.fxs ?? []).some((f) => f.gate)) ? 'border-gold shadow-[0_0_14px_rgba(255,207,63,0.35)]' : ''} ${!p.alive ? 'opacity-40 grayscale' : ''} ${p.spect ? 'opacity-70' : ''}`}
             >
               <span className="w-3.5 h-3.5 border border-abyss" style={{ background: PLAYER_COLORS[p.color] }} />
               <div className="leading-none">
@@ -2149,6 +2170,10 @@ export default function GameScreen() {
                   {p.isHost && <span className="font-pixel text-[6px] text-gold">H</span>}
                   {p.spect && <span className="font-pixel text-[6px] text-sky" title="Зритель — ходов не получает">👁 ЗРИТЕЛЬ</span>}
                   {!p.alive && <span className="text-coral">{Ic.skull(10)}</span>}
+                  {/* v0.55: ЦВЕТНЫЕ КЛЮЧИ игрока — двери своего цвета открыты */}
+                  {(s?.qKeys?.[p.id] ?? []).map((k, ki) => (
+                    <span key={`${k}:${ki}`} title={`Ключ ${doorKeyName(k)} — открывает дверь этого цвета`} className="inline-block w-2 h-2 border border-abyss" style={{ background: doorKeyHex(k) }} />
+                  ))}
                 </div>
                 <div className="tick-label text-faint mt-1 flex items-center gap-1.5">
                   {p.spect ? (
@@ -2161,6 +2186,8 @@ export default function GameScreen() {
                         </span>
                         {Math.round(p.hp ?? 100)}%
                       </span>
+                      {/* v0.55 QUEST: рядом с HP — монеты (смесь ресурсов) */}
+                      {questMixed && <span className="text-teal"><CoinRow value={p.coinsLeft ?? 0} size={11} /></span>}
                       <span>№{p.pos + 1}</span>
                     </>
                   ) : coinsRes ? (
@@ -2302,7 +2329,10 @@ export default function GameScreen() {
                 {hostP && !hostP.spect && (
                   <div className="flex items-center gap-2 flex-wrap">
                     {hpRes ? (
-                      <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-coral">❤ HP {Math.round(hostP.hp ?? 100)}%</span>
+                      <>
+                        <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-coral">❤ HP {Math.round(hostP.hp ?? 100)}%</span>
+                        {questMixed && <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-teal"><CoinRow value={hostP.coinsLeft ?? 0} size={12} /></span>}
+                      </>
                     ) : coinsRes ? (
                       <span className="hud-chip pixel-corners px-3 py-1.5 font-pixel text-[10px] text-teal"><CoinRow value={hostP.coinsLeft ?? 0} size={12} /></span>
                     ) : (
@@ -2481,7 +2511,7 @@ export default function GameScreen() {
         )}
 
         {/* ---------- кубики (в JOURNEY их нет — фишка ходит напрямую) ---------- */}
-        {s.phase === 'playing' && !isJourney && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && (
+        {s.phase === 'playing' && !walkFree && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2">
             <div className="flex gap-3">
               <DieFace v={dieA} dropping={!!s.dice && !dieRolling && !s.moving} rolling={dieRolling} />
@@ -2552,7 +2582,7 @@ export default function GameScreen() {
         )}
 
         {/* ---------- JOURNEY: прямое управление фишкой — У КАЖДОГО СВОЯ, ОДНОВРЕМЕННО ---------- */}
-        {s.phase === 'playing' && isJourney && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && (
+        {s.phase === 'playing' && walkFree && !ch && !s.pendingCard && !s.awaitPost && !s.quiz && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 z-10">
             {mePlayer && !mePlayer.spect && mePlayer.alive ? (
               <div className="flex items-center gap-4">

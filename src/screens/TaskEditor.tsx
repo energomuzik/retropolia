@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../store';
-import { Field, GhostBtn, Ic, Panel, PxBtn, Stepper } from '../ui';
+import { Coin, Field, GhostBtn, Ic, Panel, PxBtn, Stepper } from '../ui';
 import { cellAtPoint, drawBoard, fitView } from '../render';
 import { idbGet, idbPut, uid } from '../db';
 import { cartridgeArt, cardArt, fileToDataUrl } from '../assets';
@@ -69,6 +69,11 @@ export default function TaskEditor() {
   const [fImg, setFImg] = useState('');
   const [fChaos, setFChaos] = useState('');
   const [fJoy, setFJoy] = useState('');
+  /* v0.55: КАСТОМНАЯ ЦЕНА задания — пустая строка = «стандарт карты» */
+  const [fWinCoins, setFWinCoins] = useState('');
+  const [fLoseCoins, setFLoseCoins] = useState('');
+  const [fWinHp, setFWinHp] = useState('');
+  const [fLoseHp, setFLoseHp] = useState('');
   // форма карточки
   const [cName, setCName] = useState('');
   const [cDesc, setCDesc] = useState('');
@@ -104,6 +109,10 @@ export default function TaskEditor() {
     setFImg(cell.task?.imageId ?? '');
     setFChaos(cell.task?.chaos ?? '');
     setFJoy(cell.task?.joy ?? '');
+    setFWinCoins(cell.task?.winCoins !== undefined ? String(cell.task.winCoins) : '');
+    setFLoseCoins(cell.task?.loseCoins !== undefined ? String(cell.task.loseCoins) : '');
+    setFWinHp(cell.task?.winHp !== undefined ? String(cell.task.winHp) : '');
+    setFLoseHp(cell.task?.loseHp !== undefined ? String(cell.task.loseHp) : '');
     setVLabel(cell.label ?? '');
     setVColor(cell.color ?? '');
     setVImg(cell.imageId ?? '');
@@ -269,6 +278,11 @@ export default function TaskEditor() {
       imageId,
       chaos: (fChaos || undefined) as TaskDef['chaos'],
       joy: (fJoy || undefined) as TaskDef['joy'],
+      /* v0.55: кастомные награда/проигрыш; не заданы — стандарт карты */
+      winCoins: fWinCoins !== '' ? Math.max(0, Math.floor(Number(fWinCoins) || 0)) : undefined,
+      loseCoins: fLoseCoins !== '' ? Math.max(0, Math.floor(Number(fLoseCoins) || 0)) : undefined,
+      winHp: fWinHp !== '' ? Math.max(0, Math.floor(Number(fWinHp) || 0)) : undefined,
+      loseHp: fLoseHp !== '' ? Math.max(0, Math.floor(Number(fLoseHp) || 0)) : undefined,
     };
     nextMap.cells[selCell].task = task;
     setMap(nextMap);
@@ -727,6 +741,28 @@ export default function TaskEditor() {
                     {fJoy && (
                       <p className="text-[10.5px] text-teal leading-tight">🎉 {JOY_LIST.find((j) => j.id === fJoy)?.desc}</p>
                     )}
+                    {/* v0.55: КАСТОМНАЯ ЦЕНА ЗАДАНИЯ — награда за победу и цена проигрыша */}
+                    <Field label="Цена задания: награда и проигрыш (необязательно)">
+                      <div className="space-y-1 border-2 border-[rgba(255,207,63,0.35)] px-2 py-2">
+                        <p className="text-[10px] text-dim leading-tight">
+                          Пустое поле = <b className="text-paper">стандарт всей карты</b> (монеты: «+ за победу» / «цена пропуска»; HP: +10% / −5%). Заполните число — и это задание будет платиться ПО-СВОЕМУ.
+                        </p>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <label className="flex items-center gap-1 text-[10px] text-dim" title="Награда за ПОБЕДУ в этом задании, бронза (монетные режимы и QUEST)">
+                            <Coin size={11} /> награда<input type="number" min={0} placeholder="стандарт" className="field-in w-full px-1.5 py-1 text-[11px]" value={fWinCoins} onChange={(e) => setFWinCoins(e.target.value)} />
+                          </label>
+                          <label className="flex items-center gap-1 text-[10px] text-dim" title="Плата за ПРОИГРЫШ/пропуск этого задания, бронза (монетные режимы)">
+                            <Coin size={11} /> проигрыш<input type="number" min={0} placeholder="стандарт" className="field-in w-full px-1.5 py-1 text-[11px]" value={fLoseCoins} onChange={(e) => setFLoseCoins(e.target.value)} />
+                          </label>
+                          <label className="flex items-center gap-1 text-[10px] text-dim" title="Награда за победу в этом задании, % HP (ресурс «полоска HP»)">
+                            ❤ награда HP<input type="number" min={0} placeholder="стандарт" className="field-in w-full px-1.5 py-1 text-[11px]" value={fWinHp} onChange={(e) => setFWinHp(e.target.value)} />
+                          </label>
+                          <label className="flex items-center gap-1 text-[10px] text-coral" title="Плата за проигрыш в этом задании, % HP (QUEST и ресурс «полоска HP»)">
+                            ❤ проигрыш HP<input type="number" min={0} placeholder="стандарт" className="field-in w-full px-1.5 py-1 text-[11px]" value={fLoseHp} onChange={(e) => setFLoseHp(e.target.value)} />
+                          </label>
+                        </div>
+                      </div>
+                    </Field>
                     <PxBtn className="w-full" onClick={() => void saveTask()}>{Ic.check(14)} Сохранить задание</PxBtn>
                     {cell.task && (
                       <div className="text-[11px] text-teal">Сейчас: «{cell.task.title}» · {romName(cell.task.romId)}</div>

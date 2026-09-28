@@ -1,4 +1,5 @@
 import type { AnimClip, CellDef, GameMap, NpcLibEntry, PlacedNpc, TileDef, TileImg, TokenAnim, TokenDir } from './types';
+import { doorKeyHex } from './types';
 import { getImage } from './assets';
 import { patrolPos } from './patrol';
 
@@ -331,6 +332,8 @@ export interface BoardDrawOpts {
   /* v0.53: ХАБ-ПЛИТКА (номер с 1) — видна на карте мира ВСЕГДА, туман её не скрывает;
      на плане рисуется табличка «ХАБ». Ставится в редакторе карт (map.hubPlate). */
   hubPlate?: number | null;
+  /* v0.55: снятые квестами стены — ДВЕРИ (стены с key) таких стен не рисуем */
+  wallsRemoved?: string[];
   /* ---------- ПАТРУЛИРОВАНИЕ (v0.52.0) ----------
    patrolBase — синхронный тик отсчёта (s.startedAt партии); patrolNow — текущий момент.
    Передаются только из игры: у боссов/NPC с маршрутом позиция считается формулой patrolPos.
@@ -358,6 +361,74 @@ const PAD = ['.111.', '11111', '11111', '.111.'];
 const QUIZ = ['.111.', '1..11', '..11.', '..1..', '.....', '..1..'];
 const REST = ['11111', '...1.', '..1..', '.1...', '11111']; // буква Z — «передышка»
 const BOX = ['11111', '1...1', '11111', '.1.1.', '11111']; // лутбокс RUBG
+
+/* v0.55 ЦЕЛЫЙ ЯЩИК RUBG — ПЕРЕНАРИСОВАН (п.8): раньше был простой пиксельный силуэт
+   с «перекрестием» (5×5 спрайт BOX) — сломанные ящики выглядели красивее целого.
+   Теперь это полноценный деревянный ящик: доски, рама, металлические уголки,
+   замок-задвижка, мягкая тень и блик. Рисуется центром (cx,cy), размер s — половина ширины. */
+const drawCrate = (ctx: CanvasRenderingContext2D, cx: number, cy: number, s: number) => {
+  ctx.save();
+  ctx.translate(cx, cy);
+  const w = s * 2, h = s * 1.7;
+  const y0 = -h * 0.32; // корпус чуть ниже центра (место для подписи над ящиком)
+  /* тень под ящиком */
+  ctx.fillStyle = 'rgba(0,0,0,0.30)';
+  ctx.fillRect(-w / 2 + 2, y0 + h - 1, w - 4, 4);
+  /* корпус — тёплое дерево с вертикальным градиентом */
+  const grad = ctx.createLinearGradient(0, y0, 0, y0 + h);
+  grad.addColorStop(0, '#8a5a22');
+  grad.addColorStop(0.55, '#a8742e');
+  grad.addColorStop(1, '#6d4519');
+  ctx.fillStyle = grad;
+  ctx.fillRect(-w / 2, y0, w, h);
+  /* горизонтальные доски — тонкие тёмные швы */
+  ctx.fillStyle = 'rgba(61,38,12,0.55)';
+  for (let i = 1; i <= 2; i++) ctx.fillRect(-w / 2 + 1, y0 + (h / 3) * i - 0.8, w - 2, 1.6);
+  /* диагональная схватка (классика ящиков) — светлая доска уголком */
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(-w / 2 + 1, y0 + 1, w - 2, h - 2);
+  ctx.clip();
+  ctx.strokeStyle = 'rgba(196,142,66,0.85)';
+  ctx.lineWidth = Math.max(2, s * 0.16);
+  ctx.beginPath();
+  ctx.moveTo(-w / 2, y0 + h);
+  ctx.lineTo(w / 2, y0);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(80,50,16,0.35)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(-w / 2, y0 + h);
+  ctx.lineTo(w / 2, y0);
+  ctx.stroke();
+  ctx.restore();
+  /* внешняя рама — тёмная */
+  ctx.strokeStyle = '#3a2408';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(-w / 2, y0, w, h);
+  /* металлические уголки */
+  ctx.fillStyle = '#4b4f5c';
+  const cs = Math.max(3, s * 0.22);
+  ctx.fillRect(-w / 2, y0, cs, cs);
+  ctx.fillRect(w / 2 - cs, y0, cs, cs);
+  ctx.fillRect(-w / 2, y0 + h - cs, cs, cs);
+  ctx.fillRect(w / 2 - cs, y0 + h - cs, cs, cs);
+  /* замок-задвижка по центру передней грани */
+  ctx.fillStyle = '#5c6172';
+  ctx.fillRect(-s * 0.16, y0 + h * 0.38, s * 0.32, s * 0.34);
+  ctx.strokeStyle = '#23252d';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-s * 0.16, y0 + h * 0.38, s * 0.32, s * 0.34);
+  ctx.fillStyle = '#23252d';
+  ctx.beginPath();
+  ctx.arc(0, y0 + h * 0.38 + s * 0.17, Math.max(1, s * 0.05), 0, Math.PI * 2);
+  ctx.fill();
+  /* блик сверху */
+  ctx.fillStyle = 'rgba(255,224,150,0.20)';
+  ctx.fillRect(-w / 2 + 2, y0 + 1.5, w - 4, 2);
+  ctx.restore();
+};
+
 const PLANE = ['...1...', '..111..', '1111111', '..111..', '..1.1..']; // схематичный самолёт (вид сверху)
 const FLAG = ['1....', '1111.', '11111', '1111.', '1....'];
 const flagIcon = (ctx: CanvasRenderingContext2D, s: number, color: string) => {
@@ -563,6 +634,44 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.fill();
       ctx.restore();
     }
+  }
+
+  // v0.55 ДВЕРИ (цветные ключи): стены с key в игре ВИДНЫ — цветная зона с пунктирной
+  // рамкой и замком; фишка с ключом того же цвета проходит сквозь (стена «открыта»).
+  // Снятые квестом стены (wallsRemoved) не рисуются вовсе.
+  for (const w of map.walls ?? []) {
+    if (!w.key) continue; // обычные невидимые стены по-прежнему НЕ рисуются
+    if (w.id && o.wallsRemoved?.includes(w.id)) continue;
+    const pulse = 0.5 + 0.5 * Math.sin(o.time / 460 + w.x * 0.013 + w.y * 0.007);
+    const hex = doorKeyHex(w.key);
+    const rgb = `${parseInt(hex.slice(1, 3), 16)},${parseInt(hex.slice(3, 5), 16)},${parseInt(hex.slice(5, 7), 16)}`;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(w.x, w.y, w.w, w.h);
+    ctx.fillStyle = `rgba(${rgb},${(0.13 + 0.08 * pulse).toFixed(3)})`;
+    ctx.fill();
+    ctx.setLineDash([10, 7]);
+    ctx.strokeStyle = `rgba(${rgb},${(0.65 + 0.3 * pulse).toFixed(3)})`;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    /* замок в центре двери (если зона не крошечная) */
+    if (w.w > 34 && w.h > 34) {
+      const cx = w.x + w.w / 2, cy = w.y + w.h / 2;
+      const R = Math.min(w.w, w.h) * 0.16;
+      ctx.fillStyle = `rgba(${rgb},0.9)`;
+      ctx.fillRect(cx - R * 0.8, cy - R * 0.1, R * 1.6, R * 1.25);
+      ctx.beginPath();
+      ctx.arc(cx, cy - R * 0.1, R * 0.52, Math.PI, 0);
+      ctx.lineWidth = Math.max(1.5, R * 0.28);
+      ctx.strokeStyle = `rgba(${rgb},0.9)`;
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(7,9,18,0.85)';
+      ctx.beginPath();
+      ctx.arc(cx, cy + R * 0.42, R * 0.18, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
   }
 
   // сетка — только на картах без фона (поверх картинки она мешает)
@@ -797,6 +906,9 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
           ctx.fillStyle = 'rgba(7,9,18,0.72)';
           ctx.fillRect(-W / 2 + 4, areaTop2 + 2, icw, 12);
           px(ctx, -W / 2 + 7, areaTop2 + 4, 2, icon, iconColor);
+        } else if (cell.type === 'loot') {
+          /* v0.55: ЦЕЛЫЙ ЯЩИК — красивый деревянный (вместо пиксельного силуэта с перекрестием) */
+          drawCrate(ctx, 0, H * 0.06, Math.min(W, H) * 0.26);
         } else {
           px(ctx, -icon[0].length * 3, -H / 2 + (cell.color ? 24 : 12), 6, icon, iconColor);
         }
@@ -834,9 +946,14 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(cellImg, -11, -13, 22, 22);
       } else {
-        const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : cell.type === 'quiz' ? QUIZ : cell.type === 'rest' ? REST : cell.type === 'loot' ? BOX : PAD;
-        const iconColor = cell.type === 'task' ? '#ffcf3f' : cell.type === 'quiz' ? '#5aa9ff' : cell.type === 'rest' ? '#7c86b8' : cell.type === 'loot' ? '#ff8b3f' : edge;
-        px(ctx, -icon[0].length * 2, -14, 4, icon, iconColor);
+        if (cell.type === 'loot') {
+          /* v0.55: ЦЕЛЫЙ ЯЩИК — малая ячейка тоже с нормальным ящиком */
+          drawCrate(ctx, 0, 2, 9);
+        } else {
+          const icon = cell.type === 'bonus' ? STAR : cell.type === 'trap' ? SKULL : cell.type === 'quiz' ? QUIZ : cell.type === 'rest' ? REST : PAD;
+          const iconColor = cell.type === 'task' ? '#ffcf3f' : cell.type === 'quiz' ? '#5aa9ff' : cell.type === 'rest' ? '#7c86b8' : edge;
+          px(ctx, -icon[0].length * 2, -14, 4, icon, iconColor);
+        }
       }
       if (cell.label) {
         ctx.fillStyle = '#e9ecff';
@@ -1430,6 +1547,10 @@ export function drawRubgOverlay(
     const s = Math.min(b.w, b.h) * 0.34;
     ctx.save();
     ctx.translate(cx, cy);
+    /* v0.55: НЕПРОЗРАЧНАЯ подложка цветом ячейки — старая иконка ящика с перекрестием
+       больше НЕ просвечивает сквозь вскрытый ящик (открытый — просто открытый) */
+    ctx.fillStyle = '#4a2a08';
+    ctx.fillRect(-s * 1.35, -s * 1.45, s * 2.7, s * 2.75);
     /* тень-проём */
     ctx.fillStyle = 'rgba(0,0,0,0.35)';
     ctx.fillRect(-s * 1.05, -s * 0.9, s * 2.1, s * 1.5);
@@ -1458,14 +1579,17 @@ export function drawRubgOverlay(
     ctx.restore();
   }
 
-  /* ЗАКЛИНИВШИЕ ЯЩИКИ: провал «открыть силой» заклинил замок — этот ящик закрыт для
-     игрока НАВСЕГДА (и отмычкой, и силой). Тёмный приглушённый ящик с красным крестом
-     и подписью «ЗАКЛИНИЛО». Видит только сам игрок (запрет у каждого свой). */
+  /* ЗАКЛИНИВШИЕ (СЛОМАННЫЕ) ЯЩИКИ: провал «открыть силой» заклинил замок — этот ящик
+     закрыт для игрока НАВСЕГДА (и отмычкой, и силой). v0.55: БЕЗ красного перекрестия —
+     тёмный ящик с трещинами, проломом и подписью «ЗАКЛИНИЛО». Видит только сам игрок. */
   for (const b of opts.banned ?? []) {
     const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
     const s = Math.min(b.w, b.h) * 0.34;
     ctx.save();
     ctx.translate(cx, cy);
+    /* v0.55: НЕПРОЗРАЧНАЯ подложка — иконка целого ящика не просвечивает */
+    ctx.fillStyle = '#4a2a08';
+    ctx.fillRect(-s * 1.35, -s * 1.45, s * 2.7, s * 2.75);
     /* затемнение-подложка */
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
     ctx.fillRect(-s * 1.15, -s * 1.3, s * 2.3, s * 2.2);
@@ -1482,15 +1606,30 @@ export function drawRubgOverlay(
     ctx.fillRect(-s * 0.22, -s * 0.05, s * 0.44, s * 0.5);
     ctx.strokeStyle = '#15161c';
     ctx.strokeRect(-s * 0.22, -s * 0.05, s * 0.44, s * 0.5);
-    /* красный крест поверх */
-    ctx.strokeStyle = '#ff4b3f';
-    ctx.lineWidth = 4;
+    /* v0.55: БЕЗ красного перекрестия — сломанный ящик выглядит СЛОМАННЫМ:
+       трещины по корпусу и выломанная доска */
+    ctx.strokeStyle = 'rgba(12,10,8,0.85)';
+    ctx.lineWidth = 1.6;
     ctx.beginPath();
-    ctx.moveTo(-s * 0.95, -s * 0.85);
-    ctx.lineTo(s * 0.95, s * 0.65);
-    ctx.moveTo(s * 0.95, -s * 0.85);
-    ctx.lineTo(-s * 0.95, s * 0.65);
+    ctx.moveTo(-s * 0.55, -s * 0.2);
+    ctx.lineTo(-s * 0.25, s * 0.08);
+    ctx.lineTo(-s * 0.42, s * 0.3);
+    ctx.lineTo(-s * 0.1, s * 0.62);
     ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(s * 0.6, -s * 0.1);
+    ctx.lineTo(s * 0.3, s * 0.15);
+    ctx.lineTo(s * 0.5, s * 0.42);
+    ctx.stroke();
+    /* выломанная доска — тёмный пролом в углу */
+    ctx.fillStyle = 'rgba(10,8,6,0.9)';
+    ctx.beginPath();
+    ctx.moveTo(s * 0.75, -s * 0.2);
+    ctx.lineTo(s * 0.98, -s * 0.05);
+    ctx.lineTo(s * 0.9, s * 0.35);
+    ctx.lineTo(s * 0.62, s * 0.22);
+    ctx.closePath();
+    ctx.fill();
     /* подпись «ЗАКЛИНИЛО» над ящиком */
     ctx.fillStyle = '#ff6b5f';
     ctx.font = '7px "Press Start 2P", monospace';

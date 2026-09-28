@@ -8,7 +8,7 @@ import { TradeShopEditor } from './TradeEditor';
 import { allDlgFlags, ensureQuestDialog, ensureShopDialog } from '../dialogHubs';
 import { idbPut, uid } from '../db';
 import type { GameMap, MapEnding, NpcDialog, NpcLibEntry, NpcQuest, PlacedNpc, QuestGoal, QuestGoalKind } from '../types';
-import { isQuestMode, questGoalText } from '../types';
+import { isQuestMode, questGoalText, DOOR_KEYS } from '../types';
 import { HoldDeleteButton } from '../delGuard';
 import { sfx } from '../sound';
 
@@ -313,6 +313,11 @@ export default function QuestEditor() {
                           <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: бронза"><Coin size={10} /><input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.coins ?? 0} onChange={(ev) => updQuest(selIdx, q.id, { reward: { ...q.reward, coins: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
                           <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: минуты">⏱<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.min ?? 0} onChange={(ev) => updQuest(selIdx, q.id, { reward: { ...q.reward, min: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
                           <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: попытки">🎯<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.tries ?? 0} onChange={(ev) => updQuest(selIdx, q.id, { reward: { ...q.reward, tries: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
+                          {/* v0.55: ЦВЕТНОЙ КЛЮЧ в награде квеста */}
+                          <select className="field-in px-1 py-0.5 text-[10px]" title="Награда: цветной ключ — открывает дверь того же цвета (не расходуется)" value={q.reward.key ?? ''} onChange={(ev) => updQuest(selIdx, q.id, { reward: { ...q.reward, key: (ev.target.value || undefined) as NonNullable<typeof q.reward>['key'] } })}>
+                            <option value="">🔑 нет</option>
+                            {DOOR_KEYS.map((k) => <option key={k.id} value={k.id}>🔑 {k.name}</option>)}
+                          </select>
                         </div>
                         {(map.walls ?? []).filter((w) => w.id).length > 0 && (
                           <div className="space-y-1">

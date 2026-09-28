@@ -777,8 +777,11 @@ export function DialogueGraph({ dialog, endings, selId, onSelect, pos, onPos, op
                 </g>
               )}
               <text x={p.x + 8} y={p.y + h - 4} fontSize={8.5} className="font-display" fill={opts.length ? C_TEAL : '#ff5d73'}>{opts.length} отв.</text>
+              {/* v0.55: «⚠ не связан» переехал из правого верхнего угла (где перекрывал
+                  красный ✕ удаления узла и не давал нажать) В НИЖНЮЮ СТРОКУ, к «N отв.»;
+                  pointerEvents="none» — значок никогда не перехватывает клики */}
+              {orphan && <text x={p.x + 44} y={p.y + h - 4} fontSize={9} fill="#ff5d73" pointerEvents="none">⚠ не связан</text>}
               {(hasSet || hasReq) && <text x={p.x + NW - 40} y={p.y + h - 4} fontSize={8}>{hasSet ? '🚩' : ''}{hasReq ? '🔒' : ''}</text>}
-              {orphan && <text x={p.x + NW - 14} y={p.y + 15} fontSize={9} fill="#ff5d73">⚠</text>}
             </g>
           );
         })}
@@ -1195,9 +1198,10 @@ export function QuestMapGraph({ map, pos, onPos, onSelectNpc, onSelectEnding, se
                   );
                 })}
                 <text x={p.x + 8} y={p.y + h - 4} fontSize={8.5} className="font-display" fill={opts.length ? C_TEAL : '#ff5d73'}>{opts.length} отв.</text>
+                {/* v0.55: ⚠ — в нижнюю строку (перекрывал СТАРТ/крестик в шапке) */}
+                {orphan && <text x={p.x + 44} y={p.y + h - 4} fontSize={9} fill="#ff5d73" pointerEvents="none">⚠ не связан</text>}
                 {opts.some((o) => o.setFlag) && <text x={p.x + NW - 44} y={p.y + h - 4} fontSize={8.5}>🚩</text>}
                 {opts.some((o) => o.reqFlag || o.reqNotFlag) && <text x={p.x + NW - 26} y={p.y + h - 4} fontSize={8.5}>🔒</text>}
-                {orphan && <text x={p.x + NW - 13} y={p.y + 15} fontSize={9} fill="#ff5d73">⚠</text>}
               </g>
             );
           });

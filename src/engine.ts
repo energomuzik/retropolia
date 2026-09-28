@@ -1,5 +1,5 @@
 import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, NpcReward, NpcShopOffer, PlayerState, QuestGoal, RubgItemKind, RubgZonePhasePlan, TaskDef, TradeOffer, TokenDir } from './types';
-import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, isQuestMode, questGoalText, tileAt, tileRectOf, coinsStr, normResMode, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, RUBG_ZONE_DEFAULT_SEC, rubgFmtZone, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx } from './types';
+import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, isQuestMode, questGoalText, tileAt, tileRectOf, coinsStr, normResMode, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, RUBG_ZONE_DEFAULT_SEC, rubgFmtZone, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx, doorKeyName } from './types';
 import type { RubgItem } from './types';
 import type { JoyId } from './types';
 import { CELL, cellAtPoint, cellCenter, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
@@ -126,10 +126,13 @@ export function cellRectOf(map: GameMap, idx: number) {
 }
 
 /* НЕВИДИМЫЕ СТЕНЫ (JOURNEY): точка (центр фишки) внутри стены?
-   Стены хранятся углом (x,y — левый верх) + размер; ходить можно везде, кроме них. */
-function pointInWall(map: GameMap, x: number, y: number, removed?: string[]): boolean {
+   Стены хранятся углом (x,y — левый верх) + размер; ходить можно везде, кроме них.
+   v0.55: стена с key — ЗАПЕРТАЯ ДВЕРЬ цвета: точка считается вне стены, только если
+   у фишки ЕСТЬ ключ этого цвета (keys — список цветов ключей игрока). */
+function pointInWall(map: GameMap, x: number, y: number, removed?: string[], keys?: string[]): boolean {
   for (const w of map.walls ?? []) {
     if (w.id && removed?.includes(w.id)) continue; // стена СНЯТА выполнением квеста NPC
+    if (w.key && keys?.includes(w.key)) continue; // v0.55: дверь открыта КЛЮЧОМ того же цвета
     if (x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h) return true;
   }
   return false;
@@ -233,6 +236,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     base.qBossDownAt = base.qBossDownAt ?? {};
     base.qCaptureAt = base.qCaptureAt ?? {};
     base.qBossHoldAt = base.qBossHoldAt ?? {};
+    /* v0.55: ключи/ячейка оттаскивания/куллдаун захвата + хвосты старых сейвов */
+    base.qKeys = base.qKeys ?? {};
+    base.qCaptureCell = base.qCaptureCell ?? {};
+    base.qCaptureCd = base.qCaptureCd ?? {};
     if (base.rubg !== undefined) {
       base.rubg.jobs = base.rubg.jobs ?? {};
       base.rubg.looted = base.rubg.looted ?? [];
@@ -280,6 +287,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   if (!s.qBossDownAt) s.qBossDownAt = {};
   if (!s.qCaptureAt) s.qCaptureAt = {};
   if (!s.qBossHoldAt) s.qBossHoldAt = {};
+  /* v0.55: ключи/ячейка оттаскивания/куллдаун захвата — старые сейвы */
+  if (!s.qKeys) s.qKeys = {};
+  if (!s.qCaptureCell) s.qCaptureCell = {};
+  if (!s.qCaptureCd) s.qCaptureCd = {};
   if (s.rubg !== undefined) {
     // старые сессии RUBG без части полей
     s.rubg.jobs = s.rubg.jobs ?? {};
@@ -330,19 +341,33 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
 
   const checkElim = () => {
     /* монеты-единственный ресурс (coinsOnly): вылетает тот, у кого кончились МОНЕТЫ;
-       в смешанном режиме монеты не убивают — вылет по времени+попыткам как раньше */
-    const coinsFatal = map.coinsOnly === true && map.startCoins !== undefined;
+       в смешанном режиме монеты не убивают — вылет по времени+попыткам как раньше.
+       v0.55 QUEST: монеты НЕ убивают НИКОГДА (денег нет — ничего не происходит);
+       главный ресурс — ПОЛОСКА HP (ноль = вылет); std-карты ещё и время/попытки. */
+    const questMode = isQuestMode(map.mode);
+    const coinsFatal = map.coinsOnly === true && map.startCoins !== undefined && !questMode;
     const isRubg = map.mode === 'rubg';
     const hpRes = isRubg || map.resMode === 'hp'; // ресурс «полоска HP» — вылет по нулю HP (RUBG и карты с выбором «HP»)
     const resM = normResMode(map.resMode); // время+попытки — один ресурс (time/tries нормализуются в std)
     const failsLimit = map.questDefeatFails && map.questDefeatFails > 0 ? Math.floor(map.questDefeatFails) : 0; // QUEST: поражение при N провалах
     for (const p of s.players) {
-      const out = hpRes
-        ? (p.hp ?? RUBG_HP_MAX) <= 0 // HP-ресурс: единственный ресурс — полоска HP
-        : resM === 'time' ? p.secLeft <= 0 // ОДИН ресурс «время» (мастер челленджа) — попытки не считаются
-        : resM === 'tries' ? p.triesLeft <= 0 // ОДИН ресурс «попытки»
-        : coinsFatal ? (p.coinsLeft ?? 0) <= 0 : (p.secLeft <= 0 && p.triesLeft <= 0 && (!coinsFatal || (p.coinsLeft ?? 0) <= 0));
-      const failedOut = !out && failsLimit > 0 && isQuestMode(map.mode) && (s.qFails?.[p.id] ?? 0) >= failsLimit;
+      const hpZero = (p.hp ?? RUBG_HP_MAX) <= 0;
+      let out: boolean;
+      if (questMode) {
+        /* QUEST: проигрыш = HP на нуле; std-карты выбивают ещё и временем/попытками; МОНЕТЫ не убивают */
+        out = hpZero || (resM === 'std' ? (p.secLeft <= 0 || p.triesLeft <= 0) : false);
+      } else if (hpRes) {
+        out = hpZero; // HP-ресурс: единственный ресурс — полоска HP
+      } else if (resM === 'time') {
+        out = p.secLeft <= 0; // ОДИН ресурс «время» (мастер челленджа) — попытки не считаются
+      } else if (resM === 'tries') {
+        out = p.triesLeft <= 0; // ОДИН ресурс «попытки»
+      } else if (coinsFatal) {
+        out = (p.coinsLeft ?? 0) <= 0;
+      } else {
+        out = p.secLeft <= 0 && p.triesLeft <= 0;
+      }
+      const failedOut = !out && failsLimit > 0 && questMode && (s.qFails?.[p.id] ?? 0) >= failsLimit;
       if (p.alive && !p.spect && (out || failedOut)) {
         p.alive = false;
         if (s.challenge && current().id === p.id) s.challenge = null;
@@ -380,7 +405,12 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
      bossCaptureDo — ОТТАСКИВАНИЕ: фишка переносится на ПЕРВУЮ ТОЧКУ ПАТРУЛЯ босса
      (клиент по qCaptureAt плавно тащит фишку — видно, как босс уводит игрока),
      патруль босса ДЛЯ ЭТОГО ИГРОКА замирает (qBossHoldAt — «после поимки он прекращает
-     патрулирование»), незаконченное задание бросается, уведомление + лог. */
+     патрулирование»), незаконченное задание бросается, уведомление + лог.
+     v0.55: (а) ячейка приземления помечается qCaptureCell — её проход НЕ срабатывает
+     сразу после оттаскивания (никаких передышек/карточек «на 1 клетке»);
+     (б) СРАЗУ запускается ЗАДАНИЕ БОССА (задание ячейки, где стоит босс) —
+     приземлился = играешь задание босса, никаких пустых экранов;
+     (в) куллдаун qCaptureCd 6 с — босс не может сразу схватить заново. */
   const bossHoldOf = (pid: string): Record<string, number> => {
     s.qBossHoldAt = s.qBossHoldAt ?? {};
     return (s.qBossHoldAt[pid] = s.qBossHoldAt[pid] ?? {});
@@ -397,10 +427,74 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     s.qCaptureAt = s.qCaptureAt ?? {};
     s.qCaptureAt[p.id] = now;
     bossHoldOf(p.id)[b.id] = now; // ПОСЛЕ ПОИМКИ БОСС ПРЕКРАЩАЕТ ПАТРУЛЬ (для этого игрока)
-    if (s.qJobs?.[p.id]) { delete s.qJobs[p.id]; log(`👹 ${p.name} брошен посреди задания — босс утащил его к своей точке патруля`); }
-    s.notice = { text: `👹 Босс${bossNameOf(b.bid)} ПОЙМАЛ вас и оттащил на свою первую точку патруля! Патруль босса остановлен.`, ts: now };
-    log(`👹 Босс${bossNameOf(b.bid)} ПОЙМАЛ игрока ${p.name} и оттащил фишку на ПЕРВУЮ ТОЧКУ ПАТРУЛЯ — патруль остановлен!`);
+    /* v0.55: КУЛЛДАУН — 6 с после поимки босс не ловит этого игрока заново */
+    s.qCaptureCd = s.qCaptureCd ?? {};
+    s.qCaptureCd[p.id] = now + 6000;
+    /* v0.55: помечаем ячейку приземления — её проход не срабатывает сразу после оттаскивания */
+    const landIdx = cellAtPoint(map, p0.x, p0.y);
+    if (landIdx >= 0) {
+      p.pos = landIdx;
+      if (!s.revealed.includes(landIdx)) s.revealed.push(landIdx);
+      s.qCaptureCell = s.qCaptureCell ?? {};
+      s.qCaptureCell[p.id] = landIdx;
+    }
+    const wasJob = !!s.qJobs?.[p.id];
+    if (s.qJobs?.[p.id]) delete s.qJobs[p.id];
+    /* v0.55: ЗАДАНИЕ БОССА СРАЗУ ЗАПУСКАЕТСЯ — приземлился = играешь его задание.
+     Боссовая ячейка = ячейка, где БОСС СТОИТ (та же, что отмечается при победе над ним).
+     Если там задание и игрок его ещё не победил — личное задание открывается немедленно. */
+    let taskStarted = false;
+    const bossCell = cellAtPoint(map, b.x, b.y);
+    if (bossCell >= 0 && bossCell !== landIdx) {
+      const br = cellRectOf(map, bossCell);
+      if (br) {
+        s.journeyPos[p.id] = { x: br.x + br.w / 2, y: br.y + br.h / 2, ts: now, mv: false };
+        p.pos = bossCell;
+        if (!s.revealed.includes(bossCell)) s.revealed.push(bossCell);
+        if (s.qCaptureCell) s.qCaptureCell[p.id] = bossCell;
+      }
+    }
+    if (bossCell >= 0) {
+      const bc = map.cells[bossCell];
+      const done = s.qDone?.[p.id] ?? [];
+      if (bc?.type === 'task' && !done.includes(bossCell) && cellTaskOf(s, map, bossCell)) {
+        s.qJobs = s.qJobs ?? {};
+        s.qJobs[p.id] = { cellIdx: bossCell, startedAt: Date.now() };
+        taskStarted = true;
+      }
+    }
+    s.notice = { text: `👹 Босс${bossNameOf(b.bid)} ПОЙМАЛ вас и оттащил на свою первую точку патруля! Патруль босса остановлен.${taskStarted ? ' Задание босса начинается!' : ''}`, ts: now };
+    log(`👹 Босс${bossNameOf(b.bid)} ПОЙМАЛ игрока ${p.name} и оттащил фишку на ПЕРВУЮ ТОЧКУ ПАТРУЛЯ — патруль остановлен!${wasJob ? ' Незаконченное задание брошено.' : ''}${taskStarted ? ' Задание босса началось.' : ''}`);
     return true;
+  };
+
+  /* ---------- v0.55: КАСТОМНАЯ ЦЕНА ЗАДАНИЯ (п.7) ----------
+   Ставки конкретного задания: если поле у TaskDef НЕ задано — действует СТАНДАРТ КАРТЫ
+   (taskWinCoins/skipCoins/RUBG_WIN_HP/RUBG_LOSE_HP). defWin — дефолт награды монетами
+   для карт без настройки (в QUEST — 10 бронзы). */
+  const taskStakeOf = (cellIdx: number, defWin = 0): { winC: number; loseC: number; winH: number; loseH: number } => {
+    const tk = cellTaskOf(s, map, cellIdx);
+    return {
+      winC: tk?.winCoins !== undefined ? Math.max(0, Math.floor(tk.winCoins)) : Math.max(0, Math.floor(map.taskWinCoins ?? defWin)),
+      loseC: tk?.loseCoins !== undefined ? Math.max(0, Math.floor(tk.loseCoins)) : Math.max(0, Math.floor(map.skipCoins ?? SKIP_COINS_DEFAULT)),
+      winH: tk?.winHp !== undefined ? Math.max(0, Math.floor(tk.winHp)) : RUBG_WIN_HP,
+      loseH: tk?.loseHp !== undefined ? Math.max(0, Math.floor(tk.loseHp)) : RUBG_LOSE_HP,
+    };
+  };
+  /* ---------- v0.55: SKILL «СЛУЧАЙНЫЕ ЗАДАНИЯ» — случайная ячейка с заданием ----------
+   Приоритет — ещё НЕ сыгранные (не в skillDone); если всё сыграно — любая с заданием. */
+  const randomSkillTaskCell = (excludeIdx: number): number => {
+    const done = s.skillDone ?? [];
+    const fresh: number[] = [];
+    const used: number[] = [];
+    for (let i = 0; i < map.cells.length; i++) {
+      const c = map.cells[i];
+      if (!c || c.type !== 'task' || s.broken?.[i] || i === excludeIdx) continue;
+      if (!cellTaskOf(s, map, i)) continue;
+      (done.includes(i) ? used : fresh).push(i);
+    }
+    const pool = fresh.length ? fresh : used;
+    return pool.length ? pool[Math.floor(Math.random() * pool.length)] : -1;
   };
 
   /* ---------- QUEST / QUEST SOLO: цели, концовки, награды ----------
@@ -476,9 +570,16 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     const coins = Math.max(0, Math.floor(r.coins ?? 0));
     const min = Math.max(0, Math.floor(r.min ?? 0));
     const tries = Math.max(0, Math.floor(r.tries ?? 0));
-    if (coins > 0 && map.startCoins !== undefined) { p.coinsLeft = Math.min(COINS_MAX, (p.coinsLeft ?? 0) + coins); parts.push(`+${coins} бронзы`); }
+    if (coins > 0 && (map.startCoins !== undefined || isQuestMode(map.mode))) { p.coinsLeft = Math.min(COINS_MAX, (p.coinsLeft ?? 0) + coins); parts.push(`+${coins} бронзы`); }
     if (min > 0) { p.secLeft += min * 60; parts.push(`+${min} мин`); }
     if (tries > 0) { p.triesLeft += tries; parts.push(`+${tries} поп.`); }
+    /* v0.55: ЦВЕТНОЙ КЛЮЧ — открывает дверь того же цвета (стена с key); не расходуется */
+    if (r.key) {
+      s.qKeys = s.qKeys ?? {};
+      const lst = s.qKeys[p.id] = s.qKeys[p.id] ?? [];
+      if (!lst.includes(r.key)) lst.push(r.key);
+      parts.push(`🔑 ключ (${doorKeyName(r.key)})`);
+    }
     if (parts.length) log(`🎁 ${p.name}: ${what} — ${parts.join(' ')}`);
     return parts.join(' ');
   };
@@ -573,7 +674,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
        цены RUBG_ITEMS[kind].cost; касса пуста — выкуп стоит;
      • сделка атомарна: не проходит целиком — откатывается целиком. */
   const doTrade = (s: GameSession, map: GameMap, p: PlayerState, npcId: string, buys: { offerId: string; qty: number }[], sells: string[]) => {
-    if (map.startCoins === undefined) { log('🛒 Торговля недоступна: на карте не включён ресурс «монеты» (Ресурс игроков → Монеты).'); return; }
+    /* v0.55: в QUEST торговля работает ВСЕГДА (у игрока есть кошелёк даже без явного включения монет) */
+    if (map.startCoins === undefined && !isQuestMode(map.mode)) { log('🛒 Торговля недоступна: на карте не включён ресурс «монеты» (Ресурс игроков → Монеты).'); return; }
     const npc = (map.npcs ?? []).find((x) => x.id === npcId);
     if (!npc || !(npc.shop ?? []).length) return;
     const npcName = (map.npcLib ?? []).find((x) => x.id === npc.nid)?.name ?? 'NPC';
@@ -863,28 +965,30 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     p.secLeft = Math.max(0, p.secLeft - spentSec);
     p.triesLeft = Math.max(0, p.triesLeft - spentTries);
     /* МОНЕТЫ (если включены на карте): победа — награда, пропуск/проигрыш — цена.
-       Выплаты монетами идут ПОВЕРХ обычной цены времени/попыток. */
+       Выплаты монетами идут ПОВЕРХ обычной цены времени/попыток.
+       v0.55: у задания может быть КАСТОМНАЯ цена (winCoins/loseCoins) — она важнее стандарта карты. */
     if (map.startCoins !== undefined) {
-      const winC = Math.max(0, Math.floor(map.taskWinCoins ?? 0));
-      const skipC = Math.max(0, Math.floor(map.skipCoins ?? SKIP_COINS_DEFAULT));
-      if (success && winC > 0) {
-        p.coinsLeft = Math.min(COINS_MAX, (p.coinsLeft ?? 0) + winC);
-        log(`🪙 Награда монетами: +${winC} бронзы — капитал ${coinsStr(p.coinsLeft)}`);
+      const stake = taskStakeOf(ch.cellIdx);
+      if (success && stake.winC > 0) {
+        p.coinsLeft = Math.min(COINS_MAX, (p.coinsLeft ?? 0) + stake.winC);
+        log(`🪙 Награда монетами: +${stake.winC} бронзы — капитал ${coinsStr(p.coinsLeft)}`);
       }
-      if (!success && skipC > 0) {
-        p.coinsLeft = Math.max(0, (p.coinsLeft ?? 0) - skipC);
-        log(`🪙 Плата за пропуск: −${skipC} бронзы — капитал ${coinsStr(p.coinsLeft)}`);
+      if (!success && stake.loseC > 0) {
+        p.coinsLeft = Math.max(0, (p.coinsLeft ?? 0) - stake.loseC);
+        log(`🪙 Плата за пропуск: −${stake.loseC} бронзы — капитал ${coinsStr(p.coinsLeft)}`);
       }
     }
     /* РЕСУРС «ПОЛОСКА HP» (карты с выбором «HP»; RUBG не попадает — у него личные задания):
-       победа +10% HP, поражение/пропуск −5% HP (плата по итогам, как в RUBG) */
+       победа +10% HP, поражение/пропуск −5% HP (плата по итогам, как в RUBG).
+       v0.55: у задания может быть КАСТОМНАЯ цена HP (winHp/loseHp). */
     if (map.resMode === 'hp' && map.mode !== 'rubg') {
+      const stake = taskStakeOf(ch.cellIdx);
       if (success) {
-        p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? RUBG_HP_MAX) + RUBG_WIN_HP);
-        log(`❤️ +${RUBG_WIN_HP}% HP — полоска ${Math.round(p.hp)}%`);
+        p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? RUBG_HP_MAX) + stake.winH);
+        log(`❤️ +${stake.winH}% HP — полоска ${Math.round(p.hp)}%`);
       } else {
-        p.hp = Math.max(0, (p.hp ?? RUBG_HP_MAX) - RUBG_LOSE_HP);
-        log(`💔 −${RUBG_LOSE_HP}% HP — полоска ${Math.round(p.hp)}%`);
+        p.hp = Math.max(0, (p.hp ?? RUBG_HP_MAX) - stake.loseH);
+        log(`💔 −${stake.loseH}% HP — полоска ${Math.round(p.hp)}%`);
       }
     }
     /* СВОЙ ЧЕЛЛЕНДЖ — штраф за проигрыш и награда за победу (задаётся мастером
@@ -1113,9 +1217,21 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       endTurnNow();
       return;
     }
+    /* v0.55 SKILL «СЛУЧАЙНЫЕ ЗАДАНИЯ»: с ячейки, на которую встали, запускается
+       задание СЛУЧАЙНОЙ ячейки карты (все задания перемешаны). */
+    let taskCell = p.pos;
+    let playTask = task;
+    if (map.mode === 'skill' && map.skillRandom) {
+      const rnd = randomSkillTaskCell(p.pos);
+      if (rnd >= 0) {
+        taskCell = rnd;
+        playTask = cellTaskOf(s, map, rnd)!;
+        log(`🎰 СЛУЧАЙНОЕ ЗАДАНИЕ: встал на ячейку ${posName(p.pos)} — выпало задание с ячейки ${posName(rnd)}`);
+      }
+    }
     s.notice = null;
     s.challenge = {
-      cellIdx: p.pos, mode: null, started: false, paused: false, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
+      cellIdx: taskCell, mode: null, started: false, paused: false, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
       status: 'choose', approvals: [], violations: [], lowStart: false,
     };
     /* ТОЛЬКО МОНЕТЫ: выбора ресурса нет — задание сразу готово к запуску (платёж по итогам) */
@@ -1130,9 +1246,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     /* «только время»/«только попытки» упразднены (v0.50.0): при ресурсе «время и попытки» (std)
        игрок сам выбирает, чем играть в окне задания — ветки автоготовности больше не нужны */
     const owner = s.captured[p.pos] ? s.players.find((x) => x.id === s.captured[p.pos]) : null;
-    log(`🎯 ${p.name}: задание на ячейке ${posName(p.pos)}${owner ? ` (хозяин ${owner.name})` : ''}`);
+    log(`🎯 ${p.name}: задание на ячейке ${posName(p.pos)}${owner ? ` (хозяин ${owner.name})` : ''}${taskCell !== p.pos ? ` → играет задание ячейки ${posName(taskCell)}` : ''}`);
     /* пакость «Один кубик»: следующий бросок вставшего — только один кубик */
-    if (task.chaos === 'oneDie' && s.captured[p.pos] !== p.id && !p.oneDie) {
+    if (playTask.chaos === 'oneDie' && s.captured[p.pos] !== p.id && !p.oneDie) {
       p.oneDie = true;
       log(`😈 Один кубик: следующий бросок ${p.name} — только один кубик`);
     }
@@ -1378,6 +1494,12 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const startPos = startCellIdx(map);
       for (const p of s.players) {
         p.secLeft = sm * 60; p.triesLeft = st; p.coinsLeft = sc0; p.pos = startPos;
+        /* v0.55 QUEST — СМЕСЬ РЕСУРСОВ: полоска HP у всех + кошелёк даже если автор
+           забыл включить монеты (торговля должна работать) */
+        if (isQuestMode(map.mode)) {
+          p.hp = RUBG_HP_MAX;
+          if (map.startCoins === undefined) p.coinsLeft = 100;
+        }
         if (soloMode) p.spect = !p.isHost; // играет только хост — остальные смотрят
         if (map.mode === 'rubg') { p.hp = RUBG_HP_MAX; p.items = [{ ...rubgMkItem('lockpick'), belt: true }]; p.stealth = false; } // стартовая ОТМЫЧКА на поясе — механику взлома можно пробовать сразу
       }
@@ -1578,7 +1700,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     /* ---------- JOURNEY / JOURNEY SOLO / RUBG: прямое управление фишкой ----------
        JOURNEY — все игроки ходят ОДНОВРЕМЕННО; JOURNEY SOLO — только хост, остальные зрители. */
     case 'journeyMove': {
-      if (s.phase !== 'playing' || !isJourneyLike(map.mode)) break;
+      /* v0.55: в SKILL CHALLENGE с тумблером «свободное перемещение» хост тоже ходит напрямую */
+      const walkableMode = isJourneyLike(map.mode) || (map.mode === 'skill' && !!map.skillFree);
+      if (s.phase !== 'playing' || !walkableMode) break;
       /* Очередь ходов отсутствует — каждый игрок ведёт СВОЮ фишку
          (авторитет проверок — хост). Зритель и выбывший не ходят. */
       const p = s.players.find((x) => x.id === a.id);
@@ -1597,8 +1721,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         x = cl.x; y = cl.y;
       }
       /* НЕВИДИМЫЕ СТЕНЫ: фишка не может зайти в стену (клиент скользит по стене сам —
-         сюда точка внутри стены попадает только при рассинхроне) */
-      if (pointInWall(map, x, y, s.wallsRemoved)) break;
+         сюда точка внутри стены попадает только при рассинхроне). v0.55: у игрока
+         есть ЦВЕТНЫЕ КЛЮЧИ — через дверь его цвета он ПРОХОДИТ. */
+      if (pointInWall(map, x, y, s.wallsRemoved, s.qKeys?.[p.id])) break;
       /* защита от телепортаций: одно обновление не дальше 2.5 клеток от прошлой позиции.
          СТОП-обновление (mv=false) принимаем всегда — игрок реально стоит в этой точке,
          иначе при сетевом заторе цепочка отклонённых апдейтов «застревала» надолго. */
@@ -1638,6 +1763,13 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
          же ячейку каждый победивает сам. Бонусы/ловушки выдают карточку вошедшему.
          Квизовых ячеек в QUEST нет (запрещены редактором). */
       if (isQuestMode(map.mode)) {
+        /* v0.55: ячейка, на которую игрока ОТТАЩИЛ БОСС — её проход не срабатывает,
+           пока он стоит в ней (сброс — при выходе). Никаких передышек/карточек после поимки. */
+        const capCell = s.qCaptureCell?.[p.id];
+        if (capCell !== undefined) {
+          const cr = cellRectOf(map, capCell);
+          if (cr === null || !(x >= cr.x && x < cr.x + cr.w && y >= cr.y && y < cr.y + cr.h)) delete s.qCaptureCell[p.id];
+        }
         for (let i = 0; i < map.cells.length; i++) {
           const c = map.cells[i];
           const r = cellRectOf(map, i);
@@ -1646,6 +1778,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           if (!inNew) continue;
           const inOld = !!prev && prev.x >= r.x && prev.x < r.x + r.w && prev.y >= r.y && prev.y < r.y + r.h;
           if (inOld) continue; // уже стоял в ней — вход был раньше
+          if (s.qCaptureCell?.[p.id] === i) continue; // v0.55: только что был оттащен боссом сюда — не срабатывает проходом
           p.pos = i;
           if (!s.revealed.includes(i)) s.revealed.push(i);
           if (c.type === 'task') {
@@ -1676,6 +1809,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           const c = map.cells[i];
           if (c.type !== 'task') continue;
           if (s.broken?.[i]) continue; // разбитая ячейка пуста — задание не открывается
+          if (map.mode === 'skill' && (s.skillDone ?? []).includes(i)) continue; // v0.55: SKILL — матч уже сыгран
           const r = cellRectOf(map, i);
           if (!r) continue;
           const inNew = x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
@@ -1687,8 +1821,17 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           p.pos = i;
           if (!s.revealed.includes(i)) s.revealed.push(i);
           s.turn = Math.max(0, s.players.indexOf(p)); // игрок задания — «текущий»: камера/боссы/окно на нём
+          /* v0.55 SKILL «СЛУЧАЙНЫЕ ЗАДАНИЯ»: запускется задание СЛУЧАЙНОЙ ячейки карты */
+          let chIdx = i;
+          if (map.mode === 'skill' && map.skillRandom) {
+            const rnd = randomSkillTaskCell(i);
+            if (rnd >= 0) {
+              chIdx = rnd;
+              log(`🎰 СЛУЧАЙНОЕ ЗАДАНИЕ: вошёл на ячейку ${posName(i)} — выпало задание с ячейки ${posName(rnd)}`);
+            }
+          }
           s.challenge = {
-            cellIdx: i, mode: null, started: false, paused: false, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
+            cellIdx: chIdx, mode: null, started: false, paused: false, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
             status: 'choose', approvals: [], violations: [], lowStart: false,
           };
           /* ТОЛЬКО МОНЕТЫ: без окна выбора — задание сразу готово (платёж по итогам) */
@@ -1932,14 +2075,17 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (!p || !job || job.cellIdx !== a.cellIdx) break;
       delete rg.jobs[p.id];
       if (a.win) {
-        p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? RUBG_HP_MAX) + RUBG_WIN_HP);
+        /* v0.55: кастомная цена задания (winHp) важнее стандарта карты */
+        const stake = taskStakeOf(a.cellIdx);
+        p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? RUBG_HP_MAX) + stake.winH);
         const kind = rubgRandomKind();
         rubgGiveItem(p, kind); // на пояс, если есть слот (макс. 3), иначе в общий инвентарь
         s.captured[a.cellIdx] = p.id; // мгновенный хозяин ячейки (своё задание в RUBG не предлагается)
-        log(`🏆 ${p.name} ПРОШЁЛ задание №${a.cellIdx + 1}: +${RUBG_WIN_HP}% HP, трофей ${RUBG_ITEMS[kind].icon} ${RUBG_ITEMS[kind].name} — HP ${p.hp}%`);
+        log(`🏆 ${p.name} ПРОШЁЛ задание №${a.cellIdx + 1}: +${stake.winH}% HP, трофей ${RUBG_ITEMS[kind].icon} ${RUBG_ITEMS[kind].name} — HP ${p.hp}%`);
       } else {
-        p.hp = Math.max(0, (p.hp ?? RUBG_HP_MAX) - RUBG_LOSE_HP);
-        log(`💢 ${p.name} проиграл задание №${a.cellIdx + 1}: −${RUBG_LOSE_HP}% HP — HP ${p.hp}%`);
+        const stake = taskStakeOf(a.cellIdx);
+        p.hp = Math.max(0, (p.hp ?? RUBG_HP_MAX) - stake.loseH);
+        log(`💢 ${p.name} проиграл задание №${a.cellIdx + 1}: −${stake.loseH}% HP — HP ${p.hp}%`);
       }
       checkElim();
       break;
@@ -1979,11 +2125,13 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         if (!done.includes(a.cellIdx)) done.push(a.cellIdx);
         s.qDone[p.id] = done;
         s.captured[a.cellIdx] = p.id; // визуальная отметка ячейки (прогресс у каждого свой)
-        if (resM === 'coins') {
-          const wc = Math.max(0, Math.floor(map.taskWinCoins ?? 0));
-          if (wc > 0) { p.coinsLeft = Math.min(COINS_MAX, (p.coinsLeft ?? 0) + wc); log(`🪙 Награда: +${wc} бронзы — капитал ${coinsStr(p.coinsLeft)}`); }
+        /* v0.55 QUEST — СМЕСЬ РЕСУРСОВ: победа всегда даёт МОНЕТЫ (кастомная цена задания
+           или стандарт карты; без настройки — 10 бронзы). HP за победу больше НЕ выдаётся —
+           лечимся аптечками из торговли. В std-картах время/попытки считаются как раньше. */
+        {
+          const stake = taskStakeOf(a.cellIdx, 10);
+          if (stake.winC > 0) { p.coinsLeft = Math.min(COINS_MAX, (p.coinsLeft ?? 0) + stake.winC); log(`🪙 Награда: +${stake.winC} бронзы — капитал ${coinsStr(p.coinsLeft)}`); }
         }
-        if (resM === 'hp') { p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? RUBG_HP_MAX) + RUBG_WIN_HP); log(`❤️ +${RUBG_WIN_HP}% HP — полоска ${Math.round(p.hp)}%`); }
         if (map.winMin) { p.secLeft += map.winMin * 60; }
         if (map.winTries) { p.triesLeft += map.winTries; }
         /* Боссы на этой ячейке ПОБЕЖДЕНЫ ЭТИМ ИГРОКОМ (у каждого свой прогресс — босс жив, пока не пал от его руки) */
@@ -2022,11 +2170,16 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
             log(`👹 Босс${bossNameOf(hb.bid)} снова патрулирует — игрок проиграл задание.`);
           }
         }
-        if (resM === 'coins') {
-          const sc = Math.max(0, Math.floor(map.skipCoins ?? SKIP_COINS_DEFAULT));
-          if (sc > 0) { p.coinsLeft = Math.max(0, (p.coinsLeft ?? 0) - sc); log(`🪙 Плата за поражение: −${sc} бронзы — капитал ${coinsStr(p.coinsLeft)}`); }
+        /* v0.55 QUEST — СМЕСЬ РЕСУРСОВ: проигрыш задания ВСЕГДА бьёт по ПОЛОСКЕ HP
+           (кастомная цена задания или стандарт карты — 5%); МОНЕТЫ за проигрыш больше
+           НЕ списываются (деньги — только для торговли). КУЛЛДАУН 8 с: после проигрыша
+           задания босса босс не хватает заново — успей уйти. */
+        {
+          const stake = taskStakeOf(a.cellIdx);
+          if (stake.loseH > 0) { p.hp = Math.max(0, (p.hp ?? RUBG_HP_MAX) - stake.loseH); log(`💔 −${stake.loseH}% HP — полоска ${Math.round(p.hp)}%`); }
+          s.qCaptureCd = s.qCaptureCd ?? {};
+          s.qCaptureCd[p.id] = Date.now() + 8000;
         }
-        if (resM === 'hp') { p.hp = Math.max(0, (p.hp ?? RUBG_HP_MAX) - RUBG_LOSE_HP); log(`💔 −${RUBG_LOSE_HP}% HP — полоска ${Math.round(p.hp)}%`); }
         log(`💢 ${p.name} проиграл задание №${a.cellIdx + 1}${failsLimitText(map) ? ` (провалов: ${s.qFails[p.id]}${failsLimitText(map)})` : ''}`);
       }
       checkElim();
@@ -2125,6 +2278,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const now = Date.now();
       s.qCaptureAt = s.qCaptureAt ?? {};
       if (now - (s.qCaptureAt[p.id] ?? 0) < 6000) break; // защита от мгновенного повторного захвата
+      /* v0.55: КУЛЛДАУН захвата — после поимки (6 с) и после ПРОИГРЫША задания босса (8 с) */
+      s.qCaptureCd = s.qCaptureCd ?? {};
+      if (now < (s.qCaptureCd[p.id] ?? 0)) break;
       if ((s.qBossHoldAt?.[p.id] ?? {})[b.id]) break; // босс УЖЕ ждёт конца разговора — решение за bossHold off
       const myPos = s.journeyPos?.[p.id];
       const bpos = patrolPos(b.patrol, s.startedAt || 0, now);

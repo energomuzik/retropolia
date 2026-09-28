@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { uid } from '../db';
 import { sfx } from '../sound';
 import type { DialogNode, DialogOption, MapEnding, NpcDialog } from '../types';
+import { DOOR_KEYS, doorKeyHex } from '../types';
 import { Coin } from '../ui';
 import { DialogueGraph, tr } from './DialogueGraph';
 import type { DlgEditOps, DlgPosMap } from './DialogueGraph';
@@ -295,6 +296,19 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
                 <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда за выбор: попытки">
                   🎯<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={o.give?.tries ?? 0} onChange={(ev) => updOpt(selNode.id, oi, { give: { ...o.give, tries: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} />
                 </label>
+              </div>
+              {/* v0.55: ЦВЕТНОЙ КЛЮЧ — NPC выдаёт ключ, открывающий дверь того же цвета */}
+              <div className="flex items-center gap-1 flex-wrap">
+                <span className="tick-label text-[#ffb347] shrink-0" title="При выборе варианта NPC выдаёт ЦВЕТНОЙ КЛЮЧ — фишка с ним проходит через дверь (стену с замком) того же цвета. Ключ не расходуется">🔑 дать ключ:</span>
+                <select
+                  className="field-in px-1 py-1 text-[10px] flex-1 min-w-[110px]"
+                  value={o.give?.key ?? ''}
+                  onChange={(ev) => updOpt(selNode.id, oi, { give: { ...o.give, key: (ev.target.value || undefined) as NonNullable<typeof o.give>['key'] } })}
+                >
+                  <option value="">— не давать —</option>
+                  {DOOR_KEYS.map((k) => <option key={k.id} value={k.id}>🔑 {k.name}</option>)}
+                </select>
+                {o.give?.key && <span className="inline-block w-3 h-3 border border-abyss shrink-0" style={{ background: doorKeyHex(o.give.key) }} />}
               </div>
               {/* ---------- v0.52: ФЛАГИ — ПОДПИСАННО и С ПОДСКАЗКАМИ ---------- */}
               <div className="space-y-1 border-2 border-[rgba(255,179,71,0.35)] px-1.5 py-1.5">

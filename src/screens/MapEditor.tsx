@@ -13,7 +13,7 @@ import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, GameMap, MapEnding, NpcAnimDef, NpcLibEntry, NpcQuest, NpcShopOffer, PatrolDef, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, RubgItemKind, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
-import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, normResMode, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileRectOf, RUBG_ITEMS, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
+import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, doorKeyHex, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, normResMode, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileRectOf, DOOR_KEYS, RUBG_ITEMS, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
 import type { MapMode } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { sfx } from '../sound';
@@ -2069,15 +2069,17 @@ export default function MapEditor() {
           ctx.restore();
         }
 
-        // НЕВИДИМЫЕ СТЕНЫ: коралловая штриховка — видна ТОЛЬКО в редакторе (в игре их нет)
-        const drawWallRect = (x: number, y: number, w: number, h: number, selected: boolean) => {
+        // НЕВИДИМЫЕ СТЕНЫ: коралловая штриховка — видна ТОЛЬКО в редакторе (в игре их нет).
+        // v0.55: стена с key — ДВЕРЬ: рисуется СВОИМ цветом с замком (в игре дверь тоже видна)
+        const drawWallRect = (x: number, y: number, w: number, h: number, selected: boolean, key?: string) => {
+          const doorHex = key ? doorKeyHex(key) : null;
           ctx.save();
           ctx.beginPath();
           ctx.rect(x, y, w, h);
           ctx.clip();
-          ctx.fillStyle = 'rgba(255,93,115,0.13)';
+          ctx.fillStyle = doorHex ? `${doorHex}26` : 'rgba(255,93,115,0.13)';
           ctx.fillRect(x, y, w, h);
-          ctx.strokeStyle = 'rgba(255,93,115,0.45)';
+          ctx.strokeStyle = doorHex ? `${doorHex}73` : 'rgba(255,93,115,0.45)';
           ctx.lineWidth = 1.5 / v.zoom;
           const step = 14;
           for (let d = -h; d < w; d += step) {
@@ -2086,14 +2088,25 @@ export default function MapEditor() {
             ctx.lineTo(x + d + h, y + h);
             ctx.stroke();
           }
+          if (doorHex && w > 34 && h > 34) {
+            // замок в центре двери
+            const cx = x + w / 2, cy = y + h / 2, R = Math.min(w, h) * 0.16;
+            ctx.fillStyle = doorHex;
+            ctx.fillRect(cx - R * 0.8, cy - R * 0.1, R * 1.6, R * 1.25);
+            ctx.beginPath();
+            ctx.arc(cx, cy - R * 0.1, R * 0.52, Math.PI, 0);
+            ctx.lineWidth = Math.max(1.5, R * 0.28);
+            ctx.strokeStyle = doorHex;
+            ctx.stroke();
+          }
           ctx.restore();
-          ctx.strokeStyle = selected ? '#ffcf3f' : 'rgba(255,93,115,0.85)';
+          ctx.strokeStyle = selected ? '#ffcf3f' : doorHex ?? 'rgba(255,93,115,0.85)';
           ctx.lineWidth = (selected ? 3 : 2) / v.zoom;
           ctx.strokeRect(x, y, w, h);
         };
         for (let wi = 0; wi < (m.walls ?? []).length; wi++) {
           const wl = m.walls![wi];
-          drawWallRect(wl.x, wl.y, wl.w, wl.h, selWall === wi);
+          drawWallRect(wl.x, wl.y, wl.w, wl.h, selWall === wi, wl.key);
         }
         if (wallDragRef.current) {
           const wd = wallDragRef.current;
@@ -3124,6 +3137,35 @@ export default function MapEditor() {
                 )}
               </div>
 
+              {/* v0.55: SKILL CHALLENGE — тумблеры «свободное перемещение» и «случайные задания» (только для SKILL) */}
+              {map.mode === 'skill' && (
+                <div className="space-y-1.5 border-2 border-magma/40 px-2 py-2">
+                  <div className="tick-label text-magma">🎲 SKILL CHALLENGE — правила ходов</div>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 accent-[#ff8b3f]"
+                      checked={!!map.skillFree}
+                      onChange={(ev) => updMap({ skillFree: ev.target.checked })}
+                    />
+                    <span className="text-[10px] leading-tight">
+                      <b className="text-paper">🚶 Свободное перемещение</b> — хост ходит фишкой WASD/стрелками/тапом, БЕЗ кубиков. Лимит 25 заданий остаётся: 1 сыгранное задание = 1 ход.
+                    </span>
+                  </label>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 accent-[#ff8b3f]"
+                      checked={!!map.skillRandom}
+                      onChange={(ev) => updMap({ skillRandom: ev.target.checked })}
+                    />
+                    <span className="text-[10px] leading-tight">
+                      <b className="text-paper">🎰 Случайные задания</b> — вход на ячейку задания запускает задание СЛУЧАЙНОЙ ячейки карты: все размещённые задания перемешаны.
+                    </span>
+                  </label>
+                </div>
+              )}
+
               <div>
                 <button
                   onClick={() => setWallsOpen((v) => !v)}
@@ -3135,7 +3177,7 @@ export default function MapEditor() {
                 </button>
                 {wallsOpen && (
                   <div className="space-y-1.5">
-                    <p className="text-[10px] text-faint leading-tight">Зоны, куда фишка НЕ может зайти («невидимые стены» в играх). Ходить изначально можно ВЕЗДЕ — стены только исключения. Инструмент «Стена»: протяните прямоугольник по полю. В игре стены не рисуются.</p>
+                    <p className="text-[10px] text-faint leading-tight">Зоны, куда фишка НЕ может зайти («невидимые стены» в играх). Ходить изначально можно ВЕЗДЕ — стены только исключения. Инструмент «Стена»: протяните прямоугольник по полю. Обычные стены в игре НЕ рисуются; стена с ЗАМКОМ (дверь) — видна цветной зоной и открывается ключом того же цвета.</p>
                     <p className={`text-[10px] leading-tight border-2 px-2 py-1.5 ${isJourneyLike(map.mode) ? 'text-teal border-teal/40' : 'text-magma border-magma/40'}`}>
                       {isJourneyLike(map.mode)
                         ? `Режим ${MAP_MODES.find((x) => x.id === (map.mode ?? 'classic'))?.name ?? ''} — стены активны: фишки не смогут их пересечь.`
@@ -3145,6 +3187,34 @@ export default function MapEditor() {
                       <>
                         <p className="text-[10px] text-dim leading-tight">Клик по стене — выбрать и тянуть, Delete — удалить выбранную. Можно убрать все стены одной кнопкой:</p>
                         <PxBtn color="coral" small className="w-full" onClick={removeAllWalls}>{Ic.trash(12)} Удалить все стены разом</PxBtn>
+                        {/* v0.55: ДВЕРЬ — выбранной стене назначается цвет замка; NPC выдаёт ключ этого цвета (в диалоге или наградой квеста), и фишка проходит сквозь */}
+                        {selWall !== null && (map.walls ?? [])[selWall] && (
+                          <div className="space-y-1 border-2 border-[rgba(255,207,63,0.4)] px-2 py-1.5">
+                            <div className="tick-label text-[#ffcf3f]">🚪 Дверь выбранной стены</div>
+                            <p className="text-[9px] text-dim leading-tight">Стена с замком = ДВЕРЬ: в игре она видна цветной зоной, и пройти её можно только с КЛЮЧОМ того же цвета. Выдать ключ: панель NPC → диалог «🔑 дать ключ» или награда квеста.</p>
+                            <div className="flex items-center gap-1 flex-wrap">
+                              <button
+                                onClick={() => updWall(selWall, { key: undefined })}
+                                title="Обычная невидимая стена (без замка)"
+                                className={`px-2 py-1 text-[9px] font-display border-2 cursor-pointer ${(map.walls ?? [])[selWall]!.key ? 'border-edge text-dim' : 'border-gold text-gold bg-gold/10'}`}
+                              >без замка</button>
+                              {DOOR_KEYS.map((k) => (
+                                <button
+                                  key={k.id}
+                                  onClick={() => updWall(selWall, { key: k.id })}
+                                  title={`Дверь с замком «${k.name}» — открывается ключом «${k.name}»`}
+                                  className={`w-6 h-6 border-2 cursor-pointer flex items-center justify-center ${(map.walls ?? [])[selWall]!.key === k.id ? 'border-gold' : 'border-edge'}`}
+                                  style={{ background: `${k.hex}33` }}
+                                >
+                                  <span className="w-3 h-3 border border-abyss" style={{ background: k.hex }} />
+                                </button>
+                              ))}
+                            </div>
+                            {(map.walls ?? [])[selWall]!.key && (
+                              <p className="text-[9px] text-[#ffcf3f] leading-tight">🔑 Замок: {DOOR_KEYS.find((x) => x.id === (map.walls ?? [])[selWall]!.key)?.name} — NPC выдаёт ключ, фишка проходит.</p>
+                            )}
+                          </div>
+                        )}
                       </>
                     )}
                   </div>
@@ -4249,6 +4319,11 @@ export default function MapEditor() {
                           <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: бронза"><Coin size={10} /><input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.coins ?? 0} onChange={(ev) => updNpcQuest(q.id, { reward: { ...q.reward, coins: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
                           <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: минуты">⏱<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.min ?? 0} onChange={(ev) => updNpcQuest(q.id, { reward: { ...q.reward, min: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
                           <label className="flex items-center gap-1 text-[9px] text-dim" title="Награда: попытки">🎯<input type="number" className="field-in w-full px-1 py-0.5 text-[10px]" min={0} value={q.reward.tries ?? 0} onChange={(ev) => updNpcQuest(q.id, { reward: { ...q.reward, tries: Math.max(0, Math.floor(Number(ev.target.value) || 0)) } })} /></label>
+                          {/* v0.55: ЦВЕТНОЙ КЛЮЧ в награде квеста */}
+                          <select className="field-in px-1 py-0.5 text-[10px]" title="Награда: цветной ключ — открывает дверь того же цвета (не расходуется)" value={q.reward.key ?? ''} onChange={(ev) => updNpcQuest(q.id, { reward: { ...q.reward, key: (ev.target.value || undefined) as NonNullable<typeof q.reward>['key'] } })}>
+                            <option value="">🔑 нет</option>
+                            {DOOR_KEYS.map((k) => <option key={k.id} value={k.id}>🔑 {k.name}</option>)}
+                          </select>
                         </div>
                         {(map.walls ?? []).filter((w) => w.id).length > 0 && (
                           <div className="space-y-1">
