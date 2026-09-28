@@ -84,6 +84,8 @@ export const useApp = create<AppState>()((set, get) => ({
     turn: '',
     delMode: 'confirm', // защита от случайного удаления: с окошком по умолчанию
     hideRoomCode: false, // код комнаты виден (переключается глазиком в лобби/игре, выбор запоминается)
+    scanlines: true, // v0.56: полосатый фильтр (сканлайны) включён по умолчанию — как всегда выглядел сайт
+    ntsc: false, // v0.56: NES NTSC фильтр выключен по умолчанию (включается галочкой в опциях)
   },
   setOptions: (p) => {
     const options = { ...get().options, ...p };

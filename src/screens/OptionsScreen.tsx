@@ -178,6 +178,26 @@ export default function OptionsScreen() {
             </div>
           </Panel>
 
+          <Panel title="Экран и фильтры" icon={Ic.eye(16)} accent="var(--color-magma)" className="slide-up md:col-span-2">
+            <div className="p-4 space-y-3">
+              <p className="text-[10px] text-faint leading-relaxed">
+                Оба фильтра работают и в ПОЛНОМ ЭКРАНЕ эмулятора: полосы и NTSC-эффект накладываются поверх него (v0.56 — больше не пропадают).
+              </p>
+              <Toggle
+                checked={options.scanlines !== false}
+                onChange={(v) => setOptions({ scanlines: v })}
+                label="Полосатый фильтр (сканлайны CRT)"
+                hint="Тонкие горизонтальные полосы как на ЭЛТ-мониторе — тот вид, что был у сайта всегда; выключите, если мешают"
+              />
+              <Toggle
+                checked={!!options.ntsc}
+                onChange={(v) => setOptions({ ntsc: v })}
+                label="NES NTSC фильтр"
+                hint="Имитация композитного видеовыхода NES: мягкая картинка, лёгкое «растекание» цвета и RGB-триады — как на старом телевизоре"
+              />
+            </div>
+          </Panel>
+
           <Panel title="Управление эмулятором" icon={Ic.chip(16)} accent="var(--color-magma)" className="slide-up md:col-span-2">
             <div className="p-4">
               <p className="text-[12px] text-dim leading-relaxed">

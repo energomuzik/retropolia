@@ -588,6 +588,7 @@ export default function QuestEditor() {
                 height={470}
                 allFlags={allDlgFlags(map)}
                 cells={(map.cells ?? []).map((c, i) => ({ idx: i, label: `№${c?.n ?? i + 1}${c?.label ? ` · ${c.label}` : c?.task?.title ? ` · ${c.task.title.slice(0, 18)}` : ''}` }))}
+                cutscenes={(map.cutscenes ?? []).map((c) => ({ id: c.id, name: c.name }))}
                 onChange={(d) => updNpc(selIdx, { dialog: d })}
                 posStore={map.dlgPos}
                 onPosStore={(p) => updMap({ dlgPos: p ?? undefined })}

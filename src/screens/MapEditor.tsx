@@ -12,7 +12,7 @@ import {
 import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, GameMap, MapEnding, NpcAnimDef, NpcLibEntry, NpcQuest, NpcShopOffer, PatrolDef, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, RubgItemKind, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
+import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, CutsceneDef, GameMap, MapEnding, NpcAnimDef, NpcLibEntry, NpcQuest, NpcShopOffer, PatrolDef, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, RubgItemKind, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
 import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, doorKeyHex, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, normResMode, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileRectOf, DOOR_KEYS, RUBG_ITEMS, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
 import type { MapMode } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
@@ -250,6 +250,11 @@ export default function MapEditor() {
   const [selPortal, setSelPortal] = useState<number | null>(null); // выбранный портал (индекс)
   const [pickTargetFor, setPickTargetFor] = useState<number | null>(null); // портал, для которого указываем точку перехода (следующий клик по канве = точка)
   const [platesOpen, setPlatesOpen] = useState(false); // спойлер «Плитки и порталы» в левой панели
+  /* v0.56: КАТ-СЦЕНЫ — спойлер, выбранная кат-сцена и рисование ЗОНЫ-триггера */
+  const [cutsOpen, setCutsOpen] = useState(false);
+  const [selCutIdx, setSelCutIdx] = useState<number | null>(null);
+  const [cutZoneArm, setCutZoneArm] = useState(false); // «рисовать зону» — следующий протягивающий клик ставит зону
+  const cutZoneDragRef = useRef<{ sx: number; sy: number; ex: number; ey: number } | null>(null);
   const [tilesOpen, setTilesOpen] = useState(false); // спойлер «Карты-плитки» (плиточный режим) в левой панели
   const [selTileId, setSelTileId] = useState<string | null>(null); // активная карта-плитка (схема + её фон)
   const [bgScope, setBgScope] = useState<'plate' | 'all'>('plate'); // куда ложится НОВЫЙ фон: «на эту плитку» (своя локация) или «на всю карту»
@@ -267,7 +272,7 @@ export default function MapEditor() {
   const viewRef = useRef(view); viewRef.current = view;
   const mapRef = useRef(map); mapRef.current = map;
   const dragRef = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
-  const objDragRef = useRef<{ kind: 'cell' | 'stamp' | 'anim' | 'boss' | 'npc' | 'wall' | 'portal' | 'patrolNpc' | 'patrolBoss'; idx: number; ptIdx?: number; dx: number; dy: number; moved: boolean } | null>(null);
+  const objDragRef = useRef<{ kind: 'cell' | 'stamp' | 'anim' | 'boss' | 'npc' | 'wall' | 'portal' | 'patrolNpc' | 'patrolBoss' | 'cutPt'; idx: number; ptIdx?: number; dx: number; dy: number; moved: boolean } | null>(null);
   const wallDragRef = useRef<{ sx: number; sy: number; ex: number; ey: number } | null>(null); // протягивание НОВОЙ стены
   const portalDragRef = useRef<{ sx: number; sy: number; ex: number; ey: number } | null>(null); // протягивание НОВОГО портала
   const resizeRef = useRef<{ kind: 'stamp' | 'anim' | 'boss' | 'npc'; idx: number } | null>(null); // ресайз тайла/анимации/босса/NPC за уголок
@@ -338,6 +343,37 @@ export default function MapEditor() {
 
   /* ---------- правки карты (без глубокого клонирования — карта может весить МБ) ---------- */
   const updMap = (patch: Partial<GameMap>) => setMap((m) => (m ? { ...m, ...patch } : m));
+  /* v0.56: операции с КАТ-СЦЕНАМИ карты */
+  const updCut = (idx: number, patch: Partial<CutsceneDef>) => {
+    setMap((m) => (m ? { ...m, cutscenes: (m.cutscenes ?? []).map((c, i) => (i === idx ? { ...c, ...patch } : c)) } : m));
+    dirtyRef.current = true;
+  };
+  const delCut = (idx: number) => {
+    setMap((m) => (m ? { ...m, cutscenes: (m.cutscenes ?? []).filter((_, i) => i !== idx) } : m));
+    setSelCutIdx(null);
+    dirtyRef.current = true;
+    sfx.hover();
+  };
+  const addCut = () => {
+    setMap((m) => {
+      if (!m) return m;
+      const sz = mapSize(m);
+      const nc: CutsceneDef = { id: uid('cut'), name: `КАТ-СЦЕНА ${(m.cutscenes ?? []).length + 1}`, pts: [{ x: Math.round(sz.w / 2), y: Math.round(sz.h / 2), wait: 1, zoom: 1 }], trigger: 'start', skippable: true };
+      return { ...m, cutscenes: [...(m.cutscenes ?? []), nc] };
+    });
+    setSelCutIdx((map?.cutscenes ?? []).length);
+    dirtyRef.current = true;
+    sfx.coin();
+  };
+  const addCutPt = (idx: number) => {
+    setMap((m) => {
+      if (!m) return m;
+      const sz = mapSize(m);
+      return { ...m, cutscenes: (m.cutscenes ?? []).map((c, i) => (i === idx ? { ...c, pts: [...(c.pts ?? []), { x: Math.round(sz.w / 2), y: Math.round(sz.h / 2), wait: 1, zoom: 1 }] } : c)) };
+    });
+    dirtyRef.current = true;
+    sfx.coin();
+  };
 
   /* ---------- фишки партии: отмечаем до 12 фишек из библиотеки — они вшиваются в карту
      и уезжают всем игрокам; после жеребьёвки каждый выберет себе одну (одинаковые нельзя).
@@ -1437,11 +1473,27 @@ export default function MapEditor() {
       dragRef.current = { sx: e.clientX, sy: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
       return;
     }
+    /* v0.56: рисование ЗОНЫ-триггера кат-сцены — протягивание прямоугольника (любой инструмент) */
+    if (cutZoneArm && e.button === 0) {
+      cutZoneDragRef.current = { sx: w.x, sy: w.y, ex: w.x, ey: w.y };
+      return;
+    }
     if (tool === 'select') {
       /* v0.52: ПАТРУЛЬНЫЕ ТОЧКИ — тянуть кружки маршрута (проверяем ПЕРЕД телами,
          чтобы точку возле NPC можно было схватить, а не самого NPC) */
       {
         const grab = 11 / viewRef.current.zoom;
+        /* v0.56: ТОЧКИ КАТ-СЦЕН — тянуть как патрульные (у ВЫБРАННОЙ кат-сцены) */
+        if (selCutIdx !== null && (m.cutscenes ?? [])[selCutIdx]) {
+          const cpts = (m.cutscenes ?? [])[selCutIdx].pts ?? [];
+          for (let pi = cpts.length - 1; pi >= 0; pi--) {
+            if (Math.hypot(w.x - cpts[pi].x, w.y - cpts[pi].y) <= grab) {
+              objDragRef.current = { kind: 'cutPt', idx: selCutIdx, ptIdx: pi, dx: 0, dy: 0, moved: false };
+              sfx.hover();
+              return;
+            }
+          }
+        }
         for (let ni = (m.npcs ?? []).length - 1; ni >= 0; ni--) {
           const pts = (m.npcs ?? [])[ni]?.patrol?.pts ?? [];
           for (let pi = pts.length - 1; pi >= 0; pi--) {
@@ -1816,9 +1868,22 @@ export default function MapEditor() {
           updBoss(od.idx, { patrol: { ...boss.patrol, pts: boss.patrol.pts.map((pp, i) => (i === od.ptIdx ? { x: Math.round(w.x), y: Math.round(w.y) } : pp)) } });
         }
       }
+      else if (od.kind === 'cutPt') {
+        /* v0.56: точка кат-сцены — свободное перемещение по карте */
+        const cut = (m.cutscenes ?? [])[od.idx];
+        if (cut && od.ptIdx !== undefined) {
+          updCut(od.idx, { pts: cut.pts.map((pp, i) => (i === od.ptIdx ? { x: Math.round(w.x), y: Math.round(w.y) } : pp)) });
+        }
+      }
       else if (od.kind === 'wall') updWall(od.idx, { x: Math.round(w.x - od.dx), y: Math.round(w.y - od.dy) }); // стены — без привязки к сетке
       else if (od.kind === 'portal') updPortal(od.idx, { x: Math.round(w.x - od.dx), y: Math.round(w.y - od.dy) }); // порталы — без привязки к сетке (точка перехода остаётся на месте)
       else updStamp(od.idx, { x: Math.round(p.x), y: Math.round(p.y) });
+      return;
+    }
+    if (cutZoneDragRef.current) {
+      // v0.56: протягиваем ЗОНУ-триггер кат-сцены — обновляем второй угол
+      cutZoneDragRef.current.ex = w.x;
+      cutZoneDragRef.current.ey = w.y;
       return;
     }
     if (wallDragRef.current) {
@@ -1856,6 +1921,21 @@ export default function MapEditor() {
     objDragRef.current = null;
     resizeRef.current = null;
     lastPlaceRef.current = null;
+    /* v0.56: ЗОНА-ТРИГГЕР кат-сцены — фиксируем протянутый прямоугольник (мин. 12×12 px) */
+    const czd = cutZoneDragRef.current;
+    cutZoneDragRef.current = null;
+    if (czd && selCutIdx !== null) {
+      const zx = Math.round(Math.min(czd.sx, czd.ex));
+      const zy = Math.round(Math.min(czd.sy, czd.ey));
+      const zw = Math.round(Math.abs(czd.ex - czd.sx));
+      const zh = Math.round(Math.abs(czd.ey - czd.sy));
+      if (zw >= 12 && zh >= 12) {
+        updCut(selCutIdx, { zone: { x: zx, y: zy, w: zw, h: zh } });
+        setCutZoneArm(false);
+        sfx.step();
+        toast(`Зона-триггер кат-сцены готова (${zw}×${zh} px): ПЕРВЫЙ вход фишки за сессию запустит показ`, 'ok');
+      }
+    }
     /* СТЕНА: фиксируем протянутый прямоугольник (минимум 12×12 px);
        отрицательные размеры нормализуем (протягивание вверх/влево) */
     const wd = wallDragRef.current;
@@ -1913,7 +1993,7 @@ export default function MapEditor() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') return;
-      if (e.key === 'Escape') { setLinkFrom(null); setSelCell(null); setSelStamp(null); setSelAnim(null); setSelBoss(null); setSelWall(null); setSelPortal(null); setPickTargetFor(null); setPlaceAnimId(''); return; }
+      if (e.key === 'Escape') { setLinkFrom(null); setSelCell(null); setSelStamp(null); setSelAnim(null); setSelBoss(null); setSelWall(null); setSelPortal(null); setPickTargetFor(null); setPlaceAnimId(''); setCutZoneArm(false); setSelCutIdx(null); return; }
       if (!map) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (e.repeat) return; // удержание обрабатывает useKeyDelete (режим «долгое нажатие»)
@@ -1994,6 +2074,11 @@ export default function MapEditor() {
             ...(m.npcs ?? []).filter((n) => (n.patrol?.pts ?? []).length >= 2).map((n) => ({ pts: n.patrol!.pts, color: '#2ee6a8' })),
             ...(m.bosses ?? []).filter((b) => (b.patrol?.pts ?? []).length >= 2).map((b) => ({ pts: b.patrol!.pts, color: '#c07aff' })),
           ],
+          /* v0.56: КАТ-СЦЕНЫ — маршруты камеры + зоны-триггеры (только редактор);
+             выбранная кат-сцена ярче, её точки ТАСКАЮТСЯ инструментом «Выбор» */
+          cutViz: (m.cutscenes ?? []).length
+            ? (m.cutscenes ?? []).map((c, i) => ({ pts: c.pts ?? [], zone: c.zone ?? null, color: '#ff8b3f', active: i === selCutIdx }))
+            : undefined,
         });
         const v = viewRef.current;
         ctx.save();
@@ -2111,6 +2196,26 @@ export default function MapEditor() {
         if (wallDragRef.current) {
           const wd = wallDragRef.current;
           drawWallRect(Math.min(wd.sx, wd.ex), Math.min(wd.sy, wd.ey), Math.abs(wd.ex - wd.sx), Math.abs(wd.ey - wd.sy), true);
+        }
+        /* v0.56: протягиваемая ЗОНА-триггер кат-сцены — пунктирный оранжевый прямоугольник */
+        if (cutZoneDragRef.current) {
+          const cz = cutZoneDragRef.current;
+          ctx.save();
+          ctx.setLineDash([10, 7]);
+          ctx.strokeStyle = 'rgba(255,139,63,0.95)';
+          ctx.lineWidth = 2.4 / v.zoom;
+          const zxr = Math.min(cz.sx, cz.ex), zyr = Math.min(cz.sy, cz.ey);
+          const zwr = Math.abs(cz.ex - cz.sx), zhr = Math.abs(cz.ey - cz.sy);
+          ctx.strokeRect(zxr, zyr, zwr, zhr);
+          ctx.fillStyle = 'rgba(255,139,63,0.12)';
+          ctx.fillRect(zxr, zyr, zwr, zhr);
+          ctx.setLineDash([]);
+          ctx.fillStyle = '#ff8b3f';
+          ctx.font = `bold ${Math.max(10, 12 / v.zoom)}px monospace`;
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'top';
+          ctx.fillText('🎬 ТРИГГЕР', zxr + 4 / v.zoom, zyr + 4 / v.zoom);
+          ctx.restore();
         }
 
         // ПОРТАЛЫ: сиреневая зона входа + пунктир к точке перехода + маркер точки + подпись
@@ -3292,6 +3397,140 @@ export default function MapEditor() {
               </div>
 
               <div>
+                {/* v0.56: КАТ-СЦЕНЫ — маршруты камеры, зоны-триггеры, выдача NPC */}
+                <button
+                  onClick={() => setCutsOpen((v) => !v)}
+                  className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(255,139,63,0.08)] px-1 py-0.5"
+                  title={cutsOpen ? 'Свернуть' : 'Развернуть'}
+                >
+                  <span className={`text-[10px] shrink-0 ${cutsOpen ? 'text-gold' : 'text-faint'}`}>{cutsOpen ? '▾' : '▸'}</span>
+                  <span className="tick-label">🎬 Кат-сцены · {(map.cutscenes ?? []).length}{(map.cutscenes ?? []).some((c) => c.trigger === 'start') ? ' · ▶ на старте' : ''}{(map.cutscenes ?? []).some((c) => c.trigger === 'zone') ? ' · 🟪 зоны' : ''}</span>
+                </button>
+                {cutsOpen && (
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] text-faint leading-tight">Кинематографичный пролёт КАМЕРЫ по точкам карты: камера летит из точки в точку (скорость в настройках), в каждой точке стоит заданное время и приближает/отдаляет (зум-множитель). Во время показа ВСЕ фишки, NPC и боссы СТОЯТ. Запуск: «старт карты» — при начале партии; «зона» — первый за сессию вход фишки в зону-триггер; «NPC» — вариант в диалоге NPC играет её.</p>
+                    {(map.cutscenes ?? []).length === 0 && <p className="text-[10px] text-faint">Кат-сцен пока нет — создайте первую кнопкой ниже.</p>}
+                    {(map.cutscenes ?? []).map((c, i) => (
+                      <div key={c.id} className={`flex items-center gap-1.5 border-2 px-1.5 py-1 ${selCutIdx === i ? 'border-gold bg-gold/5' : 'border-edge'}`}>
+                        <button
+                          onClick={() => { setSelCutIdx(i); sfx.hover(); }}
+                          className="flex-1 min-w-0 text-left cursor-pointer"
+                          title="Выбрать кат-сцену для правки"
+                        >
+                          <div className="font-display text-[10px] uppercase text-paper truncate">{c.name}</div>
+                          <div className="tick-label text-faint truncate">{c.trigger === 'start' ? '▶ при старте карты' : c.trigger === 'zone' ? '🟪 зона-триггер' : `🗣 NPC: ${(map.npcs ?? []).find((n) => n.id === c.npcId) ? 'выбран' : 'не указан'}`} · точек: {(c.pts ?? []).length}</div>
+                        </button>
+                        <HoldDeleteButton onFire={() => delCut(i)} label={`кат-сцену «${c.name}»`} ariaLabel="Удалить кат-сцену" title="Удалить кат-сцену" className="px-1.5 font-pixel text-[10px] text-faint hover:text-coral cursor-pointer">✕</HoldDeleteButton>
+                      </div>
+                    ))}
+                    <PxBtn color="magma" small className="w-full" onClick={addCut}>＋ Кат-сцена</PxBtn>
+                    {selCutIdx !== null && (map.cutscenes ?? [])[selCutIdx] && (() => {
+                      const c = (map.cutscenes ?? [])[selCutIdx!];
+                      const trLbl = c.trigger === 'start' ? '▶ старт карты' : c.trigger === 'zone' ? '🟪 зона' : '🗣 NPC';
+                      return (
+                        <div className="border-2 border-magma/40 p-2 space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="tick-label text-magma">Правка: {trLbl}</span>
+                            <button onClick={() => setSelCutIdx(null)} className="font-pixel text-[9px] text-faint hover:text-paper cursor-pointer">закрыть</button>
+                          </div>
+                          <input
+                            className="field-in w-full px-2 py-1.5 font-display text-[11px] uppercase tracking-wide"
+                            value={c.name}
+                            maxLength={40}
+                            onChange={(e) => updCut(selCutIdx!, { name: e.target.value })}
+                            placeholder="Название кат-сцены"
+                          />
+                          <div>
+                            <div className="tick-label mb-1">Когда играть</div>
+                            <div className="grid grid-cols-3 gap-1">
+                              {([['start', '▶ Старт карты', 'кат-сцена playing при старте партии (один раз)'], ['zone', '🟪 Зона', 'первый за сессию вход фишки в зону-триггер'], ['npc', '🗣 NPC', 'вариант в диалоге NPC показывает её']] as ['start' | 'zone' | 'npc', string, string][]).map(([key, lbl, ttl]) => (
+                                <button
+                                  key={key}
+                                  title={ttl}
+                                  onClick={() => { updCut(selCutIdx!, { trigger: key }); sfx.hover(); }}
+                                  className={`px-1 py-1.5 text-[9px] font-display uppercase border-2 cursor-pointer ${c.trigger === key ? 'border-gold text-gold bg-gold/10' : 'border-edge text-dim hover:text-paper'}`}
+                                >{lbl}</button>
+                              ))}
+                            </div>
+                          </div>
+                          {c.trigger === 'zone' && (
+                            <div className="space-y-1">
+                              <PxBtn color={cutZoneArm ? 'coral' : 'magma'} small className="w-full" onClick={() => { setCutZoneArm((v) => !v); sfx.hover(); }}>
+                                {cutZoneArm ? '✕ Отмена — кликните по карте и протяните зону' : '📐 Нарисовать зону-триггер'}
+                              </PxBtn>
+                              {c.zone ? (
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] text-dim">Зона: {c.zone.w}×{c.zone.h} px</span>
+                                  <button onClick={() => { updCut(selCutIdx!, { zone: undefined }); sfx.hover(); }} className="font-pixel text-[9px] text-coral cursor-pointer hover:text-paper">убрать зону</button>
+                                </div>
+                              ) : (
+                                <p className="text-[10px] text-faint leading-tight">Зоны ещё нет — нажмите «Нарисовать» и протяните прямоугольник по карте.</p>
+                              )}
+                            </div>
+                          )}
+                          {c.trigger === 'npc' && (
+                            <div>
+                              <div className="tick-label mb-1">Какой NPC показывает (кат-сцену играет вариант его диалога)</div>
+                              {(map.npcs ?? []).length === 0 ? (
+                                <p className="text-[10px] text-coral leading-tight">На карте нет NPC — поставьте NPC инструментом «NPC» и свяжите кат-сцену с его вариантом ответа.</p>
+                              ) : (
+                                <select
+                                  className="field-in w-full px-2 py-1.5 text-[11px]"
+                                  value={c.npcId ?? ''}
+                                  onChange={(e) => updCut(selCutIdx!, { npcId: e.target.value || undefined })}
+                                >
+                                  <option value="">— не выбран —</option>
+                                  {(map.npcs ?? []).map((n) => {
+                                    const def = (map.npcLib ?? []).find((x) => x.id === n.nid);
+                                    return <option key={n.id} value={n.id}>{def?.name ?? n.id}</option>;
+                                  })}
+                                </select>
+                              )}
+                              <p className="text-[10px] text-faint leading-tight mt-1">Затем в редакторе диалогов у варианта ответа выберите «🎬 показать кат-сцену».</p>
+                            </div>
+                          )}
+                          <div className="flex items-center justify-between"><span className="text-[11px] text-dim">Скорость перелёта</span><Stepper value={c.speed ?? 420} onChange={(v) => updCut(selCutIdx!, { speed: v })} min={120} max={900} step={20} suffix=" px/с" /></div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] text-dim">Можно пропустить (Esc / кнопка)</span>
+                            <button
+                              onClick={() => { updCut(selCutIdx!, { skippable: c.skippable === false }); sfx.hover(); }}
+                              className={`w-11 h-6 border-2 font-pixel text-[9px] cursor-pointer ${c.skippable === false ? 'border-edge text-faint' : 'border-teal text-teal bg-teal/10'}`}
+                            >{c.skippable === false ? 'нет' : 'да'}</button>
+                          </div>
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="tick-label">Точки маршрута ({(c.pts ?? []).length})</span>
+                              <button onClick={() => { addCutPt(selCutIdx!); sfx.coin(); }} className="font-pixel text-[9px] text-gold cursor-pointer hover:text-paper">＋ точка</button>
+                            </div>
+                            {(c.pts ?? []).length === 0 && <p className="text-[10px] text-coral leading-tight">Добавьте хотя бы одну точку — камера прилетит туда и покажет карту.</p>}
+                            <div className="space-y-1 max-h-56 overflow-y-auto pr-1">
+                              {(c.pts ?? []).map((p, pi) => (
+                                <div key={pi} className="flex items-center gap-1 border-2 border-edge px-1.5 py-1">
+                                  <span className="font-pixel text-[9px] text-magma w-4 shrink-0">{pi + 1}</span>
+                                  <span className="text-[10px] text-faint w-24 shrink-0">x:{Math.round(p.x)} y:{Math.round(p.y)}</span>
+                                  <div className="flex items-center gap-1 flex-1 min-w-0">
+                                    <span className="text-[9px] text-faint shrink-0" title="Сколько секунд камера стоит в точке">ждать</span>
+                                    <Stepper value={p.wait ?? 1} onChange={(v) => updCut(selCutIdx!, { pts: c.pts.map((pp, i2) => (i2 === pi ? { ...pp, wait: v } : pp)) })} min={0} max={30} step={1} suffix="с" />
+                                  </div>
+                                  <div className="flex items-center gap-1 flex-1 min-w-0">
+                                    <span className="text-[9px] text-faint shrink-0" title="Зум в точке: 1 — обычный, 2 — вдвое ближе, 0.5 — дальше">зум</span>
+                                    <Stepper value={p.zoom ?? 1} onChange={(v) => updCut(selCutIdx!, { pts: c.pts.map((pp, i2) => (i2 === pi ? { ...pp, zoom: Math.round(v * 10) / 10 } : pp)) })} min={0.4} max={3} step={0.1} suffix="×" />
+                                  </div>
+                                  <div className="flex gap-0.5 shrink-0">
+                                    <button disabled={pi === 0} onClick={() => { const pts = [...c.pts]; [pts[pi - 1], pts[pi]] = [pts[pi], pts[pi - 1]]; updCut(selCutIdx!, { pts }); sfx.hover(); }} className={`w-5 h-5 border font-pixel text-[8px] cursor-pointer ${pi === 0 ? 'border-edge text-faint/30' : 'border-edge text-dim hover:text-paper'}`}>↑</button>
+                                    <button disabled={pi === c.pts.length - 1} onClick={() => { const pts = [...c.pts]; [pts[pi + 1], pts[pi]] = [pts[pi], pts[pi + 1]]; updCut(selCutIdx!, { pts }); sfx.hover(); }} className={`w-5 h-5 border font-pixel text-[8px] cursor-pointer ${pi === c.pts.length - 1 ? 'border-edge text-faint/30' : 'border-edge text-dim hover:text-paper'}`}>↓</button>
+                                    <HoldDeleteButton onFire={() => { updCut(selCutIdx!, { pts: c.pts.filter((_, i2) => i2 !== pi) }); }} label={`точку №${pi + 1}`} ariaLabel="Удалить точку" title="Удалить точку" className="w-5 h-5 font-pixel text-[8px] text-faint hover:text-coral cursor-pointer">✕</HoldDeleteButton>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                            <p className="text-[10px] text-faint leading-tight mt-1">Кружки с номерами на карте ТАСКАЮТСЯ мышью (инструмент «Выбор») — камера пролетает по ним по порядку. Зум: 1 — как в игре, 2 — вдвое ближе (приближение), 0.5 — дальше (отдаление).</p>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
                 <button
                   onClick={() => setPlatesOpen((v) => !v)}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
@@ -4539,6 +4778,7 @@ export default function MapEditor() {
               height={470}
               allFlags={allDlgFlags(map)}
               cells={(map.cells ?? []).map((c, i) => ({ idx: i, label: `№${c?.n ?? i + 1}${c?.label ? ` · ${c.label}` : c?.task?.title ? ` · ${c.task.title.slice(0, 18)}` : ''}` }))}
+              cutscenes={(map.cutscenes ?? []).map((c) => ({ id: c.id, name: c.name }))}
               onChange={(d) => { updNpc(selNpcIdx, { dialog: d }); dirtyRef.current = true; }}
               posStore={map.dlgPos}
               onPosStore={(p) => { updMap({ dlgPos: p ?? undefined }); dirtyRef.current = true; }}

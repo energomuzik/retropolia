@@ -344,6 +344,9 @@ export interface BoardDrawOpts {
   patrolFreeze?: Record<string, number>; // PlacedBoss.id → момент (мс), в который босс погиб и замер
   npcFreeze?: Record<string, number>; // v0.54: PlacedNpc.id → момент (мс), в который NPC замер — с ним ОТКРЫТ ДИАЛОГ (патруль стоит, пока идёт разговор)
   patrolRoutes?: { pts: { x: number; y: number }[]; color: string }[];
+  /* v0.56: маршруты КАТ-СЦЕН (только редактор): пунктир + точки-кружки с номерами,
+     зона-триггер — пунктирный прямоугольник с плашкой «ТРИГГЕР»; active — выделенная */
+  cutViz?: { pts: { x: number; y: number }[]; zone: { x: number; y: number; w: number; h: number } | null; color: string; active: boolean }[];
 }
 
 function px(ctx: CanvasRenderingContext2D, x: number, y: number, s: number, pattern: string[], color: string) {
@@ -1109,6 +1112,55 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
         ctx.lineWidth = 1.6 / Math.max(0.05, view.zoom);
         ctx.stroke();
         ctx.fillStyle = rt.color;
+        ctx.font = `bold ${Math.max(9, 10 / Math.max(0.05, view.zoom))}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(i + 1), p.x, p.y + 0.5);
+      });
+      ctx.restore();
+    }
+  }
+  /* v0.56: КАТ-СЦЕНЫ — только редактор: маршрут камеры (пунктир, стрелки не нужны —
+   полёт по порядку точек) + прямоугольник зоны-триггера */
+  if (o.sndRadii && o.cutViz?.length) {
+    for (const cv of o.cutViz) {
+      const pts = (cv.pts ?? []).filter((p) => Number.isFinite(p?.x) && Number.isFinite(p?.y));
+      ctx.save();
+      if (cv.zone) {
+        ctx.setLineDash([10, 7]);
+        ctx.strokeStyle = cv.color;
+        ctx.lineWidth = (cv.active ? 2.4 : 1.6) / Math.max(0.05, view.zoom);
+        ctx.strokeRect(cv.zone.x, cv.zone.y, cv.zone.w, cv.zone.h);
+        ctx.fillStyle = cv.active ? 'rgba(255,139,63,0.10)' : 'rgba(255,139,63,0.05)';
+        ctx.fillRect(cv.zone.x, cv.zone.y, cv.zone.w, cv.zone.h);
+        ctx.setLineDash([]);
+        const fs = Math.max(9, 11 / Math.max(0.05, view.zoom));
+        ctx.fillStyle = cv.color;
+        ctx.font = `bold ${fs}px monospace`;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText('🎬 ТРИГГЕР', cv.zone.x + 4 / Math.max(0.05, view.zoom), cv.zone.y + 4 / Math.max(0.05, view.zoom));
+      }
+      if (pts.length >= 2) {
+        ctx.setLineDash([4, 9]);
+        ctx.strokeStyle = cv.color;
+        ctx.lineWidth = (cv.active ? 2 : 1.4) / Math.max(0.05, view.zoom);
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      pts.forEach((p, i) => {
+        const rr = 9 / Math.max(0.05, view.zoom);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, rr, 0, Math.PI * 2);
+        ctx.fillStyle = '#0b0e1c';
+        ctx.fill();
+        ctx.lineWidth = 1.6 / Math.max(0.05, view.zoom);
+        ctx.strokeStyle = cv.color;
+        ctx.stroke();
+        ctx.fillStyle = cv.active ? '#ffcf3f' : cv.color;
         ctx.font = `bold ${Math.max(9, 10 / Math.max(0.05, view.zoom))}px monospace`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';

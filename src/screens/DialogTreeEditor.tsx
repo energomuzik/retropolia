@@ -26,7 +26,7 @@ import type { DlgEditOps, DlgPosMap } from './DialogueGraph';
      на этом узле» и ПИН «📌 скрывать, если игрок это уже слышал» (v0.54, наоборот
      к v0.53: по умолчанию реплики пишутся ВСЕГДА, пин — по желанию автора; СТАРТОВЫЙ
      узел пин игнорирует — приветствие NPC пишется всегда). */
-export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosStore, height = 380, selId, onSelect, allFlags = [], cells = [], onAddEnding, onDelEnding }: {
+export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosStore, height = 380, selId, onSelect, allFlags = [], cells = [], cutscenes = [], onAddEnding, onDelEnding }: {
   dialog: NpcDialog;
   endings: MapEnding[];
   onChange: (d: NpcDialog) => void;
@@ -37,6 +37,7 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
   onSelect?: (id: string) => void;
   allFlags?: string[];                  // v0.52: флаги, уже использованные на карте (подсказка в полях)
   cells?: { idx: number; label: string }[]; // v0.54: ячейки карты для «отнести к ячейке» у вариантов
+  cutscenes?: { id: string; name: string }[]; // v0.56: кат-сцены карты — вариант диалога может показывать кат-сцену
   onAddEnding?: () => void;             // v0.53: «＋ Концовка» на схеме — новая концовка карты
   onDelEnding?: (id: string) => void;   // v0.53: ✕ на золотой плашке — удалить концовку
 }) {
@@ -283,6 +284,20 @@ export function DialogTreeEditor({ dialog, endings, onChange, posStore, onPosSto
                   >
                     <option value="">— нет —</option>
                     {cells.map((c) => <option key={c.idx} value={c.idx}>{c.label}</option>)}
+                  </select>
+                </div>
+              )}
+              {/* v0.56: NPC ПОКАЗЫВАЕТ КАТ-СЦЕНУ при выборе варианта — камера летит по маршруту, мир замерает */}
+              {cutscenes.length > 0 && (
+                <div className="flex items-center gap-1 flex-wrap">
+                  <span className="tick-label text-magma shrink-0" title="Выбор варианта запускает КАТ-СЦЕНУ (пролёт камеры по точкам карты, все фишки/NPC/боссы стоят)">🎬 показать кат-сцену:</span>
+                  <select
+                    className="field-in px-1 py-1 text-[10px] flex-1 min-w-[110px]"
+                    value={o.cutscene ?? ''}
+                    onChange={(ev) => updOpt(selNode.id, oi, { cutscene: ev.target.value === '' ? undefined : ev.target.value })}
+                  >
+                    <option value="">— нет —</option>
+                    {cutscenes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
                 </div>
               )}

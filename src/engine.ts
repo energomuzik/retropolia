@@ -2,7 +2,7 @@ import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, NpcRe
 import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, isQuestMode, questGoalText, tileAt, tileRectOf, coinsStr, normResMode, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, RUBG_ZONE_DEFAULT_SEC, rubgFmtZone, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx, doorKeyName } from './types';
 import type { RubgItem } from './types';
 import type { JoyId } from './types';
-import { CELL, cellAtPoint, cellCenter, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev } from './render';
+import { CELL, cellAtPoint, cellCenter, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev, clampMoveSpeed, DEF_MOVE_SPEED } from './render';
 import { patrolPos } from './patrol';
 
 /* ПЛИТОЧНЫЙ РЕЖИМ КАРТ: пружка фишки НЕ может покинуть СВОЮ карту-плитку.
@@ -85,6 +85,8 @@ export type Action =
   | { t: 'plateSeen'; id: string; plate: number } // v0.53 СИНХРОНИЗАЦИЯ ОТКРЫТЫХ КОМНАТ: игрок впервые вошёл в комнату-плитку — хост открывает её ВСЕЙ команде (s.openPlates → общий туман карты мира)
   | { t: 'bossCapture'; id: string; bossId: string } // v0.53/v0.54 ЗАХВАТ: патрульный босс догнал игрока — хост проверяет дистанцию/кулдаун и оттаскивает фишку на ПЕРВУЮ ТОЧКУ ПАТРУЛЯ босса (патруль замирает)
   | { t: 'bossHold'; id: string; bossId: string; on: boolean } // v0.54 БОСС ЖДЁТ КОНЦА РАЗГОВОРА: on — диалог открыт рядом с боссом: босс ЗАМИРАЕТ и не ловит; off — разговор закончен: игрок всё ещё вплотную — босс ЛОВИТ, иначе патруль продолжается
+  | { t: 'bossTaskGo'; id: string } // v0.56 ОТЛОЖЕННЫЙ ЗАПУСК ЗАДАНИЯ БОССА: клиент пойманного игрока сообщает «фишку ДОТАЩИЛИ и прошла секунда» — хост проверяет qTaskAt и открывает задание босса
+  | { t: 'cutsceneSeen'; id: string; key: string } // v0.56 КАТ-СЦЕНА показана (старт карты/пересечение зоны): хост помечает «виденное» (s.cutsceneDone) — за сессию не повторяется
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const rnd6 = () => 1 + Math.floor(Math.random() * 6);
@@ -240,6 +242,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     base.qKeys = base.qKeys ?? {};
     base.qCaptureCell = base.qCaptureCell ?? {};
     base.qCaptureCd = base.qCaptureCd ?? {};
+    /* v0.56: отложенный запуск задания босса + кат-сцены — хвосты старых сейвов */
+    base.qCaptureBoss = base.qCaptureBoss ?? {};
+    base.qTaskAt = base.qTaskAt ?? {};
+    base.cutsceneDone = base.cutsceneDone ?? {};
     if (base.rubg !== undefined) {
       base.rubg.jobs = base.rubg.jobs ?? {};
       base.rubg.looted = base.rubg.looted ?? [];
@@ -291,6 +297,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   if (!s.qKeys) s.qKeys = {};
   if (!s.qCaptureCell) s.qCaptureCell = {};
   if (!s.qCaptureCd) s.qCaptureCd = {};
+  /* v0.56: отложенный запуск задания босса + кат-сцены — старые сейвы */
+  if (!s.qCaptureBoss) s.qCaptureBoss = {};
+  if (!s.qTaskAt) s.qTaskAt = {};
+  if (!s.cutsceneDone) s.cutsceneDone = {};
   if (s.rubg !== undefined) {
     // старые сессии RUBG без части полей
     s.rubg.jobs = s.rubg.jobs ?? {};
@@ -408,9 +418,12 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
      патрулирование»), незаконченное задание бросается, уведомление + лог.
      v0.55: (а) ячейка приземления помечается qCaptureCell — её проход НЕ срабатывает
      сразу после оттаскивания (никаких передышек/карточек «на 1 клетке»);
-     (б) СРАЗУ запускается ЗАДАНИЕ БОССА (задание ячейки, где стоит босс) —
-     приземлился = играешь задание босса, никаких пустых экранов;
-     (в) куллдаун qCaptureCd 6 с — босс не может сразу схватить заново. */
+     (б) куллдаун qCaptureCd 6 с — босс не может сразу схватить заново.
+     v0.56: ЗАДАНИЕ БОССА БОЛЬШЕ НЕ СТАРТУЕТ В МОМЕНТ ПОИМКИ — записывается
+     ОТЛОЖЕННЫЙ ЗАПУСК (qCaptureBoss/qTaskAt = захват + длительность оттаскивания
+     + 1 СЕКУНДА). Клиент пойманного игрока, дотащив фишку, шлёт bossTaskGo —
+     хост сверяет время и запускает задание босса. Видно, КАК босс притащил
+     игрока на место, и только потом открывается задание. */
   const bossHoldOf = (pid: string): Record<string, number> => {
     s.qBossHoldAt = s.qBossHoldAt ?? {};
     return (s.qBossHoldAt[pid] = s.qBossHoldAt[pid] ?? {});
@@ -422,6 +435,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
   const bossCaptureDo = (p: PlayerState, b: NonNullable<GameMap['bosses']>[number], now: number): boolean => {
     const p0 = (b.patrol?.pts ?? [])[0];
     if (!p0 || !Number.isFinite(p0.x) || !Number.isFinite(p0.y)) return false;
+    /* v0.56: запоминаем ГДЕ стоял пойманный — от этого места считается длина оттаскивания */
+    const oldPos = s.journeyPos?.[p.id];
+    const cpsNow = clampMoveSpeed(map.moveSpeed ?? DEF_MOVE_SPEED);
     s.journeyPos = s.journeyPos ?? {};
     s.journeyPos[p.id] = { x: p0.x, y: p0.y, ts: now, mv: false };
     s.qCaptureAt = s.qCaptureAt ?? {};
@@ -430,6 +446,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     /* v0.55: КУЛЛДАУН — 6 с после поимки босс не ловит этого игрока заново */
     s.qCaptureCd = s.qCaptureCd ?? {};
     s.qCaptureCd[p.id] = now + 6000;
+    /* v0.56: кто поймал (qCaptureBoss) — момент запуска задания (qTaskAt) посчитается ниже,
+       ПОСЛЕ финального позиционирования — клиент тянет фишку именно к финальной точке */
+    s.qCaptureBoss = s.qCaptureBoss ?? {};
+    s.qCaptureBoss[p.id] = b.id;
     /* v0.55: помечаем ячейку приземления — её проход не срабатывает сразу после оттаскивания */
     const landIdx = cellAtPoint(map, p0.x, p0.y);
     if (landIdx >= 0) {
@@ -440,10 +460,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     }
     const wasJob = !!s.qJobs?.[p.id];
     if (s.qJobs?.[p.id]) delete s.qJobs[p.id];
-    /* v0.55: ЗАДАНИЕ БОССА СРАЗУ ЗАПУСКАЕТСЯ — приземлился = играешь его задание.
-     Боссовая ячейка = ячейка, где БОСС СТОИТ (та же, что отмечается при победе над ним).
-     Если там задание и игрок его ещё не победил — личное задание открывается немедленно. */
-    let taskStarted = false;
+    /* v0.55→v0.56: если босс стоит на ячейке (не совпадает с точкой приземления) — фишка
+     дотягивается ДО ЦЕНТРА ЯЧЕЙКИ БОССА (там его задание); проверяем, БУДЕТ ЛИ задание. */
+    let taskWillStart = false;
     const bossCell = cellAtPoint(map, b.x, b.y);
     if (bossCell >= 0 && bossCell !== landIdx) {
       const br = cellRectOf(map, bossCell);
@@ -454,17 +473,23 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         if (s.qCaptureCell) s.qCaptureCell[p.id] = bossCell;
       }
     }
+    /* v0.56: длительность плавного оттаскивания — ТА ЖЕ формула, что у клиента:
+       расстояние от места поимки до ФИНАЛЬНОЙ точки / скорость карты (0.7–2.4 с);
+       задание босса стартует, когда фишку ДОТАЩИЛИ и прошла 1 секунда (bossTaskGo). */
+    const finalPos = s.journeyPos[p.id] ?? p0;
+    const distNow = Math.hypot(finalPos.x - (oldPos?.x ?? finalPos.x), finalPos.y - (oldPos?.y ?? finalPos.y));
+    const dragMs = Math.max(700, Math.min(2400, (distNow / (cpsNow * CELL)) * 1000));
+    s.qTaskAt = s.qTaskAt ?? {};
+    s.qTaskAt[p.id] = now + dragMs + 1000;
     if (bossCell >= 0) {
       const bc = map.cells[bossCell];
       const done = s.qDone?.[p.id] ?? [];
       if (bc?.type === 'task' && !done.includes(bossCell) && cellTaskOf(s, map, bossCell)) {
-        s.qJobs = s.qJobs ?? {};
-        s.qJobs[p.id] = { cellIdx: bossCell, startedAt: Date.now() };
-        taskStarted = true;
+        taskWillStart = true;
       }
     }
-    s.notice = { text: `👹 Босс${bossNameOf(b.bid)} ПОЙМАЛ вас и оттащил на свою первую точку патруля! Патруль босса остановлен.${taskStarted ? ' Задание босса начинается!' : ''}`, ts: now };
-    log(`👹 Босс${bossNameOf(b.bid)} ПОЙМАЛ игрока ${p.name} и оттащил фишку на ПЕРВУЮ ТОЧКУ ПАТРУЛЯ — патруль остановлен!${wasJob ? ' Незаконченное задание брошено.' : ''}${taskStarted ? ' Задание босса началось.' : ''}`);
+    s.notice = { text: `👹 Босс${bossNameOf(b.bid)} ПОЙМАЛ вас и оттащил на свою первую точку патруля! Патруль босса остановлен.${taskWillStart ? ' Задание босса начнётся через секунду…' : ''}`, ts: now };
+    log(`👹 Босс${bossNameOf(b.bid)} ПОЙМАЛ игрока ${p.name} и оттащил фишку на ПЕРВУЮ ТОЧКУ ПАТРУЛЯ — патруль остановлен!${wasJob ? ' Незаконченное задание брошено.' : ''}${taskWillStart ? ' Задание босса стартует, когда фишку доволокут (+1 с).' : ''}`);
     return true;
   };
 
@@ -2233,6 +2258,15 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           log(`🚪 ${p.name} отнесён NPC к ячейке №${tc + 1}`);
         }
       }
+      /* v0.56: NPC ПОКАЗЫВАЕТ КАТ-СЦЕНУ — выбор варианта запускает пролетание камеры
+         (клиент игрока играет её локально); кат-сцена от NPC играбельна повторно. */
+      if (opt.cutscene) {
+        const cut = (map.cutscenes ?? []).find((c) => c.id === opt.cutscene);
+        if (cut && (cut.pts ?? []).length >= 1) {
+          s.cutscenePlay = { id: cut.id, pid: p.id, ts: Date.now() };
+          log(`🎬 ${p.name} смотрит кат-сцену «${cut.name}» (от NPC)`);
+        }
+      }
       if (opt.ending) {
         const e = (map.endings ?? []).find((x) => x.id === opt.ending);
         if (e) {
@@ -2328,6 +2362,45 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         delete bossHoldOf(p.id)[b.id]; // разговор окончен — босс далеко, патруль продолжается
         log(`👹 Босс${bossNameOf(b.bid)} снова патрулирует.`);
       }
+      break;
+    }
+    case 'bossTaskGo': {
+      /* v0.56 ОТЛОЖЕННЫЙ ЗАПУСК ЗАДАНИЯ БОССА: в момент поимки задание НЕ открывается —
+       сначала фишку ПЛАВНО тащат на первую точку патруля (0.7–2.4 с), потом пауза 1 С.
+       Клиент пойманного игрока после этого шлёт bossTaskGo; хост проверяет, что время
+       пришло (qTaskAt), и открывает задание на ячейке босса (если там есть задание). */
+      if (s.phase !== 'playing' || !isQuestMode(map.mode)) break;
+      const p = s.players.find((x) => x.id === a.id);
+      if (!p || !p.alive || p.spect) break;
+      if (s.qJobs?.[p.id]) break; // задание уже идёт
+      const capTs = s.qCaptureAt?.[p.id];
+      const bossId = s.qCaptureBoss?.[p.id];
+      if (!capTs || !bossId) break; // игрока никто не ловил
+      const b = (map.bosses ?? []).find((x) => x.id === bossId);
+      if (!b) break;
+      const bossCell = cellAtPoint(map, b.x, b.y);
+      if (bossCell < 0) break;
+      const bc = map.cells[bossCell];
+      const done = s.qDone?.[p.id] ?? [];
+      if (!bc || bc.type !== 'task' || done.includes(bossCell) || !cellTaskOf(s, map, bossCell)) break;
+      const plannedAt = s.qTaskAt?.[p.id] ?? 0;
+      if (Date.now() < plannedAt - 450) break; // ещё тянут/пауза не прошла — рановато (допуск 450 мс на дрожь таймеров)
+      s.qJobs = s.qJobs ?? {};
+      s.qJobs[p.id] = { cellIdx: bossCell, startedAt: Date.now() };
+      log(`👹 Задание босса${bossNameOf(bossId)} НАЧАЛОСЬ для игрока ${p.name} — босс доволок фишку до места.`);
+      break;
+    }
+    case 'cutsceneSeen': {
+      /* v0.56 КАТ-СЦЕНА ПОКАЗАНА: клиент сообщает хосту, что кат-сцена (старт карты или
+       пересечение ЗОНЫ-триггера) отыграна — помечаем «виденным», за сессию не повторяем.
+       Формат ключа: start:<cutId> (общий) или <playerId>:<cutId> (зона — для каждого свой). */
+      if (s.phase !== 'playing' && s.phase !== 'rollOff') break;
+      const p = s.players.find((x) => x.id === a.id);
+      if (!p) break;
+      const key = String(a.key || '').slice(0, 120);
+      if (!key) break;
+      s.cutsceneDone = s.cutsceneDone ?? {};
+      s.cutsceneDone[key] = Date.now();
       break;
     }
     case 'npcClaim': {

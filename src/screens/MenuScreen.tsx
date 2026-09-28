@@ -40,7 +40,7 @@ export default function MenuScreen() {
             <span className="block text-[20px] sm:text-[30px] mt-1">GENERATOR</span>
           </h1>
           <p className="mt-3 font-display text-dim uppercase tracking-[0.22em] text-[10px] sm:text-[11px]">
-            Создай свой челлендж — и брось его друзьям
+            платформа для создания челленджей
           </p>
         </div>
 

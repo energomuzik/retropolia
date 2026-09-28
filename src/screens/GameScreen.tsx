@@ -19,7 +19,7 @@ import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper, Coin, CoinRow } from '../ui';
 import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, isQuestMode, isSoloMode, questGoalText, tileAt, tileRectOf, tileNumOf, coinsStr, normResMode, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS, doorKeyHex, doorKeyName } from '../types';
-import type { AnimClip, CardDef, ChaosKind, GameMap, GameSession, NpcLibEntry, PlacedNpc, PortalZone, PlayerState, QuestGoal, TaskDef, TokenDir, RubgItem } from '../types';
+import type { AnimClip, CardDef, ChaosKind, CutsceneDef, GameMap, GameSession, NpcLibEntry, PlacedNpc, PortalZone, PlayerState, QuestGoal, TaskDef, TokenDir, RubgItem } from '../types';
 import Randomizer from './Randomizer';
 import TradeWindow from './TradeWindow';
 import { nodeShowsQuests, nodeShowsShop } from '../dialogHubs';
@@ -518,13 +518,49 @@ export default function GameScreen() {
      боссы вплотную ЖДУТ конца разговора (bossHold on/off), захват приостановлен.
      v0.55: ИСПРАВЛЕНО — rAF-цикл рисования зарегистрирован ОДИН раз (deps без dlgOpenId),
      поэтому state dlgOpenId внутри цикла был УСТАРЕВШИМ (всегда null) и заморозка
-     патруля не срабатывала никогда. Теперь цикл читает dlgOpenIdRef — живой ref с id NPC */
+     патруля не срабатывала никогда. Теперь цикл читает dlgOpenIdRef — живой ref с id NPC.
+     v0.56: МИР ЗАМИРАЕТ ЦЕЛИКОМ — пока открыт диалог/торговля, стоят ВСЕ NPC и ВСЕ боссы
+     (не только собеседник), т.к. заморозка ставится синхронно в openDialog/closeDialog. */
   const dlgOpenId = dlgNpcId ?? tradeNpcId;
   const dlgOpenIdRef = useRef<string | null>(null);
   const dlgOpenTsRef = useRef(0);
   const heldBossesRef = useRef<Set<string>>(new Set());
   dlgOpenIdRef.current = dlgOpenId;
   if (dlgOpenId) { if (!dlgOpenTsRef.current) dlgOpenTsRef.current = Date.now(); } else dlgOpenTsRef.current = 0;
+  /* ---------- v0.56: КАТ-СЦЕНЫ (п.6) ----------
+   Камера летит по точкам (в каждой — задержка wait и зум-множитель), весь мир замер:
+   ВСЕ фишки, NPC и боссы стоят, ходьба/порталы/кубики заблокированы, кино-полосы + «Пропустить».
+   Запуск: ① при старте карты (trigger 'start'), ② первый ЗА СЕССИЮ вход в ЗОНУ-триггер
+   ('zone', интервал следит за своей фишкой), ③ вариант диалога NPC (сигнал s.cutscenePlay).
+   Кат-сцены «старт/зона» помечаются в s.cutsceneDone (часть сейва) — за сессию не повторяются;
+   кат-сцена от NPC играбельна повторно. Состояние держим в ref'ax — rAF-цикл читает живьём. */
+  const [cutActive, setCutActive] = useState(false); // для оверлея/подсказок (живой дубликат ref'а)
+  const cutActiveRef = useRef(false);
+  const cutRef = useRef<{ def: CutsceneDef; i: number; phase: 'to' | 'wait'; t0: number; fromX: number; fromY: number; fromZ: number } | null>(null);
+  const cutQueueRef = useRef<CutsceneDef[]>([]); // кат-сцены старта карты играются ОДНА ЗА другой
+  const cutFreezeTsRef = useRef(0); // момент заморозки мира (все NPC/боссы рисуются в этой точке)
+  const cutPlayedRef = useRef<Set<string>>(new Set()); // локальная защита от повторного запуска за сессию
+  const cutLastNpcTsRef = useRef(Date.now()); // сигналы NPC старше монтирования — просроченные (сейв)
+  const startCutRef = useRef<(def: CutsceneDef) => void>(() => {});
+  const cutFinishRef = useRef<(markSeen: boolean) => void>(() => {});
+  /* v0.56 (п.3): РАЗМЕР ОКНА ЗАДАНИЯ — «−» компактнее / «Стд» стандарт / «＋» крупнее;
+   работает для окон задания QUEST, RUBG и классического челленджа */
+  const [taskWinSize, setTaskWinSize] = useState(0);
+  const taskSizeBtns = (
+    <span className="flex items-center gap-1 shrink-0">
+      {([['−', -1, 'Уменьшить окно задания'], ['Стд', 0, 'Стандартный размер окна'], ['＋', 1, 'Увеличить окно задания']] as [string, number, string][]).map(([lbl, val, ttl]) => (
+        <button
+          key={val}
+          title={ttl}
+          onClick={() => { setTaskWinSize(val); sfx.hover(); }}
+          className={`px-2 h-7 border-2 font-pixel text-[9px] cursor-pointer transition-colors ${taskWinSize === val ? 'border-gold text-gold bg-gold/10' : 'border-edge text-dim hover:text-paper hover:border-edge2'}`}
+        >
+          {lbl}
+        </button>
+      ))}
+    </span>
+  );
+  const taskWinCls = taskWinSize === 1 ? 'max-w-[min(1500px,96vw)]' : taskWinSize === -1 ? 'max-w-xl' : 'max-w-3xl';
   /* v0.53: скрывать реплики, которые персонаж уже отвечал (настройка ТОЛЬКО НА ТЕКУЩУЮ
      СЕССИЮ — между партиями больше не запоминается; при загрузке сохранения метки
      «уже слышали» возвращаются вместе с партией — они часть сейва);
@@ -552,21 +588,116 @@ export default function GameScreen() {
     if (!n?.dialog) { useApp.getState().toast('У этого NPC нет диалога', 'info'); return; }
     setDlgNpcId(npcId);
     setDlgNode(n.dialog.root);
+    /* v0.56: заморозка мира — СИНХРОННО, не дожидаясь ре-рендера: rAF-цикл читает
+       ref'ы каждый кадр, мир замирает ровно в момент открытия окна */
+    dlgOpenIdRef.current = npcId;
+    dlgOpenTsRef.current = Date.now();
     sfx.click();
   };
-  const closeDialog = () => { setDlgNpcId(null); setDlgNode(null); setTradeNpcId(null); };
-  /* клавиша E — поговорить с NPC в радиусе; ESC — закрыть диалог */
+  const closeDialog = () => { setDlgNpcId(null); setDlgNode(null); setTradeNpcId(null); dlgOpenIdRef.current = null; dlgOpenTsRef.current = 0; };
+  /* клавиша E — поговорить с NPC в радиусе; ESC — закрыть диалог/пропустить кат-сцену */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() === 'e' || e.key.toLowerCase() === 'у') {
         const cur = nearNpc;
-        if (cur && !dlgNpcId) { e.preventDefault(); openDialog(cur.npc.id); }
+        if (cur && !dlgNpcId && !cutActiveRef.current) { e.preventDefault(); openDialog(cur.npc.id); } // v0.56: в кат-сцене разговоров нет
       }
       if (e.key === 'Escape' && dlgNpcId) closeDialog();
+      /* v0.56: ESC пропускает кат-сцену (если автор разрешил пропуск) */
+      if (e.key === 'Escape' && cutActiveRef.current) {
+        const def = cutRef.current?.def;
+        if (def?.skippable !== false) { e.preventDefault(); cutFinishRef.current(true); }
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [nearNpc, dlgNpcId]);
+
+  /* ---------- v0.56: запуск/завершение кат-сцен + три триггера ----------
+   Взаимная рекурсия старт/финиш — через ref'ы (функции обновляются каждый рендер,
+   rAF-цикл и оверлей вызывают всегда свежие версии). */
+  startCutRef.current = (def: CutsceneDef) => {
+    if (!def || !(def.pts ?? []).length) return;
+    const v = viewRef.current;
+    cutRef.current = { def, i: 0, phase: 'to', t0: Date.now(), fromX: v.x, fromY: v.y, fromZ: v.zoom };
+    cutFreezeTsRef.current = Date.now(); // мир замирает С ЭТОГО кадра (все NPC/боссы/фишки)
+    cutActiveRef.current = true;
+    setCutActive(true);
+    closeDialog(); // если кат-сцену выдал вариант диалога — окно закрывается само
+    try { sfx.portal(); } catch { /* звук не критичен */ }
+  };
+  cutFinishRef.current = (markSeen: boolean) => {
+    const cut = cutRef.current;
+    cutRef.current = null;
+    cutActiveRef.current = false;
+    cutFreezeTsRef.current = 0;
+    setCutActive(false);
+    /* «старт/зона» помечаем виденными (часть сейва) — за сессию не повторяются;
+       кат-сцена от NPC играбельна повторно — не помечаем */
+    if (cut && markSeen && me && cut.def.trigger !== 'npc') {
+      const key = cut.def.trigger === 'start' ? `start:${cut.def.id}` : `${me}:${cut.def.id}`;
+      if (!cutPlayedRef.current.has(key)) {
+        cutPlayedRef.current.add(key);
+        dispatch({ t: 'cutsceneSeen', id: me, key });
+      }
+    }
+    const next = cutQueueRef.current.shift(); // стартовые играются ОДНА ЗА другой
+    if (next) startCutRef.current(next);
+  };
+  /* ① СТАРТ КАРТЫ: кат-сцены с trigger='start' — по одному разу на партию (общий ключ) */
+  const startCutSessionRef = useRef(0);
+  useEffect(() => {
+    if (!s || s.phase !== 'playing' || !map) return;
+    const started = s.startedAt || 0;
+    if (!started || startCutSessionRef.current === started) return;
+    startCutSessionRef.current = started;
+    const list = (map.cutscenes ?? []).filter((c) => c.trigger === 'start' && (c.pts ?? []).length >= 1 && !s.cutsceneDone?.[`start:${c.id}`]);
+    if (!list.length) return;
+    cutQueueRef.current = list.slice(1);
+    startCutRef.current(list[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s?.phase, s?.startedAt, map]);
+  /* ② ЗОНА-триггер: интервал следит за СВОЕЙ фишкой (ходьба или клетка) —
+   ВПЕРВЫЕ за сессию вошёл в зону — кат-сцена (ключ на игрока, часть сейва) */
+  useEffect(() => {
+    const iv = window.setInterval(() => {
+      const cur = useApp.getState();
+      const sess = cur.session;
+      const mp = cur.sessionMap;
+      if (!sess || sess.phase !== 'playing' || !mp || !cur.selfId) return;
+      if (cutActiveRef.current || dlgOpenIdRef.current) return;
+      const cuts = (mp.cutscenes ?? []).filter((c) => c.trigger === 'zone' && c.zone && (c.pts ?? []).length >= 1);
+      if (!cuts.length) return;
+      const self = sess.players.find((x) => x.id === cur.selfId);
+      if (!self || !self.alive || self.spect) return;
+      const jp = sess.journeyPos?.[cur.selfId];
+      const myPos = jp ?? cellCenter(mp, self.pos);
+      for (const c of cuts) {
+        const z = c.zone!;
+        const key = `${cur.selfId}:${c.id}`;
+        if (sess.cutsceneDone?.[key] || cutPlayedRef.current.has(key)) continue;
+        if (myPos.x >= z.x && myPos.x < z.x + z.w && myPos.y >= z.y && myPos.y < z.y + z.h) {
+          cutPlayedRef.current.add(key);
+          startCutRef.current(c);
+          dispatch({ t: 'cutsceneSeen', id: cur.selfId, key });
+          break;
+        }
+      }
+    }, 350);
+    return () => window.clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  /* ③ NPC ПОКАЗАЛ КАТ-СЦЕНУ: сигнал s.cutscenePlay (host пишет при выборе варианта) —
+   играем только СВЕЖИЙ сигнал для себя (ts после монтирования — хвосты сейва не играем) */
+  const cutPlay = s?.cutscenePlay;
+  useEffect(() => {
+    if (!cutPlay || cutPlay.pid !== me) return;
+    if (cutPlay.ts <= cutLastNpcTsRef.current) return;
+    cutLastNpcTsRef.current = cutPlay.ts;
+    const def = (map?.cutscenes ?? []).find((c) => c.id === cutPlay.id);
+    if (def && (def.pts ?? []).length >= 1) startCutRef.current(def);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cutPlay?.ts, cutPlay?.pid, cutPlay?.id, map]);
 
   const beltLockpick = (mePlayer?.items ?? []).find((x) => x.kind === 'lockpick' && x.belt);
   const openHack = (cellIdx: number) => {
@@ -721,6 +852,20 @@ export default function GameScreen() {
      к первой точке патруля босса. Здесь — только звуковой сигнал. */
   const bossDragRef = useRef<{ fx: number; fy: number; tx: number; ty: number; t0: number; ms: number } | null>(null);
   const lastCapTsRef = useRef(0);
+  /* v0.56: ОТЛОЖЕННЫЙ ЗАПУСК задания босса — фишку ДОТАЩИЛИ (конец bossDragRef) →
+   пауза 1 СЕКУНДА → клиент шлёт bossTaskGo, хост сверяет qTaskAt и открывает задание.
+   Один раз на захват (capTs — метка захвата). */
+  const bossTaskTimerRef = useRef<number | null>(null);
+  const bossTaskForRef = useRef(0);
+  const scheduleBossTaskGo = (capTs: number, delayMs: number) => {
+    if (!capTs || bossTaskForRef.current === capTs) return;
+    bossTaskForRef.current = capTs;
+    if (bossTaskTimerRef.current) window.clearTimeout(bossTaskTimerRef.current);
+    bossTaskTimerRef.current = window.setTimeout(() => {
+      const cur = useApp.getState();
+      if (cur.selfId) dispatch({ t: 'bossTaskGo', id: cur.selfId });
+    }, Math.max(0, delayMs));
+  };
   useEffect(() => {
     if (myCaptureTs && myCaptureTs !== lastCaptureRef.current) {
       lastCaptureRef.current = myCaptureTs;
@@ -990,6 +1135,8 @@ export default function GameScreen() {
            Пока идёт задание/окно карточки/квиз/анимация победы — фишки ВСЕХ стоят:
            задание в прямом эфире смотрят все (после него снова свободный ход). */
         const journeyFree = journeyMode && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate);
+        /* v0.56: КАТ-СЦЕНА — весь мир замер (фишки не двигаются, камера летит по маршруту) */
+        const cutFreeze = cutActiveRef.current;
         for (const fx of fxList) if (!fxStartRef.current.has(fx.id)) fxStartRef.current.set(fx.id, t + (fx.delay ?? 0));
         if (fxStartRef.current.size > fxList.length) {
           const ids = new Set(fxList.map((f) => f.id));
@@ -1045,6 +1192,10 @@ export default function GameScreen() {
                 if (distC > 4) {
                   const spdC = cps * CELL; // px/с — скорость карты
                   bossDragRef.current = { fx: self.x, fy: self.y, tx: jp.x, ty: jp.y, t0: Date.now(), ms: Math.max(700, Math.min(2400, (distC / spdC) * 1000)) };
+                } else {
+                  /* v0.56: тянуть было НЕКУДА (фишка уже в точке) — задание через 0.7 с
+                     «нулевого оттаскивания» + 1 с задержки (та же математика, что у хоста) */
+                  scheduleBossTaskGo(jp.ts, 1700);
                 }
               }
               const bDrag = bossDragRef.current;
@@ -1061,6 +1212,8 @@ export default function GameScreen() {
                   bossDragRef.current = null;
                   self.pinside.clear();
                   for (const q of m.portals ?? []) if (self.x >= q.x && self.x < q.x + q.w && self.y >= q.y && self.y < q.y + q.h) self.pinside.add(q.id);
+                  /* v0.56: фишка НА МЕСТЕ — через 1 секунду запускается задание босса */
+                  scheduleBossTaskGo(lastCapTsRef.current, 1000);
                 }
               } else if (jp && !self.moving && !self.dirty) {
                 const snapD = Math.hypot(jp.x - self.x, jp.y - self.y);
@@ -1072,7 +1225,7 @@ export default function GameScreen() {
                 }
               }
               let vx = 0, vy = 0;
-              const canWalk = sess.phase === 'playing' && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate) && !(sess.qCards && me && sess.qCards[me]) && !bossDragRef.current; // v0.54: во время оттаскивания боссом ходить нельзя
+              const canWalk = sess.phase === 'playing' && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate) && !(sess.qCards && me && sess.qCards[me]) && !bossDragRef.current && !cutActiveRef.current; // v0.54: во время оттаскивания боссом ходить нельзя · v0.56: в кат-сцене мир замер
               if (canWalk) {
                 for (const kd of [...journeyKeys.current, ...journeyPadRef.current]) {
                   if (kd === 'up') vy -= 1; else if (kd === 'down') vy += 1;
@@ -1170,8 +1323,10 @@ export default function GameScreen() {
               if (!fresh) { rj.vx = 0; rj.vy = 0; }
               const age = Math.max(0, (nowMs - rj.t) / 1000);
               const exX = rj.ax + rj.vx * age, exY = rj.ay + rj.vy * age;
-              d.x += (exX - d.x) * Math.min(1, 0.16 * dt);
-              d.y += (exY - d.y) * Math.min(1, 0.16 * dt);
+              if (!cutFreeze) { // v0.56: в кат-сцене фишки ВСЕ стоят
+                d.x += (exX - d.x) * Math.min(1, 0.16 * dt);
+                d.y += (exY - d.y) * Math.min(1, 0.16 * dt);
+              }
               jdir = fresh && rj.mv ? rj.dir : undefined; // идёт — походка по направлению; стоит — idle
               if (journeyFree && p.id === act?.id && fresh && rj.mv) anyoneMoving = true;
             }
@@ -1208,7 +1363,7 @@ export default function GameScreen() {
           // как она доходит до места назначения, и лишь потом сходится с авторитетной
           // позицией (она = последняя ячейка пути). Раньше очередь обнулялась мгновенно,
           // и фишка «прыгала» к концу, не дойдя.
-          if (hop && hop.queue.length) {
+          if (hop && hop.queue.length && !cutFreeze) { // v0.56: в кат-сцене фишки ВСЕ стоят
             anyoneMoving = true;
             movingNow = true;
             if (smooth) {
@@ -1265,7 +1420,7 @@ export default function GameScreen() {
               moveSndRef.current.delete(p.id);
               stopLoop(`mv-${p.id}`, 0.25);
             }
-          } else if (!mvActive) {
+          } else if (!mvActive && !cutFreeze) {
             // тянем к авторитетной клетке только когда это движение не «висит» в ожидании
             d.x += (center.x - d.x) * Math.min(1, 0.14 * dt);
             d.y += (center.y - d.y) * Math.min(1, 0.14 * dt);
@@ -1412,6 +1567,40 @@ export default function GameScreen() {
             zoom: zx * lookZoomRef.current,
           };
         }
+        /* v0.56: КАТ-СЦЕНА — камера летит по маршруту ПОВЕРХ обычной камеры:
+           сегмент 'to' — плавный перелёт (easeInOutQuad) к точке с лерпом зума,
+           сегмент 'wait' — стоим в точке pts[i].wait секунд; точки кончились — финиш */
+        const cutSt = cutRef.current;
+        if (cutSt) {
+          const ptsC = cutSt.def.pts;
+          const nowC = Date.now();
+          const tgtC = ptsC[Math.min(cutSt.i, ptsC.length - 1)];
+          const baseZx0 = Math.min(2.1, Math.max(0.7, Math.min(w, h) / (CELL * 7.2)));
+          const tgtZ = baseZx0 * Math.min(3, Math.max(0.4, tgtC.zoom ?? 1));
+          let cx = cutSt.fromX, cy = cutSt.fromY, cz = cutSt.fromZ;
+          if (cutSt.phase === 'to') {
+            const spd = Math.max(120, cutSt.def.speed ?? 420);
+            const dur = Math.max(350, (Math.hypot(tgtC.x - cutSt.fromX, tgtC.y - cutSt.fromY) / spd) * 1000);
+            const k = Math.min(1, (nowC - cutSt.t0) / dur);
+            const ease = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+            cx = cutSt.fromX + (tgtC.x - cutSt.fromX) * ease;
+            cy = cutSt.fromY + (tgtC.y - cutSt.fromY) * ease;
+            cz = cutSt.fromZ + (tgtZ - cutSt.fromZ) * ease;
+            if (k >= 1) { cutSt.phase = 'wait'; cutSt.t0 = nowC; cutSt.fromX = tgtC.x; cutSt.fromY = tgtC.y; cutSt.fromZ = tgtZ; }
+          } else {
+            cx = tgtC.x; cy = tgtC.y; cz = tgtZ;
+            if (nowC - cutSt.t0 >= Math.max(0, tgtC.wait ?? 1) * 1000) {
+              cutSt.i++;
+              if (cutSt.i >= ptsC.length) {
+                cutFinishRef.current(true);
+              } else {
+                cutSt.phase = 'to'; cutSt.t0 = nowC; cutSt.fromX = tgtC.x; cutSt.fromY = tgtC.y; cutSt.fromZ = tgtZ;
+              }
+            }
+          }
+          if (cutRef.current) goal = { x: cx, y: cy, zoom: cz };
+        }
+
         const v = viewRef.current;
         /* RUBG: после завершения ВЫСАДКИ (rollOff → playing) камера МГНОВЕННО переносится
            к фишке — она стоит в точке приземления; иначе долгое «плытьё» через всю карту */
@@ -1476,6 +1665,12 @@ export default function GameScreen() {
            (bossHold on) или держат меня после захвата; у остальных игроков — свой тайминг */
         const myHolds = isQuest && me ? sess.qBossHoldAt?.[me] : undefined;
         if (myHolds) for (const [hid, hts] of Object.entries(myHolds)) if (patrolFreeze[hid] === undefined) patrolFreeze[hid] = hts;
+        /* v0.56: МИР ЗАМИРАЕТ — открыт диалог/торговля или идёт кат-сцена: ВСЕ боссы стоят
+           (NPC замораживаются ниже, в drawBoard — npcFreeze для всех) */
+        const worldFreezeTs = cutFreezeTsRef.current || (dlgOpenIdRef.current ? dlgOpenTsRef.current : 0);
+        if (worldFreezeTs) {
+          for (const bb of (m.bosses ?? [])) if (patrolFreeze[bb.id] === undefined) patrolFreeze[bb.id] = worldFreezeTs;
+        }
 
         // ЛОКАЛЬНЫЕ моменты разбития ячеек — для короткой анимации осколков.
         // Запоминаем первый кадр, когда ячейка увидена разбитой; убрали — чистим.
@@ -1531,7 +1726,9 @@ export default function GameScreen() {
              стоит на месте (время заморожено на момент открытия), после разговора патруль продолжается.
              v0.55: читаем ЖИВЫЙ ref (state в замыкании rAF-цикла был устаревшим —
              npcFreeze никогда не доходил до отрисовки, NPC продолжал патрулировать) */
-          npcFreeze: dlgOpenIdRef.current ? { [dlgOpenIdRef.current]: dlgOpenTsRef.current } : undefined,
+          npcFreeze: worldFreezeTs
+            ? Object.fromEntries((m.npcs ?? []).map((n) => [n.id, worldFreezeTs]))
+            : undefined,
         });
 
         /* RUBG: оверлей поверх поля — безопасная зона, самолёт, маркеры игры, радиус атаки,
@@ -1918,6 +2115,7 @@ export default function GameScreen() {
   const startHold = () => {
     if (!myTurn || s.moving || ch || s.pendingCard || s.awaitPost || s.quiz) return;
     if (fxGateUi) return; // во время анимаций бросать кубики НЕЛЬЗЯ (раньше можно было сорвать спектакль)
+    if (cutActiveRef.current) return; // v0.56: в кат-сцене мир замер — кубики не бросаются
     if (rolling || holdingRef.current) return; // защита от повторного нажатия/залипания
     clearInterval(shakeIntRef.current); // глушим возможный «осиротевший» интервал
     holdingRef.current = true;
@@ -2981,9 +3179,11 @@ export default function GameScreen() {
         <Modal
           title={isMapless && s.mapless ? `Матч ${Math.min(s.mapless.done + 1, s.mapless.total)} · ${task.title}` : `Ячейка №${ch.cellIdx + 1} · ${task.title}`}
           icon={Ic.cart(16)}
-          w="max-w-4xl"
+          w={taskWinSize === 1 ? 'max-w-6xl' : taskWinSize === -1 ? 'max-w-2xl' : 'max-w-4xl'}
           locked
         >
+          {/* v0.56: размер окна задания — «−»/«Стд»/«＋» */}
+          <div className="flex justify-end mb-2">{taskSizeBtns}</div>
           <div className="grid md:grid-cols-[220px_1fr] gap-4">
             <div className="space-y-3">
               <img
@@ -3580,9 +3780,10 @@ export default function GameScreen() {
             return (
               <div className={peekMap ? 'hidden' : undefined}>
               <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(4,6,14,0.78)] p-3">
-                <div className="pixel-panel pixel-corners p-4 max-w-3xl w-full max-h-[93vh] overflow-y-auto">
+                <div className={`pixel-panel pixel-corners p-4 ${taskWinCls} w-full max-h-[93vh] overflow-y-auto`}>
                   <div className="flex items-center justify-between gap-3 flex-wrap min-w-0">
                     <div className="font-display uppercase text-lg text-teal break-words min-w-0">🧭 ЗАДАНИЕ · {myQTask.title}</div>
+                    {taskSizeBtns}
                     <span className="font-pixel text-[8px] text-faint shrink-0">Задание №{myQJob.cellIdx + 1} · играешь ТОЛЬКО ты</span>
                   </div>
                   <div className="grid md:grid-cols-[220px_1fr] gap-4 mt-2">
@@ -3691,9 +3892,10 @@ export default function GameScreen() {
             return (
             <div className={peekMap ? 'hidden' : undefined}>
             <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(4,6,14,0.78)] p-3">
-              <div className="pixel-panel pixel-corners p-4 max-w-3xl w-full max-h-[93vh] overflow-y-auto">
+              <div className={`pixel-panel pixel-corners p-4 ${taskWinCls} w-full max-h-[93vh] overflow-y-auto`}>
                 <div className="flex items-center justify-between gap-3 flex-wrap min-w-0">
                   <div className="font-display uppercase text-lg text-gold break-words min-w-0">🎮 ЛИЧНОЕ ЗАДАНИЕ · {myRubgTask.title}</div>
+                  {taskSizeBtns}
                   <span className="font-pixel text-[8px] text-faint shrink-0">Задание №{myJob.cellIdx + 1} · играешь ТОЛЬКО ты</span>
                 </div>
                 <div className="grid md:grid-cols-[220px_1fr] gap-4 mt-2">
@@ -4132,6 +4334,26 @@ export default function GameScreen() {
       )}
 
       {tplOpen && <TemplateModal cellIdx={active?.pos ?? 0} onClose={() => setTplOpen(false)} />}
+
+      {/* ---------- v0.56: КАТ-СЦЕНА — кино-полосы + кнопка «Пропустить» ---------- */}
+      {cutActive && (() => {
+        const canSkip = cutRef.current?.def.skippable !== false;
+        return (
+          <div className="fixed inset-0 z-[70] pointer-events-none">
+            <div className="absolute inset-x-0 top-0 h-[7vh] bg-black cut-bar-top" />
+            <div className="absolute inset-x-0 bottom-0 h-[7vh] bg-black cut-bar-bottom" />
+            <div className="absolute left-1/2 -translate-x-1/2 top-[7.8vh] font-pixel text-[9px] text-gold/80 tracking-widest blink-hard">🎬 КАТ-СЦЕНА</div>
+            {canSkip && (
+              <button
+                onClick={() => { cutFinishRef.current(true); sfx.hover(); }}
+                className="pointer-events-auto absolute right-4 bottom-[8.5vh] px-4 py-2 border-2 border-gold bg-[rgba(4,6,14,0.7)] font-pixel text-[10px] text-gold cursor-pointer hover:bg-gold/10"
+              >
+                ⏭ ПРОПУСТИТЬ [ESC]
+              </button>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ---------- квиз (видят все живые игроки) ---------- */}
       <QuizOverlay />

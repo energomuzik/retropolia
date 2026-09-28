@@ -19,8 +19,41 @@ import { CreateScreen, JoinScreen, LoadScreen, LobbyScreen } from './screens/Lob
 export default function App() {
   const screen = useApp((s) => s.screen);
   const toasts = useApp((s) => s.toasts);
-  const volume = useApp((s) => s.options.volume);
+  const options = useApp((s) => s.options);
+  const volume = options.volume;
   const [ready, setReady] = useState(false);
+
+  /* v0.56: ФИЛЬТРЫ В ПОЛНОМ ЭКРАНЕ — полосатый (сканлайны) и NES NTSC — по умолчанию
+     ПРОПАДАЮТ, когда эмулятор разворачивается на весь экран: полноэкранный элемент рисуется
+     в отдельном «слое» браузера поверх всех fixed-оверлеев сайта. Лечим инъекцией: пока
+     document.fullscreenElement существует, кладём копии фильтровых слоёв ВНУТРЬ него
+     (pointer-events: none, z-index максимальный) — полосы и NTSC-эффект видны и в полном экране.
+     Слои пересоздаются при изменении галочек (options.scanlines / options.ntsc). */
+  useEffect(() => {
+    const on = () => {
+      document.querySelectorAll('.crt-fs-layer').forEach((n) => n.remove());
+      const fsEl = document.fullscreenElement as HTMLElement | null;
+      if (!fsEl) return;
+      if (options.scanlines) {
+        const d = document.createElement('div');
+        d.className = 'crt-scanlines crt-fs-layer';
+        d.style.zIndex = '2147483647';
+        fsEl.appendChild(d);
+      }
+      if (options.ntsc) {
+        const d = document.createElement('div');
+        d.className = 'crt-ntsc crt-fs-layer';
+        d.style.zIndex = '2147483646';
+        fsEl.appendChild(d);
+      }
+    };
+    document.addEventListener('fullscreenchange', on);
+    on(); // применить к уже развёрнутому экрану (галочку переключили не выходя из полного экрана)
+    return () => {
+      document.removeEventListener('fullscreenchange', on);
+      document.querySelectorAll('.crt-fs-layer').forEach((n) => n.remove());
+    };
+  }, [options.scanlines, options.ntsc]);
 
   useEffect(() => {
     let on = true;
@@ -101,7 +134,9 @@ export default function App() {
       {screen === 'emulator' && <EmulatorLauncher />}
       {screen === 'options' && <OptionsScreen />}
       <Toasts items={toasts} />
-      <div className="crt-scanlines" />
+      {/* v0.56: полосатый фильтр и NES NTSC — включаются галочками в общих опциях */}
+      {options.scanlines && <div className="crt-scanlines" />}
+      {options.ntsc && <div className="crt-ntsc" />}
       <div className="crt-vignette" />
     </div>
   );
