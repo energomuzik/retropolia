@@ -85,10 +85,18 @@ export const useApp = create<AppState>()((set, get) => ({
     delMode: 'confirm', // защита от случайного удаления: с окошком по умолчанию
     hideRoomCode: false, // код комнаты виден (переключается глазиком в лобби/игре, выбор запоминается)
     scanlines: true, // v0.56: полосатый фильтр (сканлайны) включён по умолчанию — как всегда выглядел сайт
-    ntsc: false, // v0.56: NES NTSC фильтр выключен по умолчанию (включается галочкой в опциях)
+    ntsc: false, // v0.56 УСТАРЕВШЕЕ: старая галочка NTSC — используется только для миграции в ntscMode
+    ntscMode: 0, // v0.57: NTSC-фильтр выключен по умолчанию; 1 «Полосатый» (старый) · 2 «Мягкий CRT» (новый) — выбор в опциях
+    cutBars: 'dissolve', // v0.57: полосы кат-сцен «растворяющиеся» (PS1 Resident Evil / Dino Crisis 2) — по умолчанию; classic — прежний выезд
   },
   setOptions: (p) => {
     const options = { ...get().options, ...p };
+    // v0.57 МИГРАЦИЯ: старые сохранённые опции содержат галочку ntsc (boolean) и не знают
+    // про ntscMode — превращаем её в режим (true → 1 «Полосатый», false → 0), чтобы выбор
+    // пользователя v0.56 не потерялся; явный ntscMode в p всегда главнее
+    if (p.ntscMode === undefined && typeof p.ntsc === 'boolean') {
+      options.ntscMode = p.ntsc ? 1 : 0;
+    }
     setVolume(options.volume);
     set({ options });
     try { localStorage.setItem('retropolia-options', JSON.stringify({ state: { options } })); } catch { /* noop */ }

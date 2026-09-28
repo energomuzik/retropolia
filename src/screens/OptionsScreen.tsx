@@ -181,7 +181,9 @@ export default function OptionsScreen() {
           <Panel title="Экран и фильтры" icon={Ic.eye(16)} accent="var(--color-magma)" className="slide-up md:col-span-2">
             <div className="p-4 space-y-3">
               <p className="text-[10px] text-faint leading-relaxed">
-                Оба фильтра работают и в ПОЛНОМ ЭКРАНЕ эмулятора: полосы и NTSC-эффект накладываются поверх него (v0.56 — больше не пропадают).
+                Фильтры работают и в ПОЛНОМ ЭКРАНЕ эмулятора (v0.56 — больше не пропадают). «Мягкий CRT» (v0.57) размывает
+                САМ КАДР внутри эмулятора — цвета чуть теплеют, картинка становится мягкой, как на старом телевизоре.
+                Ниже также выбор полос кат-сцен (по умолчанию — «растворяющиеся», как в PS1 Resident Evil и Dino Crisis 2).
               </p>
               <Toggle
                 checked={options.scanlines !== false}
@@ -189,12 +191,50 @@ export default function OptionsScreen() {
                 label="Полосатый фильтр (сканлайны CRT)"
                 hint="Тонкие горизонтальные полосы как на ЭЛТ-мониторе — тот вид, что был у сайта всегда; выключите, если мешают"
               />
-              <Toggle
-                checked={!!options.ntsc}
-                onChange={(v) => setOptions({ ntsc: v })}
-                label="NES NTSC фильтр"
-                hint="Имитация композитного видеовыхода NES: мягкая картинка, лёгкое «растекание» цвета и RGB-триады — как на старом телевизоре"
-              />
+              <div>
+                <div className="tick-label mb-1.5">NES NTSC фильтр — режим</div>
+                <div className="grid sm:grid-cols-3 gap-2">
+                  {([
+                    [0, 'Выключен', 'Обычная чёткая картинка без наложений'],
+                    [1, 'Полосатый (старый)', 'Прежний фильтр v0.56: RGB-триады и лёгкое мерцание поверх картинки'],
+                    [2, 'Мягкий CRT (новый)', 'Цвета чуть теплеют и «растекаются», лёгкая мягкость кадра и свечение — как на ЭЛТ-телевизоре; фильтр применяется к самому кадру эмулятора'],
+                  ] as [0 | 1 | 2, string, string][]).map(([mode, lbl, hint]) => (
+                    <button
+                      key={mode}
+                      onClick={() => { setOptions({ ntscMode: mode }); sfx.hover(); }}
+                      title={hint}
+                      className={`text-left px-3 py-2 border-2 transition-colors cursor-pointer ${options.ntscMode === mode ? 'border-magma bg-magma/10' : 'border-edge hover:border-edge2'}`}
+                    >
+                      <div className={`font-display text-[11px] uppercase ${options.ntscMode === mode ? 'text-magma' : 'text-paper'}`}>{lbl}</div>
+                      <div className="text-[10px] text-dim mt-0.5 leading-snug">{hint}</div>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-faint mt-2 leading-relaxed">
+                  Раньше (v0.56) этот фильтр был галочкой и «не действовал на картинку»: его слой не мог обработать
+                  содержимое окна эмулятора. Теперь «Мягкий CRT» работает изнутри эмулятора — эффект виден и в полном экране.
+                  Старый «Полосатый» остался — выбирайте, какой больше нравится.
+                </p>
+              </div>
+              <div>
+                <div className="tick-label mb-1.5">Полосы кат-сцен (чёрные поля сверху и снизу)</div>
+                <div className="grid sm:grid-cols-2 gap-2">
+                  {([
+                    ['dissolve', 'Растворяющиеся (по умолчанию)', 'Как в PS1 Resident Evil и Dino Crisis 2: полосы с мягким краем ПЛАВНО проявляются, растворяя кадр в чёрный, а в конце кат-сцены плавно тают'],
+                    ['classic', 'Резкие (прежние)', 'Полосы выезжают сверху вниз и снизу вверх, в конце — плавно уезжают обратно (мгновенного исчезновения больше нет)'],
+                  ] as ['dissolve' | 'classic', string, string][]).map(([mode, lbl, hint]) => (
+                    <button
+                      key={mode}
+                      onClick={() => { setOptions({ cutBars: mode }); sfx.hover(); }}
+                      title={hint}
+                      className={`text-left px-3 py-2 border-2 transition-colors cursor-pointer ${options.cutBars === mode ? 'border-gold bg-gold/10' : 'border-edge hover:border-edge2'}`}
+                    >
+                      <div className={`font-display text-[11px] uppercase ${options.cutBars === mode ? 'text-gold' : 'text-paper'}`}>{lbl}</div>
+                      <div className="text-[10px] text-dim mt-0.5 leading-snug">{hint}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </Panel>
 

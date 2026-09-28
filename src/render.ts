@@ -343,6 +343,7 @@ export interface BoardDrawOpts {
   patrolNow?: number;
   patrolFreeze?: Record<string, number>; // PlacedBoss.id → момент (мс), в который босс погиб и замер
   npcFreeze?: Record<string, number>; // v0.54: PlacedNpc.id → момент (мс), в который NPC замер — с ним ОТКРЫТ ДИАЛОГ (патруль стоит, пока идёт разговор)
+  npcPin?: Record<string, { x: number; y: number }>; // v0.57: ЖЁСТКАЯ привязка NPC на время заморозки мира (диалог/торговля/кат-сцена): позиция посчитана ОДИН раз на момент заморозки и рисуется напрямую, минуя формулу патруля — NPC гарантированно стоит
   patrolRoutes?: { pts: { x: number; y: number }[]; color: string }[];
   /* v0.56: маршруты КАТ-СЦЕН (только редактор): пунктир + точки-кружки с номерами,
      зона-триггер — пунктирный прямоугольник с плашкой «ТРИГГЕР»; active — выделенная */
@@ -1237,9 +1238,10 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
        без маршрута — на своём месте (npc.x/y). v0.54: если с NPC ОТКРЫТ ДИАЛОГ —
        время заморожено на момент открытия (npcFreeze): NPC стоит на месте, а не уходит;
        разговор закончился — патруль продолжается с обычной формулы. */
-    const pp = npc.patrol && o.patrolBase !== undefined
-      ? patrolPos(npc.patrol, o.patrolBase, o.patrolNow ?? 0, o.npcFreeze?.[npc.id])
-      : null;
+    const pp = o.npcPin?.[npc.id]
+      ?? (npc.patrol && o.patrolBase !== undefined
+        ? patrolPos(npc.patrol, o.patrolBase, o.patrolNow ?? 0, o.npcFreeze?.[npc.id])
+        : null);
     const nx = pp ? pp.x : npc.x;
     const ny = pp ? pp.y : npc.y;
     if (o.sndRadii && npc.r && npc.r > 0) {

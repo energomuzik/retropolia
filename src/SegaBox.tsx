@@ -154,12 +154,18 @@ export default function SegaBox({
   const chaosJson = JSON.stringify(chaos ?? []);
   const chaosJsonRef = useRef(chaosJson);
   chaosJsonRef.current = chaosJson;
+  /* v0.57: выбранный в опциях NTSC-режим (0/1/2) — живо применяется к эмулятору:
+     «Мягкий CRT» (2) размывает сам кадр внутри iframe, режим зашивается в HTML
+     при пересборке и меняется на лету через postMessage set-crt */
+  const ntscMode = useApp((st) => st.options.ntscMode ?? 0);
+  const ntscModeRef = useRef(ntscMode);
+  ntscModeRef.current = ntscMode;
 
   const html = useMemo(() => {
     const opts = useApp.getState().options;
     const volume = Math.max(0, Math.min(1, opts.emuVolume ?? 1));
     const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    return buildHtml(resolvedCore, padFamily, volume, CORE_BASES, bootStateRef.current, nonce, remapJsonRef.current, chaosJsonRef.current);
+    return buildHtml(resolvedCore, padFamily, volume, CORE_BASES, bootStateRef.current, nonce, remapJsonRef.current, chaosJsonRef.current, ntscModeRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedCore, padFamily, romData, bootTick]);
 
@@ -169,6 +175,13 @@ export default function SegaBox({
     try { frameRef.current?.contentWindow?.postMessage({ type: 'set-chaos', list: chaos ?? [] }, '*'); } catch { /* noop */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chaosJson, status]);
+
+  // v0.57: живая смена NTSC-режима внутри эмулятора (без перезапуска ядра)
+  useEffect(() => {
+    if (status !== 'ready') return;
+    try { frameRef.current?.contentWindow?.postMessage({ type: 'set-crt', m: ntscMode }, '*'); } catch { /* noop */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ntscMode, status]);
 
   // Живая громкость — без перезапуска ядра (встроенная панель со звуком спрятана).
   // Шлём при старте и при каждом изменении опций; работает и для NES, и для SEGA.
@@ -393,7 +406,7 @@ export default function SegaBox({
   );
 }
 
-function buildHtml(core: string, padFamily: PadFamily, volume: number, bases: string[], bootStateB64: string | null, nonce: string, remapJson: string, chaosJson: string): string {
+function buildHtml(core: string, padFamily: PadFamily, volume: number, bases: string[], bootStateB64: string | null, nonce: string, remapJson: string, chaosJson: string, ntscMode: number): string {
   // Внутренний документ: чистое окно без тулбара, общается с хостом через postMessage.
   // Ром приходит сообщением 'boot' как ArrayBuffer; blob-URL создаётся ВНУТРИ iframe —
   // с именем и расширением файла (иначе ядро стартует «пустым» и показывает меню RetroArch).
@@ -407,6 +420,10 @@ function buildHtml(core: string, padFamily: PadFamily, volume: number, bases: st
     // теперь её нет вовсе. Громкость управляется приложением через set-volume.
     '.ejs_menu_bar{display:none!important;pointer-events:none!important}',
     '.ejs_context_menu{display:none!important}',
+    // v0.57: внутренний слой «Мягкого CRT» (ntscMode 2): тёплый тон + мягкие углы.
+    // Сам кадр дополнительно размывается filter'ом на canvas (см. applyCrt ниже) —
+    // так фильтр РЕАЛЬНО действует на картинку, включая полный экран эмулятора.
+    '.crti-soft{position:fixed;inset:0;pointer-events:none;z-index:2147483000;background:radial-gradient(ellipse 130% 100% at 50% 45%, rgba(0,0,0,0) 58%, rgba(0,0,0,0.30) 100%), linear-gradient(rgba(255,196,130,0.045), rgba(255,196,130,0.045));}',
     '#err{display:none;position:absolute;inset:0;color:#ff5d73;font-family:monospace;font-size:12px;padding:16px;background:#05070f;white-space:pre-wrap;z-index:50}',
     '</style></head><body><div id="game"></div><div id="err"></div><script>',
     `/* boot ${nonce} */`,
@@ -777,10 +794,24 @@ function buildHtml(core: string, padFamily: PadFamily, volume: number, bases: st
     '  }catch(e){}',
     '},500);',
 
+    // v0.57: NTSC-режим внутри эмулятора. 0 — ничего; 2 — «Мягкий CRT»:
+    // фильтр на canvas (#game) + внутренний оверлей .crti-soft. Режим 1 («Полосатый»)
+    // рисуется слоем снаружи (App.tsx) — тут его дублировать не нужно.
+    'var CRT0=' + JSON.stringify(ntscMode) + ';var CRT=CRT0;',
+    'function applyCrt(){',
+    '  var st=document.getElementById("crt-cfstyle");',
+    '  if(!st){st=document.createElement("style");st.id="crt-cfstyle";document.head.appendChild(st);}',
+    '  st.textContent=CRT===2?"#game canvas,#game video{filter:blur(0.9px) saturate(1.18) contrast(0.97) brightness(1.05) sepia(0.05)}":"";',
+    '  var ov=document.getElementById("crti-soft");if(ov)ov.remove();',
+    '  if(CRT===2){var d=document.createElement("div");d.id="crti-soft";d.className="crti-soft";document.body.appendChild(d);}',
+    '}',
+    'applyCrt();',
+
     'window.addEventListener("message",function(e){',
     '  var d=e.data||{};',
     '  if(d.type==="set-remap-spec"){remapSpec=d.spec||[];remapTries=0;remapPump();return;}',
     '  if(d.type==="set-chaos"){CHAOS.list=Array.isArray(d.list)?d.list:[];applyChaos();return;}',
+    '  if(d.type==="set-crt"){CRT=d.m|0;applyCrt();return;}',
     '  if(d.type==="set-volume"){setVolNow(Number(d.v)||0);return;}',
     '  if(d.type==="boot"&&!booted){',
     '    booted=true;',

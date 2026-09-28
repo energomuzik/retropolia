@@ -19,7 +19,7 @@ import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper, Coin, CoinRow } from '../ui';
 import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, isQuestMode, isSoloMode, questGoalText, tileAt, tileRectOf, tileNumOf, coinsStr, normResMode, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS, doorKeyHex, doorKeyName } from '../types';
-import type { AnimClip, CardDef, ChaosKind, CutsceneDef, GameMap, GameSession, NpcLibEntry, PlacedNpc, PortalZone, PlayerState, QuestGoal, TaskDef, TokenDir, RubgItem } from '../types';
+import type { AnimClip, CardDef, ChaosKind, CutsceneDef, GameMap, GameSession, NpcLibEntry, PlacedNpc, PortalZone, PlayerState, QuestGoal, TaskDef, TokenDef, TokenDir, RubgItem } from '../types';
 import Randomizer from './Randomizer';
 import TradeWindow from './TradeWindow';
 import { nodeShowsQuests, nodeShowsShop } from '../dialogHubs';
@@ -39,6 +39,24 @@ const inWall = (m: GameMap, x: number, y: number, removed?: string[], keys?: str
     if (w.key && keys?.includes(w.key)) return false; // дверь открыта ключом
     return x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h;
   });
+
+/* v0.57: КОРОБКА ФИШКИ — нельзя войти ВНУТРЬ стены. Раньше проверялся только ЦЕНТР фишки:
+   она визуально «утопала» в стене, пока центр не касался её края (пройти насквозь было
+   нельзя, а внутрь — можно). Теперь блокируется пересечение стены с коробкой вокруг
+   центра: радиус считается от размера спрайта фишки (34px → ~14px, 64px → ~27px),
+   скольжение по стене сохранено (оси X и Y проверяются отдельно). */
+const inWallBox = (m: GameMap, x: number, y: number, r: number, removed?: string[], keys?: string[]): boolean =>
+  (m.walls ?? []).some((w) => {
+    if (w.id && removed?.includes(w.id)) return false; // снята квестом
+    if (w.key && keys?.includes(w.key)) return false; // дверь открыта ключом
+    return x + r > w.x && x - r < w.x + w.w && y + r > w.y && y - r < w.y + w.h;
+  });
+
+const colRadiusOf = (p: PlayerState, toks: TokenDef[]): number => {
+  const tok = p.tokenKey ? toks.find((t) => t.id === p.tokenKey) : null;
+  const size = tok ? (tok.size ?? (tok.anim ? 64 : 34)) : (p.tokenSize ?? 34);
+  return Math.max(8, Math.min(30, Math.round(size * 0.42)));
+};
 
 /* QUEST: выполнена ли цель квеста/концовки У ИГРОКА (клиентская копия движка — для UI) */
 const questGoalDoneFor = (sess: GameSession, p: PlayerState, g: QuestGoal | undefined): boolean => {
@@ -541,8 +559,27 @@ export default function GameScreen() {
   const cutFreezeTsRef = useRef(0); // момент заморозки мира (все NPC/боссы рисуются в этой точке)
   const cutPlayedRef = useRef<Set<string>>(new Set()); // локальная защита от повторного запуска за сессию
   const cutLastNpcTsRef = useRef(Date.now()); // сигналы NPC старше монтирования — просроченные (сейв)
+  const npcPinRef = useRef<{ key: number; map: Record<string, { x: number; y: number }> } | null>(null); // v0.57: жёсткая привязка NPC на время заморозки
+  /* v0.57: ПЛАВНЫЙ УХОД кино-полос — в конце кат-сцены полосы не исчезают мгновенно:
+     оверлей держится ещё ~0.85 с с классом cut-out (растворяющиеся тают, классические
+     уезжают), и только потом убирается. Стиль полос — из общих опций (cutBars). */
+  const [cutBarsOut, setCutBarsOut] = useState(false);
+  const cutBarsTimerRef = useRef<number | null>(null);
+  const cutWasRef = useRef(false);
   const startCutRef = useRef<(def: CutsceneDef) => void>(() => {});
   const cutFinishRef = useRef<(markSeen: boolean) => void>(() => {});
+  useEffect(() => {
+    if (cutActive) {
+      cutWasRef.current = true;
+      setCutBarsOut(false);
+      if (cutBarsTimerRef.current !== null) { window.clearTimeout(cutBarsTimerRef.current); cutBarsTimerRef.current = null; }
+      return;
+    }
+    if (!cutWasRef.current) return;
+    cutWasRef.current = false;
+    setCutBarsOut(true);
+    cutBarsTimerRef.current = window.setTimeout(() => { setCutBarsOut(false); cutBarsTimerRef.current = null; }, 850);
+  }, [cutActive]);
   /* v0.56 (п.3): РАЗМЕР ОКНА ЗАДАНИЯ — «−» компактнее / «Стд» стандарт / «＋» крупнее;
    работает для окон задания QUEST, RUBG и классического челленджа */
   const [taskWinSize, setTaskWinSize] = useState(0);
@@ -1251,10 +1288,11 @@ export default function GameScreen() {
                     ny = Math.max(tr.y + 8, Math.min(tr.y + tr.h - 8, ny));
                   }
                 }
+                const colR = colRadiusOf(p, mapToks); // v0.57: радиус коробки фишки — от размера её спрайта
                 const removedWalls = sess.wallsRemoved ?? [];
                 const myKeys = (me && sess.qKeys?.[me]) || []; // v0.55: свои ключи — двери своего цвета открыты
-                if (!inWall(m, nx, self.y, removedWalls, myKeys)) self.x = nx;
-                if (!inWall(m, self.x, ny, removedWalls, myKeys)) self.y = ny;
+                if (!inWallBox(m, nx, self.y, colR, removedWalls, myKeys)) self.x = nx; // v0.57: коробка — внутрь стены не пройти
+                if (!inWallBox(m, self.x, ny, colR, removedWalls, myKeys)) self.y = ny; // v0.57: скольжение по осям сохранено
                 self.dir = Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? 'right' : 'left') : (vy > 0 ? 'down' : 'up');
                 self.moving = true;
                 self.dirty = true;
@@ -1671,6 +1709,24 @@ export default function GameScreen() {
         if (worldFreezeTs) {
           for (const bb of (m.bosses ?? [])) if (patrolFreeze[bb.id] === undefined) patrolFreeze[bb.id] = worldFreezeTs;
         }
+        /* v0.57: ЖЁСТКАЯ ПРИВЯЗКА NPC (пояс и подтяжки): пока мир замер (открыт диалог/
+           торговля или идёт кат-сцена), позиции патрулирующих NPC считаются ОДИН РАЗ на
+           момент заморозки и запоминаются — рисование идёт ПО ПРИВЯЗКЕ (npcPin), минуя
+           формулу и npcFreeze. Даже если какая-то ветка отрисовки потеряет npcFreeze,
+           NPC гарантированно стоит на месте, пока идёт разговор. */
+        let npcPin: Record<string, { x: number; y: number }> | undefined;
+        if (worldFreezeTs) {
+          if (npcPinRef.current?.key !== worldFreezeTs) {
+            const pin: Record<string, { x: number; y: number }> = {};
+            for (const n of (m.npcs ?? [])) {
+              if (!n.patrol) continue;
+              const ppn = patrolPos(n.patrol, sess.startedAt || 0, worldFreezeTs);
+              if (ppn) pin[n.id] = ppn;
+            }
+            npcPinRef.current = { key: worldFreezeTs, map: pin };
+          }
+          npcPin = npcPinRef.current.map;
+        }
 
         // ЛОКАЛЬНЫЕ моменты разбития ячеек — для короткой анимации осколков.
         // Запоминаем первый кадр, когда ячейка увидена разбитой; убрали — чистим.
@@ -1720,7 +1776,7 @@ export default function GameScreen() {
           /* ПАТРУЛИРОВАНИЕ (v0.52): боссы и NPC с маршрутом рисуются в текущей точке —
              позиция считается формулой от синхронного старта партии (без сети) */
           patrolBase: sess.startedAt || 0,
-          patrolNow: Date.now(),
+          patrolNow: worldFreezeTs || Date.now(), // v0.57: пока мир замер — время патруля стоит на момент заморозки (страховка для всех формульных путей)
           patrolFreeze,
           /* v0.54: NPC, с которым открыт диалог/торговля, НЕ уходит в патруле —
              стоит на месте (время заморожено на момент открытия), после разговора патруль продолжается.
@@ -1729,6 +1785,7 @@ export default function GameScreen() {
           npcFreeze: worldFreezeTs
             ? Object.fromEntries((m.npcs ?? []).map((n) => [n.id, worldFreezeTs]))
             : undefined,
+          npcPin,
         });
 
         /* RUBG: оверлей поверх поля — безопасная зона, самолёт, маркеры игры, радиус атаки,
@@ -4336,20 +4393,29 @@ export default function GameScreen() {
       {tplOpen && <TemplateModal cellIdx={active?.pos ?? 0} onClose={() => setTplOpen(false)} />}
 
       {/* ---------- v0.56: КАТ-СЦЕНА — кино-полосы + кнопка «Пропустить» ---------- */}
-      {cutActive && (() => {
+      {(cutActive || cutBarsOut) && (() => {
         const canSkip = cutRef.current?.def.skippable !== false;
+        const dissolving = (options.cutBars ?? 'dissolve') !== 'classic'; // v0.57: стиль полос из общих опций
+        const barCls = (side: 'top' | 'bottom') =>
+          cutActive
+            ? (dissolving ? `cut-bar-d-${side}` : `cut-bar-${side}`)
+            : (dissolving ? `cut-bar-d-${side} cut-out-${side}` : `cut-bar-${side} cut-out-${side}`); // уход — плавный у обоих стилей
         return (
           <div className="fixed inset-0 z-[70] pointer-events-none">
-            <div className="absolute inset-x-0 top-0 h-[7vh] bg-black cut-bar-top" />
-            <div className="absolute inset-x-0 bottom-0 h-[7vh] bg-black cut-bar-bottom" />
-            <div className="absolute left-1/2 -translate-x-1/2 top-[7.8vh] font-pixel text-[9px] text-gold/80 tracking-widest blink-hard">🎬 КАТ-СЦЕНА</div>
-            {canSkip && (
-              <button
-                onClick={() => { cutFinishRef.current(true); sfx.hover(); }}
-                className="pointer-events-auto absolute right-4 bottom-[8.5vh] px-4 py-2 border-2 border-gold bg-[rgba(4,6,14,0.7)] font-pixel text-[10px] text-gold cursor-pointer hover:bg-gold/10"
-              >
-                ⏭ ПРОПУСТИТЬ [ESC]
-              </button>
+            <div className={`absolute inset-x-0 top-0 bg-black ${barCls('top')}`} style={{ height: dissolving ? '13vh' : '7vh' }} />
+            <div className={`absolute inset-x-0 bottom-0 bg-black ${barCls('bottom')}`} style={{ height: dissolving ? '13vh' : '7vh' }} />
+            {cutActive && (
+              <>
+                <div className="absolute left-1/2 -translate-x-1/2 top-[7.8vh] font-pixel text-[9px] text-gold/80 tracking-widest blink-hard">🎬 КАТ-СЦЕНА</div>
+                {canSkip && (
+                  <button
+                    onClick={() => { cutFinishRef.current(true); sfx.hover(); }}
+                    className="pointer-events-auto absolute right-4 bottom-[8.5vh] px-4 py-2 border-2 border-gold bg-[rgba(4,6,14,0.7)] font-pixel text-[10px] text-gold cursor-pointer hover:bg-gold/10"
+                  >
+                    ⏭ ПРОПУСТИТЬ [ESC]
+                  </button>
+                )}
+              </>
             )}
           </div>
         );

@@ -75,21 +75,43 @@ canvas { image-rendering: pixelated; }
   background:
     repeating-linear-gradient(
       to right,
-      rgba(255,64,64,0.05) 0px,
-      rgba(255,64,64,0.05) 1px,
+      rgba(255,64,64,0.09) 0px,
+      rgba(255,64,64,0.09) 1px,
+      rgba(64,255,96,0.09) 1px,
+      rgba(64,255,96,0.09) 2px,
+      rgba(80,96,255,0.09) 2px,
+      rgba(80,96,255,0.09) 3px
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      rgba(4,6,16,0.08) 0px,
+      rgba(4,6,16,0.08) 1px,
+      rgba(255,255,255,0.03) 1px,
+      rgba(255,255,255,0.03) 2px
+    );
+  animation: ntsc-flicker 5s infinite steps(50);
+}
+/* v0.57: НТSC «Мягкий CRT» (режим 2) — картинка как с ЭЛТ-телевизора: лёгкая мягкость,
+   тёплый тон и мягкое затемнение углов. РАЗМЫТИЕ САМОГО КАДРА добавляется внутри
+   эмулятора (SegaBox — filter на canvas), backdrop здесь дополняет вне окон эмулятора. */
+.crt-ntsc-soft {
+  pointer-events: none;
+  position: fixed; inset: 0; z-index: 89;
+  backdrop-filter: blur(1.1px) saturate(1.14) contrast(0.97) brightness(1.04);
+  -webkit-backdrop-filter: blur(1.1px) saturate(1.14) contrast(0.97) brightness(1.04);
+  background:
+    radial-gradient(ellipse 130% 100% at 50% 45%, rgba(0,0,0,0) 58%, rgba(0,0,0,0.26) 100%),
+    linear-gradient(rgba(255,196,130,0.035), rgba(255,196,130,0.035)),
+    repeating-linear-gradient(
+      to right,
+      rgba(255,80,80,0.05) 0px,
+      rgba(255,80,80,0.05) 1px,
       rgba(64,255,96,0.05) 1px,
       rgba(64,255,96,0.05) 2px,
       rgba(80,96,255,0.05) 2px,
       rgba(80,96,255,0.05) 3px
-    ),
-    repeating-linear-gradient(
-      to bottom,
-      rgba(4,6,16,0.05) 0px,
-      rgba(4,6,16,0.05) 1px,
-      rgba(255,255,255,0.018) 1px,
-      rgba(255,255,255,0.018) 2px
     );
-  animation: ntsc-flicker 5s infinite steps(50);
+  animation: ntsc-flicker 7s infinite steps(60);
 }
 @keyframes ntsc-flicker {
   0%, 100% { opacity: 1; }
@@ -98,7 +120,7 @@ canvas { image-rendering: pixelated; }
   73% { opacity: 0.95; }
   74% { opacity: 1; }
 }
-/* v0.56: кино-полосы кат-сцен — выезжают сверху и снизу при старте показа */
+/* v0.56: кино-полосы кат-сцен — классический стиль (выезд сверху и снизу) */
 .cut-bar-top {
   animation: cutBarTop 0.55s cubic-bezier(0.22, 0.9, 0.36, 1) both;
 }
@@ -112,6 +134,53 @@ canvas { image-rendering: pixelated; }
 @keyframes cutBarBottom {
   from { transform: translateY(100%); }
   to { transform: translateY(0); }
+}
+/* v0.57: РАСТВОРЯЮЩИЕСЯ полосы (стиль PS1 Resident Evil / Dino Crisis 2, по умолчанию) —
+   полоса с мягким градиентным краем ПЛАВНО ПРОЯВЛЯЕТСЯ, растворяя кадр в чёрный;
+   высота полосы 13vh: 7vh сплошного чёрного + 6vh «тающего» края */
+.cut-bar-d-top, .cut-bar-d-bottom {
+  animation: cutDissolveIn 0.85s ease-out both;
+}
+.cut-bar-d-top {
+  background: linear-gradient(to bottom,
+    #000 0%, #000 52%,
+    rgba(0,0,0,0.78) 68%,
+    rgba(0,0,0,0.4) 82%,
+    rgba(0,0,0,0) 100%);
+}
+.cut-bar-d-bottom {
+  background: linear-gradient(to top,
+    #000 0%, #000 52%,
+    rgba(0,0,0,0.78) 68%,
+    rgba(0,0,0,0.4) 82%,
+    rgba(0,0,0,0) 100%);
+}
+@keyframes cutDissolveIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+/* v0.57: ПЛАВНЫЙ УХОД полос в конце кат-сцены (у обоих стилей вместо мгновенного исчезновения):
+   растворяющиеся — тают (opacity), классические — уезжают обратно за экран */
+.cut-out-top.cut-bar-d-top, .cut-out-bottom.cut-bar-d-bottom {
+  animation: cutDissolveOut 0.8s ease-in both;
+}
+@keyframes cutDissolveOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+.cut-out-top {
+  animation: cutOutTop 0.55s cubic-bezier(0.5, 0, 0.75, 0.4) both;
+}
+.cut-out-bottom {
+  animation: cutOutBottom 0.55s cubic-bezier(0.5, 0, 0.75, 0.4) both;
+}
+@keyframes cutOutTop {
+  from { transform: translateY(0); }
+  to { transform: translateY(-110%); }
+}
+@keyframes cutOutBottom {
+  from { transform: translateY(0); }
+  to { transform: translateY(110%); }
 }
 .crt-grid-bg {
   background:

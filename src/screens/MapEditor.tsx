@@ -255,6 +255,10 @@ export default function MapEditor() {
   const [selCutIdx, setSelCutIdx] = useState<number | null>(null);
   const [cutZoneArm, setCutZoneArm] = useState(false); // «рисовать зону» — следующий протягивающий клик ставит зону
   const cutZoneDragRef = useRef<{ sx: number; sy: number; ex: number; ey: number } | null>(null);
+  /* v0.57: «точки кликом» — режим, в котором КАЖДЫЙ клик по карте добавляет точку
+     в конец маршрута выбранной кат-сцены прямо там, куда ткнули (больше не нужно
+     добавлять точку кнопкой и тащить её из центра карты) */
+  const [cutPtArm, setCutPtArm] = useState(false);
   const [tilesOpen, setTilesOpen] = useState(false); // спойлер «Карты-плитки» (плиточный режим) в левой панели
   const [selTileId, setSelTileId] = useState<string | null>(null); // активная карта-плитка (схема + её фон)
   const [bgScope, setBgScope] = useState<'plate' | 'all'>('plate'); // куда ложится НОВЫЙ фон: «на эту плитку» (своя локация) или «на всю карту»
@@ -370,6 +374,15 @@ export default function MapEditor() {
       if (!m) return m;
       const sz = mapSize(m);
       return { ...m, cutscenes: (m.cutscenes ?? []).map((c, i) => (i === idx ? { ...c, pts: [...(c.pts ?? []), { x: Math.round(sz.w / 2), y: Math.round(sz.h / 2), wait: 1, zoom: 1 }] } : c)) };
+    });
+    dirtyRef.current = true;
+    sfx.coin();
+  };
+  /* v0.57: точка кат-сцены ПО КЛИКУ — добавляется в конец маршрута в месте клика */
+  const addCutPtAt = (idx: number, wx: number, wy: number) => {
+    setMap((m) => {
+      if (!m) return m;
+      return { ...m, cutscenes: (m.cutscenes ?? []).map((c, i) => (i === idx ? { ...c, pts: [...(c.pts ?? []), { x: Math.round(wx), y: Math.round(wy), wait: 1, zoom: 1 }] } : c)) };
     });
     dirtyRef.current = true;
     sfx.coin();
@@ -1478,6 +1491,13 @@ export default function MapEditor() {
       cutZoneDragRef.current = { sx: w.x, sy: w.y, ex: w.x, ey: w.y };
       return;
     }
+    /* v0.57: ТОЧКИ КАТ-СЦЕН КЛИКОМ — режим «тыкать куда надо передвинуть камеру»:
+       каждый клик по карте (любым инструментом, ЛКМ) ставит точку в конец маршрута
+       выбранной кат-сцены; существующие точки по-прежнему таскаются инструментом «Выбор» */
+    if (cutPtArm && selCutIdx !== null && e.button === 0) {
+      addCutPtAt(selCutIdx, w.x, w.y);
+      return;
+    }
     if (tool === 'select') {
       /* v0.52: ПАТРУЛЬНЫЕ ТОЧКИ — тянуть кружки маршрута (проверяем ПЕРЕД телами,
          чтобы точку возле NPC можно было схватить, а не самого NPC) */
@@ -1993,7 +2013,7 @@ export default function MapEditor() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') return;
-      if (e.key === 'Escape') { setLinkFrom(null); setSelCell(null); setSelStamp(null); setSelAnim(null); setSelBoss(null); setSelWall(null); setSelPortal(null); setPickTargetFor(null); setPlaceAnimId(''); setCutZoneArm(false); setSelCutIdx(null); return; }
+      if (e.key === 'Escape') { setLinkFrom(null); setSelCell(null); setSelStamp(null); setSelAnim(null); setSelBoss(null); setSelWall(null); setSelPortal(null); setPickTargetFor(null); setPlaceAnimId(''); setCutZoneArm(false); setCutPtArm(false); setSelCutIdx(null); return; }
       if (!map) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (e.repeat) return; // удержание обрабатывает useKeyDelete (режим «долгое нажатие»)
@@ -3455,7 +3475,7 @@ export default function MapEditor() {
                           </div>
                           {c.trigger === 'zone' && (
                             <div className="space-y-1">
-                              <PxBtn color={cutZoneArm ? 'coral' : 'magma'} small className="w-full" onClick={() => { setCutZoneArm((v) => !v); sfx.hover(); }}>
+                              <PxBtn color={cutZoneArm ? 'coral' : 'magma'} small className="w-full" onClick={() => { setCutZoneArm((v) => !v); setCutPtArm(false); sfx.hover(); }}>
                                 {cutZoneArm ? '✕ Отмена — кликните по карте и протяните зону' : '📐 Нарисовать зону-триггер'}
                               </PxBtn>
                               {c.zone ? (
@@ -3500,8 +3520,16 @@ export default function MapEditor() {
                           <div>
                             <div className="flex items-center justify-between mb-1">
                               <span className="tick-label">Точки маршрута ({(c.pts ?? []).length})</span>
-                              <button onClick={() => { addCutPt(selCutIdx!); sfx.coin(); }} className="font-pixel text-[9px] text-gold cursor-pointer hover:text-paper">＋ точка</button>
+                              <span className="flex items-center gap-1">
+                                {cutPtArm ? (
+                                  <button onClick={() => { setCutPtArm(false); sfx.hover(); }} className="font-pixel text-[9px] text-abyss bg-coral border-2 border-coral px-1.5 py-0.5 cursor-pointer" title="Закончить расстановку (или Esc)">✕ ГОТОВО</button>
+                                ) : (
+                                  <button onClick={() => { setCutPtArm(true); setCutZoneArm(false); sfx.hover(); }} className="font-pixel text-[9px] text-gold cursor-pointer hover:text-paper" title="Кликайте по карте — точка маршрута встаёт прямо в место клика">📍 кликом</button>
+                                )}
+                                <button onClick={() => { addCutPt(selCutIdx!); sfx.coin(); }} className="font-pixel text-[9px] text-gold cursor-pointer hover:text-paper" title="Добавить точку в центр карты — потом перетащить">＋ точка</button>
+                              </span>
                             </div>
+                            {cutPtArm && <p className="text-[9px] text-gold leading-tight mb-1">📍 Тыкайте по карте — каждая точка встаёт в конец маршрута (ждать 1 с, зум 1× — правится ниже). Точки таскаются инструментом «Выбор». Esc — закончить.</p>}
                             {(c.pts ?? []).length === 0 && <p className="text-[10px] text-coral leading-tight">Добавьте хотя бы одну точку — камера прилетит туда и покажет карту.</p>}
                             <div className="space-y-1 max-h-56 overflow-y-auto pr-1">
                               {(c.pts ?? []).map((p, pi) => (
@@ -3939,7 +3967,7 @@ export default function MapEditor() {
               <canvas
                 ref={canvasRef}
                 className="w-full h-full block touch-none"
-                style={{ cursor: tool === 'pan' ? 'grab' : tool === 'select' ? 'default' : 'crosshair' }}
+                style={{ cursor: (cutPtArm || cutZoneArm) ? 'crosshair' : tool === 'pan' ? 'grab' : tool === 'select' ? 'default' : 'crosshair' }}
                 onPointerDown={onPointerDown}
                 onPointerMove={onPointerMove}
                 onPointerUp={onPointerUp}

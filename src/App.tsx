@@ -40,20 +40,26 @@ export default function App() {
         d.style.zIndex = '2147483647';
         fsEl.appendChild(d);
       }
-      if (options.ntsc) {
+      if (options.ntscMode === 1) {
         const d = document.createElement('div');
         d.className = 'crt-ntsc crt-fs-layer';
         d.style.zIndex = '2147483646';
         fsEl.appendChild(d);
       }
+      if (options.ntscMode === 2) {
+        const d = document.createElement('div');
+        d.className = 'crt-ntsc-soft crt-fs-layer';
+        d.style.zIndex = '2147483646';
+        fsEl.appendChild(d);
+      }
     };
     document.addEventListener('fullscreenchange', on);
-    on(); // применить к уже развёрнутому экрану (галочку переключили не выходя из полного экрана)
+    on(); // применить к уже развёрнутому экрану (режим переключили не выходя из полного экрана)
     return () => {
       document.removeEventListener('fullscreenchange', on);
       document.querySelectorAll('.crt-fs-layer').forEach((n) => n.remove());
     };
-  }, [options.scanlines, options.ntsc]);
+  }, [options.scanlines, options.ntscMode]);
 
   useEffect(() => {
     let on = true;
@@ -134,9 +140,11 @@ export default function App() {
       {screen === 'emulator' && <EmulatorLauncher />}
       {screen === 'options' && <OptionsScreen />}
       <Toasts items={toasts} />
-      {/* v0.56: полосатый фильтр и NES NTSC — включаются галочками в общих опциях */}
+      {/* v0.56: полосатый фильтр; v0.57: NES NTSC — РЕЖИМОМ из общих опций
+         (1 «Полосатый» — старый фильтр, 2 «Мягкий CRT» — новый, действует и на кадр эмулятора) */}
       {options.scanlines && <div className="crt-scanlines" />}
-      {options.ntsc && <div className="crt-ntsc" />}
+      {options.ntscMode === 1 && <div className="crt-ntsc" />}
+      {options.ntscMode === 2 && <div className="crt-ntsc-soft" />}
       <div className="crt-vignette" />
     </div>
   );
