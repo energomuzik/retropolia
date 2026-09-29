@@ -488,6 +488,22 @@ export default function GameScreen() {
     pocketBlockRef.current = !!myStealing || !!hackBox;
     if (myStealing) journeyKeys.current.clear(); // зажатые до открытия клавиши сбрасываем
   }, [!!myStealing, !!hackBox]);
+  /* v0.59: БЛОК ХОДЬБЫ ПРИ ВЫПОЛНЕНИИ ЗАДАНИЯ — окно МОЕГО задания на экране (QUEST — личное
+     или боссовое; RUBG — личное) гасит ввод фишки: WASD/крестовина/стик ведут игру в окне
+     задания, а фишка на фоне СТОИТ. Раньше в QUEST/RUBG фишка продолжала ходить (задания
+     личные — sess.challenge не ставится), а залипшие до окна клавиши не отпускались вообще
+     (keyup уходит в iframe эмулятора). */
+  const taskWinRef = useRef(false);
+  useEffect(() => {
+    const open = (myQJob !== undefined && !!myQTask) || myJob !== undefined;
+    taskWinRef.current = open;
+    if (open) journeyKeys.current.clear(); // залипшие до окна клавиши сбрасываем
+  }, [myQJob, !!myQTask, myJob]);
+  /* v0.59: челлендж открылся (JOURNEY/SKILL/classic) — зажатые до него клавиши тоже сбрасываем,
+     чтобы после задания фишка не убегала на старых зажатиях */
+  useEffect(() => {
+    if (s?.challenge) journeyKeys.current.clear();
+  }, [!!s?.challenge]);
   /* ЯЩИК РЯДОМ: ближайший невскрытый (и не запретный для меня) ячейка-ящик в радиусе 1.5 клетки */
   const nearBox = useMemo(() => {
     if (!isRubg || !s || s.phase !== 'playing' || !map || !me) return null;
@@ -1236,7 +1252,13 @@ export default function GameScreen() {
                 }
               }
               let vx = 0, vy = 0;
-              const canWalk = sess.phase === 'playing' && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate) && !(sess.qCards && me && sess.qCards[me]) && !bossDragRef.current && !cutActiveRef.current; // v0.54: во время оттаскивания боссом ходить нельзя · v0.56: в кат-сцене мир замер
+              /* v0.59: ОКНО МОЕГО ЗАДАНИЯ = фишка стоит (QUEST — личное/боссовое, RUBG — личное:
+                 эти задания живут в qJobs/rubg.jobs и раньше не глушили ходьбу; гейт — то же
+                 условие, что открывает окно). JOURNEY/SKILL и классика глушились sess.challenge. */
+              const jqRun = me && sess.qJobs ? sess.qJobs[me] : undefined;
+              const rjRun = me && sess.rubg?.jobs ? sess.rubg.jobs[me] : undefined;
+              const taskWinOpen = (jqRun !== undefined && !!cellTaskOf(sess, m, jqRun.cellIdx)) || (rjRun !== undefined && !!cellTaskOf(sess, m, rjRun.cellIdx));
+              const canWalk = sess.phase === 'playing' && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate) && !(sess.qCards && me && sess.qCards[me]) && !taskWinOpen && !bossDragRef.current && !cutActiveRef.current; // v0.54: во время оттаскивания боссом ходить нельзя · v0.56: в кат-сцене мир замер · v0.59: при выполнении задания фишка стоит
               if (canWalk) {
                 for (const kd of [...journeyKeys.current, ...journeyPadRef.current]) {
                   if (kd === 'up') vy -= 1; else if (kd === 'down') vy += 1;
@@ -2224,7 +2246,8 @@ export default function GameScreen() {
       if (!d || e.repeat) return;
       /* мини-экран КАРМАНА открыт (воровство) — WASD/стрелки ведут РУКУ, а не фишку:
          ходьба заблокирована, персонаж на фоне стоит на месте */
-      if (pocketBlockRef.current) return;
+      /* v0.59: окно МОЕГО задания открыто — WASD/стрелки ведут игру в окне, не фишку */
+      if (pocketBlockRef.current || taskWinRef.current) return;
       e.preventDefault(); // стрелки не крутят страницу — они ведут фишку
       journeyKeys.current.add(d);
     };
@@ -2252,7 +2275,8 @@ export default function GameScreen() {
       const dirs = new Set<TokenDir>();
       /* мини-экран КАРМАНА открыт — крестовина джойстика ведёт РУКУ (обрабатывается
          отдельным эффектом), фишка на фоне НЕ двигается */
-      if (!pocketBlockRef.current && prefs.gamepad !== false) {
+      /* v0.59: окно МОЕГО задания открыто — крестовина/стик ведут игру в окне, не фишку */
+      if (!pocketBlockRef.current && !taskWinRef.current && prefs.gamepad !== false) {
         const pads = listGamepads();
         const addBtn = (gp: Gamepad, idx: number | undefined, d: TokenDir) => {
           if (idx === undefined || idx < 0 || idx > 17) return;
@@ -2459,7 +2483,9 @@ export default function GameScreen() {
       </div>
 
       {/* ---------- поле ---------- */}
-      <div className="flex-1 relative min-h-0 cut-keep">
+      {/* cut-board-keep (v0.59): правило «внутри поля остаётся только холст» — ТОЛЬКО для обёртки поля;
+         оверлей кат-сцены (полосы, плашка, «Пропустить») отмечен просто cut-keep и не гасится */}
+      <div className="flex-1 relative min-h-0 cut-keep cut-board-keep">
         {/* РЕЖИМ КОМНАТ: короткое затемнение при смене комнаты (key = метка времени — анимация перезапускается) */}
         {roomsOnUi && roomFlashTs > 0 && <div key={roomFlashTs} className="room-flash pointer-events-none absolute inset-0 z-10" />}
         <canvas
