@@ -532,19 +532,15 @@ export default function GameScreen() {
   const [dlgNpcId, setDlgNpcId] = useState<string | null>(null);
   const [dlgNode, setDlgNode] = useState<string | null>(null);
   const [tradeNpcId, setTradeNpcId] = useState<string | null>(null); // v0.51: открыто окно торговли с NPC
-  /* v0.54: открыты ДИАЛОГ/ТОРГОВЛЯ → NPC-собеседник ЗАМЕР (npcFreeze — не уходит в патруле),
-     боссы вплотную ЖДУТ конца разговора (bossHold on/off), захват приостановлен.
-     v0.55: ИСПРАВЛЕНО — rAF-цикл рисования зарегистрирован ОДИН раз (deps без dlgOpenId),
-     поэтому state dlgOpenId внутри цикла был УСТАРЕВШИМ (всегда null) и заморозка
-     патруля не срабатывала никогда. Теперь цикл читает dlgOpenIdRef — живой ref с id NPC.
-     v0.56: МИР ЗАМИРАЕТ ЦЕЛИКОМ — пока открыт диалог/торговля, стоят ВСЕ NPC и ВСЕ боссы
-     (не только собеседник), т.к. заморозка ставится синхронно в openDialog/closeDialog. */
+  /* v0.58: ОТКАТ ЗАМОРОЗКИ В ДИАЛОГЕ — мир больше НЕ замирает, когда открыт диалог или
+     торговля: NPC и боссы продолжают ходить по точкам, боссы могут поймать игрока и в
+     разговоре (на карте кроме играющего могут быть ДРУГИЕ ИГРОКИ — для них мир обязан
+     жить; три итерации заморозки v0.54–v0.57 отменены решением автора). Живой ref
+     dlgOpenIdRef остался для UX-запретов: зона-катсцена не запускается поверх окна.
+     ЗАМЕР ОСТАЁТСЯ ТОЛЬКО НА КАТ-СЦЕНУ (cutFreezeTsRef) — там это часть кино. */
   const dlgOpenId = dlgNpcId ?? tradeNpcId;
   const dlgOpenIdRef = useRef<string | null>(null);
-  const dlgOpenTsRef = useRef(0);
-  const heldBossesRef = useRef<Set<string>>(new Set());
   dlgOpenIdRef.current = dlgOpenId;
-  if (dlgOpenId) { if (!dlgOpenTsRef.current) dlgOpenTsRef.current = Date.now(); } else dlgOpenTsRef.current = 0;
   /* ---------- v0.56: КАТ-СЦЕНЫ (п.6) ----------
    Камера летит по точкам (в каждой — задержка wait и зум-множитель), весь мир замер:
    ВСЕ фишки, NPC и боссы стоят, ходьба/порталы/кубики заблокированы, кино-полосы + «Пропустить».
@@ -580,6 +576,12 @@ export default function GameScreen() {
     setCutBarsOut(true);
     cutBarsTimerRef.current = window.setTimeout(() => { setCutBarsOut(false); cutBarsTimerRef.current = null; }, 850);
   }, [cutActive]);
+  /* v0.58: ВО ВРЕМЯ КАТ-СЦЕНЫ СКРЫТ ВЕСЬ ИНТЕРФЕЙС (HUD, кубики, окна, карточки — всё):
+     на экране только кино — поле с пролетающей камерой и чёрные полосы.
+     Скрываем через CSS-класс на корне (display:none), а НЕ условным рендером —
+     иначе размонтировались бы эмулятор и окна (сброс состояния). Хвост cutBarsOut
+     (полосы тают) тоже держит интерфейс скрытым — он проявляется сразу после. */
+  const cutUiHidden = cutActive || cutBarsOut;
   /* v0.56 (п.3): РАЗМЕР ОКНА ЗАДАНИЯ — «−» компактнее / «Стд» стандарт / «＋» крупнее;
    работает для окон задания QUEST, RUBG и классического челленджа */
   const [taskWinSize, setTaskWinSize] = useState(0);
@@ -625,13 +627,12 @@ export default function GameScreen() {
     if (!n?.dialog) { useApp.getState().toast('У этого NPC нет диалога', 'info'); return; }
     setDlgNpcId(npcId);
     setDlgNode(n.dialog.root);
-    /* v0.56: заморозка мира — СИНХРОННО, не дожидаясь ре-рендера: rAF-цикл читает
-       ref'ы каждый кадр, мир замирает ровно в момент открытия окна */
+    /* v0.58: живой ref обновляется синхронно (зона-катсцена не стартует поверх окна);
+       заморозки мира при открытии диалога больше НЕТ — NPC и боссы ходят (решение автора) */
     dlgOpenIdRef.current = npcId;
-    dlgOpenTsRef.current = Date.now();
     sfx.click();
   };
-  const closeDialog = () => { setDlgNpcId(null); setDlgNode(null); setTradeNpcId(null); dlgOpenIdRef.current = null; dlgOpenTsRef.current = 0; };
+  const closeDialog = () => { setDlgNpcId(null); setDlgNode(null); setTradeNpcId(null); dlgOpenIdRef.current = null; };
   /* клавиша E — поговорить с NPC в радиусе; ESC — закрыть диалог/пропустить кат-сцену */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -783,8 +784,11 @@ export default function GameScreen() {
 
   /* ---------- ЗВУКИ РАДИУСА у анимаций со звуком ----------
      Триггер — фишка ИГРАЮЩЕГО игрока: вошла в круг (pa.r) — звук играет (фейд-ин),
-     вышла — затихает. Слышит только играющий; пока крутится его ЗАДАНИЕ (эмулятор),
-     все звуки радиуса приглушаются и возобновляются после. */
+     вышла — затихает. Слышит только играющий.
+     v0.58: в QUEST звук слушается СВОЕЙ фишкой У КАЖДОГО игрока (все ходят одновременно):
+     пока задание играет ОДИН игрок, звук NPC/боссов/анимаций продолжает играть у остальных
+     и глушится ТОЛЬКО У ИГРАЮЩЕГО (на время его задания); в классических режимах —
+     как раньше: слушает играющий, у зрителей звук на время задания гаснет. */
   useEffect(() => {
     const t = window.setInterval(() => {
       const cur = useApp.getState();
@@ -795,9 +799,14 @@ export default function GameScreen() {
       const ch = sess.challenge;
       const emuRunning = !!ch && ch.started && (ch.status === 'playing' || ch.status === 'voting');
       const mine = act?.id === cur.selfId;
-      const d = mine ? dispRef.current[cur.selfId] : null;
+      const myTask = emuRunning && mine; // МОЁ задание крутится — гасим звук только у меня
+      /* в QUEST «уши» — СВОЯ фишка (даже когда играет другой); иначе — фишка играющего */
+      const questOwn = isQuestMode(m.mode)
+        ? (sess.journeyPos?.[cur.selfId] ?? dispRef.current[cur.selfId] ?? null)
+        : null;
+      const d = mine ? dispRef.current[cur.selfId] : questOwn;
       const wanted = new Map<string, string>();
-      if (d && !emuRunning) {
+      if (d && !myTask) {
         const alib = new Map((m.animLib ?? []).map((a) => [a.id, a]));
         for (const pa of m.anims ?? []) {
           const e = alib.get(pa.aid);
@@ -820,8 +829,8 @@ export default function GameScreen() {
         }
         /* NPC (QUEST): звук ожидания — по СВОЕЙ фишке (все ходят одновременно, у каждого свой радиус);
            ПАТРУЛЬ: NPC с маршрутом слышен в его текущей точке */
-        const myPosN = sess.journeyPos?.[cur.selfId];
-        if (myPosN && !emuRunning) {
+        const myPosN = sess.journeyPos?.[cur.selfId] ?? (isQuestMode(m.mode) ? d : null);
+        if (myPosN) {
           for (const n of m.npcs ?? []) {
             const ndef = (m.npcLib ?? []).find((x) => x.id === n.nid);
             if (!ndef?.idleSnd || !n.r || n.r <= 0) continue;
@@ -858,8 +867,7 @@ export default function GameScreen() {
       if (!self || !self.alive || self.spect) return;
       const myPos = sess.journeyPos?.[cur.selfId];
       if (!myPos) return;
-      if (dlgOpenIdRef.current) return; // v0.54: пока открыт диалог/торговля — босс НЕ ЛОВИТ, он ждёт конца разговора (v0.55: живой ref)
-      const now = Date.now();
+      const now = Date.now(); // v0.58: босс может поймать и при открытом диалоге — мир не замирает
       if (now < captureCdRef.current) return;
       const base = sess.startedAt || 0;
       for (const b of mp.bosses ?? []) {
@@ -910,43 +918,9 @@ export default function GameScreen() {
     }
   }, [myCaptureTs]);
 
-  /* ---------- v0.54: БОСС ЖДЁТ КОНЦА РАЗГОВОРА ----------
-     Открыли диалог/торговлю → каждый патрульный босс ВПЛОТЬ ЗАМИРАЕТ (bossHold on) и
-     НЕ ЛОВИТ, пока идёт разговор; закрыли → хост решает: игрок всё ещё вплотную —
-     босс ЛОВИТ (оттаскивает на первую точку патруля), иначе патруль продолжается. */
-  useEffect(() => {
-    if (!dlgOpenId) return;
-    const cur = useApp.getState();
-    const sess = cur.session;
-    const mp = cur.sessionMap;
-    if (!sess || !mp || sess.phase !== 'playing' || !isQuestMode(mp.mode)) return;
-    const self = sess.players.find((x) => x.id === cur.selfId);
-    const myPos = sess.journeyPos?.[cur.selfId];
-    if (!self || !self.alive || self.spect || !myPos) return;
-    const now = Date.now();
-    const base = sess.startedAt || 0;
-    for (const b of mp.bosses ?? []) {
-      if (sess.bossDown?.[b.id]) continue;
-      if ((sess.qBossDown?.[cur.selfId] ?? []).includes(b.id)) continue;
-      if (!b.patrol || (b.patrol.pts ?? []).length < 2) continue; // стоячий не «ждёт»
-      if ((sess.qBossHoldAt?.[cur.selfId] ?? {})[b.id] || heldBossesRef.current.has(b.id)) continue;
-      const bp = patrolPos(b.patrol, base, now);
-      if (!bp) continue;
-      const capR = b.r && b.r > 0 ? b.r : CELL * 1.5;
-      if (Math.hypot(myPos.x - bp.x, myPos.y - bp.y) <= capR) {
-        heldBossesRef.current.add(b.id);
-        dispatch({ t: 'bossHold', id: cur.selfId, bossId: b.id, on: true });
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dlgOpenId]);
-  useEffect(() => {
-    if (dlgOpenId || !heldBossesRef.current.size) return;
-    const cur = useApp.getState();
-    for (const bossId of [...heldBossesRef.current]) dispatch({ t: 'bossHold', id: cur.selfId, bossId, on: false });
-    heldBossesRef.current.clear();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dlgOpenId]);
+  /* v0.58: «БОСС ЖДЁТ КОНЦА РАЗГОВОРА» (bossHold on/off при открытии окна) УДАЛЁН —
+     боссы продолжают ходить по точкам и ловить, даже когда игрок в диалоге/торговле
+     (кроме играющего на карте есть другие игроки — мир не обязан замирать). */
 
   /* ---------- полный экран эмулятора ---------- */
   useEffect(() => {
@@ -1699,21 +1673,22 @@ export default function GameScreen() {
             if (ts && patrolFreeze[bid] === undefined) patrolFreeze[bid] = ts;
           }
         }
-        /* v0.54: боссы, чей патруль ЗАМЕР ДЛЯ МЕНЯ — ждут конца моего разговора
-           (bossHold on) или держат меня после захвата; у остальных игроков — свой тайминг */
+        /* v0.58: боссы, ДЕРЖАЩИЕ МЕНЯ ПОСЛЕ ЗАХВАТА (после поимки босс прекращает патруль
+           — qBossHoldAt пишется движком при захвате); у остальных игроков — свой тайминг */
         const myHolds = isQuest && me ? sess.qBossHoldAt?.[me] : undefined;
         if (myHolds) for (const [hid, hts] of Object.entries(myHolds)) if (patrolFreeze[hid] === undefined) patrolFreeze[hid] = hts;
-        /* v0.56: МИР ЗАМИРАЕТ — открыт диалог/торговля или идёт кат-сцена: ВСЕ боссы стоят
-           (NPC замораживаются ниже, в drawBoard — npcFreeze для всех) */
-        const worldFreezeTs = cutFreezeTsRef.current || (dlgOpenIdRef.current ? dlgOpenTsRef.current : 0);
+        /* v0.58: МИР ЗАМИРАЕТ ТОЛЬКО В КАТ-СЦЕНЕ (заморозка в диалоге/торговле отменена —
+           кроме играющего на карте могут быть другие игроки): ВСЕ боссы стоят, пока идёт
+           кино (NPC замораживаются ниже, в drawBoard — npcFreeze для всех) */
+        const worldFreezeTs = cutFreezeTsRef.current;
         if (worldFreezeTs) {
           for (const bb of (m.bosses ?? [])) if (patrolFreeze[bb.id] === undefined) patrolFreeze[bb.id] = worldFreezeTs;
         }
-        /* v0.57: ЖЁСТКАЯ ПРИВЯЗКА NPC (пояс и подтяжки): пока мир замер (открыт диалог/
-           торговля или идёт кат-сцена), позиции патрулирующих NPC считаются ОДИН РАЗ на
+        /* v0.57: ЖЁСТКАЯ ПРИВЯЗКА NPC (пояс и подтяжки): пока мир замер (теперь ТОЛЬКО
+           кат-сцена; заморозка диалога v0.58 отменена), позиции патрулирующих NPC считаются ОДИН РАЗ на
            момент заморозки и запоминаются — рисование идёт ПО ПРИВЯЗКЕ (npcPin), минуя
            формулу и npcFreeze. Даже если какая-то ветка отрисовки потеряет npcFreeze,
-           NPC гарантированно стоит на месте, пока идёт разговор. */
+           NPC гарантированно стоит на месте, пока идёт кат-сцена. */
         let npcPin: Record<string, { x: number; y: number }> | undefined;
         if (worldFreezeTs) {
           if (npcPinRef.current?.key !== worldFreezeTs) {
@@ -1776,12 +1751,11 @@ export default function GameScreen() {
           /* ПАТРУЛИРОВАНИЕ (v0.52): боссы и NPC с маршрутом рисуются в текущей точке —
              позиция считается формулой от синхронного старта партии (без сети) */
           patrolBase: sess.startedAt || 0,
-          patrolNow: worldFreezeTs || Date.now(), // v0.57: пока мир замер — время патруля стоит на момент заморозки (страховка для всех формульных путей)
+          patrolNow: worldFreezeTs || Date.now(), // v0.57: пока идёт кат-сцена — время патруля стоит на момент заморозки (страховка для всех формульных путей)
           patrolFreeze,
-          /* v0.54: NPC, с которым открыт диалог/торговля, НЕ уходит в патруле —
-             стоит на месте (время заморожено на момент открытия), после разговора патруль продолжается.
-             v0.55: читаем ЖИВЫЙ ref (state в замыкании rAF-цикла был устаревшим —
-             npcFreeze никогда не доходил до отрисовки, NPC продолжал патрулировать) */
+          /* КАТ-СЦЕНА (v0.58 — заморозка в диалоге отменена): NPC, рядом с которым
+             идёт кино, стоит — как и все остальные (время заморожено на момент старта);
+             v0.55: читаем ЖИВЫЙ ref (state в замыкании rAF-цикла был устаревшим) */
           npcFreeze: worldFreezeTs
             ? Object.fromEntries((m.npcs ?? []).map((n) => [n.id, worldFreezeTs]))
             : undefined,
@@ -2335,7 +2309,7 @@ export default function GameScreen() {
     : (s.dice?.count ?? 2);
 
   return (
-    <div className="h-full crt-grid-bg flex flex-col overflow-hidden">
+    <div className={`h-full crt-grid-bg flex flex-col overflow-hidden ${cutUiHidden ? 'cut-hide-ui' : ''}`}>
       {/* ---------- HUD ---------- */}
       <div className="shrink-0 border-b-[3px] border-edge bg-[rgba(7,9,18,0.82)] px-3 py-2 flex items-center gap-2 flex-wrap z-20">
         <span className="font-pixel text-[9px] text-gold hidden sm:block">RETRO CHALLENGE GENERATOR</span>
@@ -2485,12 +2459,12 @@ export default function GameScreen() {
       </div>
 
       {/* ---------- поле ---------- */}
-      <div className="flex-1 relative min-h-0">
+      <div className="flex-1 relative min-h-0 cut-keep">
         {/* РЕЖИМ КОМНАТ: короткое затемнение при смене комнаты (key = метка времени — анимация перезапускается) */}
         {roomsOnUi && roomFlashTs > 0 && <div key={roomFlashTs} className="room-flash pointer-events-none absolute inset-0 z-10" />}
         <canvas
           ref={canvasRef}
-          className="w-full h-full block"
+          className="w-full h-full block cut-keep-canvas"
           style={{ cursor: viewMode === 'world' || peekMap ? (dragRef.current ? 'grabbing' : 'grab') : canLookAround ? (lookDragRef.current ? 'grabbing' : 'grab') : 'default' }}
           onWheel={(e) => {
             if (viewMode === 'world' || peekMap) {
@@ -4401,7 +4375,7 @@ export default function GameScreen() {
             ? (dissolving ? `cut-bar-d-${side}` : `cut-bar-${side}`)
             : (dissolving ? `cut-bar-d-${side} cut-out-${side}` : `cut-bar-${side} cut-out-${side}`); // уход — плавный у обоих стилей
         return (
-          <div className="fixed inset-0 z-[70] pointer-events-none">
+          <div className="fixed inset-0 z-[70] pointer-events-none cut-keep">
             <div className={`absolute inset-x-0 top-0 bg-black ${barCls('top')}`} style={{ height: dissolving ? '13vh' : '7vh' }} />
             <div className={`absolute inset-x-0 bottom-0 bg-black ${barCls('bottom')}`} style={{ height: dissolving ? '13vh' : '7vh' }} />
             {cutActive && (
