@@ -708,7 +708,15 @@ export function CartCutModal({
                 alt={t.name}
                 className="w-full h-full object-contain"
                 style={{ imageRendering: 'pixelated' }}
-                onLoad={(e) => setSizes((m) => (m[t.id] ? m : { ...m, [t.id]: { w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight } }))}
+                /* v0.64: БАГФИКС КРАША «БЕЛЫЙ ЭКРАН»: e.currentTarget валиден ТОЛЬКО
+                   во время события — внутри ленивого апдейтера setSizes он уже null
+                   (React вызывает апдейтер позже), и чтение naturalWidth роняло всё
+                   дерево. Размеры снимаем СРАЗУ в обработчике, в апдейтер — числа. */
+                onLoad={(e) => {
+                  const el = e.currentTarget;
+                  const w = el.naturalWidth, h = el.naturalHeight;
+                  setSizes((m) => (m[t.id] ? m : { ...m, [t.id]: { w, h } }));
+                }}
               />
             </button>
           ))}
