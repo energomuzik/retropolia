@@ -140,6 +140,51 @@ export async function importLibrary(json: string): Promise<number> {
   return n;
 }
 
+/* ---------- v0.65: ЭКСПОРТ / ИМПОРТ БАЗЫ РОМОВ (кнопки в «Запуске эмулятора») ----------
+   База ромов = ВСЕ ромы библиотеки (двоичные файлы base64) + их ОБЛОЖКИ КАРТРИДЖЕЙ
+   (данныеURL внутри RomDef.cover едут вместе с определением рома).
+   Отдельный файл, чтобы можно было перенести/поделиться базой ромов, НЕ выгружая
+   карты/тайлы/фишки/сохранения (в отличие от «Экспорта библиотеки» в Опциях). */
+
+export interface ExportedRomBase {
+  app: 'retropolia-rombase';
+  version: 1;
+  exportedAt: number;
+  roms: { def: RomDef; b64: string }[]; // ромы (бинарник base64 + определение с обложкой)
+}
+
+/** Собирает базу ромов в JSON-строку (только ромы с бинарником; обложки внутри def). */
+export async function exportRomBase(): Promise<string> {
+  const defs = await idbAll<RomDef>('roms');
+  const roms: ExportedRomBase['roms'] = [];
+  for (const entry of defs) {
+    const def = entry.value;
+    const blob = await idbGet<ArrayBuffer>('blobs', `rom-${def.id}`);
+    if (!blob) continue; // без бинарника ром не запускается — не возим
+    roms.push({ def: JSON.parse(JSON.stringify(def)), b64: abToB64(blob) });
+  }
+  return JSON.stringify({ app: 'retropolia-rombase', version: 1, exportedAt: Date.now(), roms } as ExportedRomBase);
+}
+
+/** Импортирует базу ромов (слияние): новые ромы добавляются, уже существующие (по id) —
+    пропускаются. Возвращает { added, skipped }. Бросает исключение на чужом файле. */
+export async function importRomBase(json: string): Promise<{ added: number; skipped: number }> {
+  const data = JSON.parse(json) as { app?: string; roms?: { def: RomDef; b64: string }[] };
+  if (!data || data.app !== 'retropolia-rombase' || !Array.isArray(data.roms)) {
+    throw new Error('Это не файл базы ромов RETROPOLIA');
+  }
+  let added = 0, skipped = 0;
+  for (const r of data.roms) {
+    const def = r.def;
+    if (!def || !def.id || !r.b64) { skipped++; continue; }
+    if (await idbGet('roms', def.id)) { skipped++; continue; } // уже есть — не дублируем
+    await idbPut('roms', def.id, def); // обложка (def.cover) приезжает вместе с определением
+    await idbPut('blobs', `rom-${def.id}`, b64ToAb(r.b64));
+    added++;
+  }
+  return { added, skipped };
+}
+
 /* ---------- ЭКСПОРТ / ИМПОРТ ОДНОЙ ИГРЫ (кнопки в «Создании игры») ----------
    Игра = карта + всё, что ей нужно для партии у ДРУГА: сохранения заданий
    (уровни/боссы/моё задание) и РОМЫ (base64). Фишки/боссы/анимации/звуки/фоны

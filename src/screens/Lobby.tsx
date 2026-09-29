@@ -439,14 +439,45 @@ export function LoadScreen() {
     toast('Сохранение удалено', 'err');
   };
 
+  /* v0.65: «УДАЛИТЬ ВСЕ СОХРАНЕНИЯ» — стирает ВСЕ сохранённые партии разом,
+     подчиняется режиму удаления из Опций (кнопка-удержание) и возвращает ВСЕ
+     партии одним Ctrl+Z — те же правила, что у «Удалить все сохранения» в лаунчере */
+  const delAllSnaps = async () => {
+    if (!snaps.length) return;
+    const list = snaps;
+    rememberDeleted({
+      label: `все сохранённые партии (${list.length})`,
+      restore: async () => {
+        for (const s of list) await idbPut('sessions', s.id, JSON.parse(JSON.stringify(s)));
+        setSnaps((prev) => [...prev.filter((x) => !list.some((l) => l.id === x.id)), ...list].sort((a, b) => b.createdAt - a.createdAt));
+        void refresh();
+      },
+    });
+    await Promise.all(list.map((s) => idbDel('sessions', s.id)));
+    setSnaps([]);
+    void refresh();
+    sfx.fail();
+    toast(`Удалены все сохранённые партии (${list.length})`, 'err');
+  };
+
   return (
     <div className="h-full crt-grid-bg overflow-y-auto">
       <div className="max-w-3xl mx-auto px-6 py-8">
-        <div className="flex items-center gap-4 mb-6">
+        <div className="flex items-center gap-4 mb-6 flex-wrap">
           <GhostBtn onClick={() => setScreen('menu')}>{Ic.back(14)} Меню</GhostBtn>
           <h1 className="font-display text-2xl uppercase tracking-wider text-dim flex items-center gap-3">
             <span>{Ic.save(22)}</span> Загрузить игру
           </h1>
+          {/* v0.65: удалить ВСЕ сохранённые партии разом (режим удаления из Опций + Ctrl+Z) */}
+          {snaps.length > 0 && (
+            <HoldDeleteButton
+              onFire={() => void delAllSnaps()}
+              label="все сохранённые партии"
+              ariaLabel="Удалить все сохранённые партии"
+              title="Удалить все сохранённые партии"
+              className="ml-auto btn-ghost pixel-corners px-4 py-2 text-xs inline-flex items-center justify-center gap-2 text-faint hover:text-coral"
+            ><span>Удалить все сохранения</span></HoldDeleteButton>
+          )}
         </div>
         <p className="text-[12px] text-dim mb-4 max-w-2xl">
           Автосейвы (5 слотов, перезаписываются каждый ход) и ручные сохранения. «Собрать команду» откроет комнату:

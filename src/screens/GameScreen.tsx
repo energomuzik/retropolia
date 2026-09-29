@@ -955,11 +955,26 @@ export default function GameScreen() {
   /* v0.53: звуковой сигнал и короткая тряска при захвате (факт захвата — s.qCaptureAt) */
   const lastCaptureRef = useRef(0);
   const myCaptureTs = isQuest && s ? s.qCaptureAt?.[me] : undefined;
-  /* v0.54: ВИЗУАЛЬНОЕ ОТТАСКИВАНИЕ — сама анимация делается в rAF-цикле (bossDragRef):
-     факт захвата = journeyPos.ts совпал с qCaptureAt — фишка плавно едет от места поимки
-     к первой точке патруля босса. Здесь — только звуковой сигнал. */
-  const bossDragRef = useRef<{ fx: number; fy: number; tx: number; ty: number; t0: number; ms: number } | null>(null);
+  /* v0.54→v0.65: КИНО-ЗАХВАТ — босс ЛОВИТ И НЕСЁТ фишку к своей первой точке патруля:
+     анимация делается в rAF-цикле (bossDragRef) — босс идёт от места поимки к точке 1,
+     а фишка едет РЯДОМ с ним (сбоку по ходу движения), барахтаясь. После прибытия
+     босс остаётся на точке 1 (bossHoldPinRef), через секунду стартует задание. */
+  const bossDragRef = useRef<{ bossId: string; bx0: number; by0: number; dx: number; dy: number; tx: number; ty: number; t0: number; ms: number } | null>(null);
   const lastCapTsRef = useRef(0);
+  /* v0.65: позиция босса-носильщика для drawBoard (заполняется в rAF каждый кадр несения) */
+  const bossCarryFxRef = useRef<Record<string, { x: number; y: number; phase: number }>>({});
+  /* v0.65: боссы, ДОВОЛОКШИЕ фишку до точки 1 — пока qBossHoldAt держит их (босс «держит»
+     меня), рисуем их на ПЕРВОЙ точке патруля (t=0 цикла = pts[0]); hold снят (проигрыш
+     задания/смерть) — босс снова патрулирует по формуле */
+  const bossHoldPinRef = useRef<Record<string, boolean>>({});
+  /* v0.65: КИНО-ПОЛОСЫ ЗАХВАТА — те же полосы кат-сцены: показываются с момента поимки
+     (управление у босса) и УБИРАЮТСЯ, когда задание открылось (управление вернули);
+     страховка по времени — если задание не начнётся, полосы уйдут сами */
+  const [carryBars, setCarryBars] = useState(false);
+  const [carryBarsOut, setCarryBarsOut] = useState(false);
+  const carryBarsRef = useRef(false);
+  const carryBarsTimerRef = useRef<number | null>(null);
+  const carryBarsMaxRef = useRef(0);
   /* v0.56: ОТЛОЖЕННЫЙ ЗАПУСК задания босса — фишку ДОТАЩИЛИ (конец bossDragRef) →
    пауза 1 СЕКУНДА → клиент шлёт bossTaskGo, хост сверяет qTaskAt и открывает задание.
    Один раз на захват (capTs — метка захвата). */
@@ -974,6 +989,10 @@ export default function GameScreen() {
       if (cur.selfId) dispatch({ t: 'bossTaskGo', id: cur.selfId });
     }, Math.max(0, delayMs));
   };
+  /* v0.65: при уходе с экрана гасим таймеры полос захвата */
+  useEffect(() => () => {
+    if (carryBarsTimerRef.current) window.clearTimeout(carryBarsTimerRef.current);
+  }, []);
   useEffect(() => {
     if (myCaptureTs && myCaptureTs !== lastCaptureRef.current) {
       lastCaptureRef.current = myCaptureTs;
@@ -1229,10 +1248,13 @@ export default function GameScreen() {
             dispatch({ t: 'fxDone', id: me });
           }
         }
+        /* v0.65: каждый кадр позиции несения собираются заново (заполняются в ветке «меня поймал босс») */
+        bossCarryFxRef.current = {};
         const tokensAll = sess.players.map((p, pi) => {
           const center = cellCenter(m, p.pos);
           let d = dispRef.current[p.id];
           if (!d) { d = { ...center }; dispRef.current[p.id] = d; }
+          let carriedK = -1; // v0.65: фаза несения боссом (0..1), ставится в ветке моей фишки
 
           /* ---------- JOURNEY: фишки ходят НАПРЯМУЮ, БЕЗ ОЧЕРЕДИ ХОДОВ ----------
              НОВЫЙ JOURNEY: ВСЕ игроки двигают свои фишки ОДНОВРЕМЕННО — своя фишка
@@ -1257,33 +1279,63 @@ export default function GameScreen() {
                  восстановление партии). Мгновенный снап к ней. Идущего НЕ трогаем — локальная
                  симуляция всегда чуть впереди сети. Раньше фишка после прыжка оставалась стоять
                  на стартовой ячейке, и «Старт игры» происходил не там, где спрыгнул игрок. */
-              /* v0.54: ОТТАСКИВАНИЕ БОССОМ — новый факт захвата (journeyPos.ts совпал с
-                 qCaptureAt): запускаем ПЛАВНУЮ анимацию — фишка едет от места поимки к
-                 ПЕРВОЙ ТОЧКЕ ПАТРУЛЯ босса (видно, как босс оттаскивает фишку). */
-              if (isQuest && sess.qCaptureAt?.[me] && jp && sess.qCaptureAt[me] === jp.ts && lastCapTsRef.current !== jp.ts) {
+              /* v0.54→v0.65: КИНО-ЗАХВАТ БОССОМ — новый факт захвата (journeyPos.ts совпал с
+                 qCaptureAt): босс НЕСЁТ фишку от места поимки к ПЕРВОЙ ТОЧКЕ ПАТРУЛЯ —
+                 идёт сам (видно по полю), фишка едет РЯДОМ (сбоку по ходу движения).
+                 + КИНО-ПОЛОСЫ: с момента поимки управление у босса — экран в полосах
+                 кат-сцены, как в кино; полосы уйдут, когда откроется задание. */
+              if (isQuest && sess.qCaptureAt?.[me] && jp && sess.qCaptureAt[me] === jp.ts && lastCapTsRef.current !== jp.ts && !cutActiveRef.current) {
                 lastCapTsRef.current = jp.ts;
+                const capBossId = sess.qCaptureBoss?.[me];
+                const capBoss = capBossId ? (m.bosses ?? []).find((x) => x.id === capBossId) : null;
+                /* босс в момент поимки ЗАМЕР (qBossHoldAt = ts захвата) — его позиция и есть
+                   стартовый пункт несения; если босса не нашли — работает старое поведение */
+                const capHoldTs = capBossId ? (sess.qBossHoldAt?.[me] ?? {})[capBossId] : undefined;
+                const bStart = capBoss?.patrol ? patrolPos(capBoss.patrol, sess.startedAt || 0, Date.now(), capHoldTs) : null;
                 const distC = Math.hypot(jp.x - self.x, jp.y - self.y);
-                if (distC > 4) {
+                if (capBoss && bStart && distC > 4) {
                   const spdC = cps * CELL; // px/с — скорость карты
-                  bossDragRef.current = { fx: self.x, fy: self.y, tx: jp.x, ty: jp.y, t0: Date.now(), ms: Math.max(700, Math.min(2400, (distC / spdC) * 1000)) };
+                  /* фишка ЕДЕТ СБОКУ от босса (перпендикуляр хода движения, отступ от габарита босса) */
+                  const ang = Math.atan2(jp.y - bStart.y, jp.x - bStart.x) + Math.PI / 2;
+                  const off = Math.max(20, capBoss.w * 0.45);
+                  const dragMs = Math.max(700, Math.min(2400, (distC / spdC) * 1000));
+                  bossDragRef.current = { bossId: capBoss.id, bx0: bStart.x, by0: bStart.y, dx: Math.cos(ang) * off, dy: Math.sin(ang) * off, tx: jp.x, ty: jp.y, t0: Date.now(), ms: dragMs };
+                  carryBarsMaxRef.current = Date.now() + dragMs + 4200; // страховка: несение + 1с паузы + запас
                 } else {
                   /* v0.56: тянуть было НЕКУДА (фишка уже в точке) — задание через 0.7 с
                      «нулевого оттаскивания» + 1 с задержки (та же математика, что у хоста) */
                   scheduleBossTaskGo(jp.ts, 1700);
+                  carryBarsMaxRef.current = Date.now() + 4400;
+                }
+                /* v0.65: ПОЛОСЫ ЗАХВАТА — «управление у босса» (уйдут с открытием задания) */
+                if (!carryBarsRef.current) {
+                  carryBarsRef.current = true;
+                  setCarryBars(true);
+                  setCarryBarsOut(false);
+                  if (carryBarsTimerRef.current) { window.clearTimeout(carryBarsTimerRef.current); carryBarsTimerRef.current = null; }
                 }
               }
               const bDrag = bossDragRef.current;
               if (bDrag) {
-                /* фишка под контролем босса: едем по easeInOutQuad, ввод игнорируется,
-                   анти-телепорт и порталы не действуют, пока не доехали */
+                /* v0.65: БОСС НЕСЁТ ФИШКУ: сам босс едет по easeInOutQuad от места поимки
+                   к точке 1 (его позиция уходит в drawBoard через bossCarryFxRef),
+                   фишка — РЯДОМ (сбоку по ходу), ввод игнорируется, анти-телепорт и
+                   порталы не действуют, пока не доехали */
                 const k = Math.max(0, Math.min(1, (Date.now() - bDrag.t0) / bDrag.ms));
                 const ease = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
-                self.x = bDrag.fx + (bDrag.tx - bDrag.fx) * ease;
-                self.y = bDrag.fy + (bDrag.ty - bDrag.fy) * ease;
+                const bxN = bDrag.bx0 + (bDrag.tx - bDrag.bx0) * ease;
+                const byN = bDrag.by0 + (bDrag.ty - bDrag.by0) * ease;
+                bossCarryFxRef.current[bDrag.bossId] = { x: bxN, y: byN, phase: k };
+                self.x = bxN + bDrag.dx;
+                self.y = byN + bDrag.dy;
                 self.moving = false;
                 self.dirty = false;
+                carriedK = k; // фаза несения — анимация фишки (барахтается + вспышка)
                 if (k >= 1) {
                   bossDragRef.current = null;
+                  bossHoldPinRef.current[bDrag.bossId] = true; // босс остаётся на точке 1 (пока «держит»)
+                  delete bossCarryFxRef.current[bDrag.bossId];
+                  carriedK = -1;
                   self.pinside.clear();
                   for (const q of m.portals ?? []) if (self.x >= q.x && self.x < q.x + q.w && self.y >= q.y && self.y < q.y + q.h) self.pinside.add(q.id);
                   /* v0.56: фишка НА МЕСТЕ — через 1 секунду запускается задание босса */
@@ -1305,7 +1357,16 @@ export default function GameScreen() {
               const jqRun = me && sess.qJobs ? sess.qJobs[me] : undefined;
               const rjRun = me && sess.rubg?.jobs ? sess.rubg.jobs[me] : undefined;
               const taskWinOpen = (jqRun !== undefined && !!cellTaskOf(sess, m, jqRun.cellIdx)) || (rjRun !== undefined && !!cellTaskOf(sess, m, rjRun.cellIdx));
-              const canWalk = sess.phase === 'playing' && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate) && !(sess.qCards && me && sess.qCards[me]) && !taskWinOpen && !bossDragRef.current && !cutActiveRef.current; // v0.54: во время оттаскивания боссом ходить нельзя · v0.56: в кат-сцене мир замер · v0.59: при выполнении задания фишка стоит
+              const canWalk = sess.phase === 'playing' && !sess.moving && !sess.challenge && !sess.pendingCard && !sess.quiz && !sess.awaitPost && !fxList.some((f) => f.gate) && !(sess.qCards && me && sess.qCards[me]) && !taskWinOpen && !bossDragRef.current && !cutActiveRef.current; // v0.54: во время оттаскивания боссом ходить нельзя · v0.56: в кат-сцене мир замер · v0.59: при выполнении задания фишка стоит · v0.65: при несении тоже
+              /* v0.65: КИНО-ПОЛОСЫ ЗАХВАТА — УБИРАЮТСЯ, когда открылось задание босса
+                 (управление вернули) или по страховочному таймеру (задание не начнётся) */
+              if (carryBarsRef.current && (taskWinOpen || Date.now() > carryBarsMaxRef.current)) {
+                carryBarsRef.current = false;
+                setCarryBars(false);
+                setCarryBarsOut(true);
+                if (carryBarsTimerRef.current) window.clearTimeout(carryBarsTimerRef.current);
+                carryBarsTimerRef.current = window.setTimeout(() => setCarryBarsOut(false), 850);
+              }
               if (canWalk) {
                 for (const kd of [...journeyKeys.current, ...journeyPadRef.current]) {
                   if (kd === 'up') vy -= 1; else if (kd === 'down') vy += 1;
@@ -1428,6 +1489,7 @@ export default function GameScreen() {
               anim: tokDefJ?.anim,
               dir: jdir,
               mv: jdir !== undefined, // идёт СЕЙЧАС — только у идущей фишки покачивание (на месте фишка стоит ровно)
+              carried: p.id === me && carriedK >= 0 ? carriedK : undefined, // v0.65: меня несёт босс — фишка барахтается
               phase: pi * 0.53,
               size: tokSizeJ,
               override: fxAClip?.frames.length ? fxAClip : undefined,
@@ -1745,7 +1807,19 @@ export default function GameScreen() {
         /* v0.58: боссы, ДЕРЖАЩИЕ МЕНЯ ПОСЛЕ ЗАХВАТА (после поимки босс прекращает патруль
            — qBossHoldAt пишется движком при захвате); у остальных игроков — свой тайминг */
         const myHolds = isQuest && me ? sess.qBossHoldAt?.[me] : undefined;
-        if (myHolds) for (const [hid, hts] of Object.entries(myHolds)) if (patrolFreeze[hid] === undefined) patrolFreeze[hid] = hts;
+        if (myHolds) {
+          /* v0.65: босс, ДОВОЛОКШИЙ фишку до точки 1 (bossHoldPinRef), рисуется на ПЕРВОЙ
+             точке патруля, пока держит меня (hold ещё жив): t=0 цикла = pts[0];
+             hold снят (проигрыш задания/смерть/победа над боссом) — пин сбрасывается,
+             босс снова патрулирует по формуле (победа замораживает его через bossDown) */
+          for (const hid of Object.keys(bossHoldPinRef.current)) {
+            if (!myHolds || myHolds[hid] === undefined) delete bossHoldPinRef.current[hid];
+          }
+          for (const [hid, hts] of Object.entries(myHolds)) {
+            if (patrolFreeze[hid] !== undefined) continue;
+            patrolFreeze[hid] = bossHoldPinRef.current[hid] ? (sess.startedAt || 0) : hts;
+          }
+        }
         /* v0.58: МИР ЗАМИРАЕТ ТОЛЬКО В КАТ-СЦЕНЕ (заморозка в диалоге/торговле отменена —
            кроме играющего на карте могут быть другие игроки): ВСЕ боссы стоят, пока идёт
            кино (NPC замораживаются ниже, в drawBoard — npcFreeze для всех) */
@@ -1805,6 +1879,7 @@ export default function GameScreen() {
           brokenAt: brokenAtRef.current,
           bossDown: bossDownMerged,
           bossFx,
+          bossCarry: bossCarryFxRef.current, // v0.65: босс несёт пойманную фишку (кино-захват)
           /* РЕЖИМ КОМНАТ: темнота за пределами текущей плитки-комнаты.
              ТУМАН ИССЛЕДОВАНИЯ: на карте мира (общий план/заглядывание) НЕОТКРЫТЫЕ
              плитки тоже скрыты темнотой — видны только посещённые комнаты.
@@ -4443,18 +4518,22 @@ export default function GameScreen() {
            v0.61 — у «Растворяющихся» тоже РЕЗКИЙ край: сплошной чёрный без градиента;
            v0.62 — постоянной кнопки «⏭ ПРОПУСТИТЬ [ESC]» больше нет: подсказка
            плавно проявляется ТОЛЬКО при нажатом ESC, полоска заполняется, пока
-           клавиша удерживается; додержал — кат-сцена пропущена) ---------- */}
-      {(cutActive || cutBarsOut) && (() => {
+           клавиша удерживается; додержал — кат-сцена пропущена;
+           v0.65 — полосы «Растворяющихся» НИЖЕ (10vh вместо 13vh), и ТЕ ЖЕ полосы
+           показывает КИНО-ЗАХВАТ БОССА: босс поймал фишку — экран в полосах,
+           задание началось — полосы плавно ушли (управление вернули)) ---------- */}
+      {(cutActive || cutBarsOut || carryBars || carryBarsOut) && (() => {
         const canSkip = cutRef.current?.def.skippable !== false;
         const dissolving = (options.cutBars ?? 'dissolve') !== 'classic'; // v0.57: стиль полос из общих опций
+        const barsIn = cutActive || carryBars; // v0.65: полосы на экране (кино или захват боссом)
         const barCls = (side: 'top' | 'bottom') =>
-          cutActive
+          barsIn
             ? (dissolving ? `cut-bar-d-${side}` : `cut-bar-${side}`)
             : (dissolving ? `cut-bar-d-${side} cut-out-${side}` : `cut-bar-${side} cut-out-${side}`); // уход — плавный у обоих стилей
         return (
           <div className="fixed inset-0 z-[70] pointer-events-none cut-keep">
-            <div className={`absolute inset-x-0 top-0 bg-black ${barCls('top')}`} style={{ height: dissolving ? '13vh' : '7vh' }} />
-            <div className={`absolute inset-x-0 bottom-0 bg-black ${barCls('bottom')}`} style={{ height: dissolving ? '13vh' : '7vh' }} />
+            <div className={`absolute inset-x-0 top-0 bg-black ${barCls('top')}`} style={{ height: dissolving ? '10vh' : '7vh' }} />
+            <div className={`absolute inset-x-0 bottom-0 bg-black ${barCls('bottom')}`} style={{ height: dissolving ? '10vh' : '7vh' }} />
             {cutActive && canSkip && (
               /* v0.62: подсказка пропуска — только визуальная (pointer-events-none);
                  держится смонтированной всё кино, чтобы работать transition гашения */

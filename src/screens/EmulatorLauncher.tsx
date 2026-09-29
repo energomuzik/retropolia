@@ -3,7 +3,7 @@ import { useApp, getRomData } from '../store';
 import { EmuVolumeChip, Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
 import SegaBox, { type SegaApi } from '../SegaBox';
 import KeyBinder from '../KeyBinder';
-import { idbDel, idbGet, idbPut, uid } from '../db';
+import { idbDel, idbGet, idbPut, uid, exportRomBase, importRomBase } from '../db';
 import { CartridgeBadge, CartCutModal, CoverCropBtn, CoverPickBtn, CoverRemoveBtn, PlatName, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
 import type { RomDef, SaveDef, SaveKind } from '../types';
 import { SAVE_KIND_CLS, SAVE_KIND_SHORT, saveKindOf, saveKindNum } from '../types';
@@ -198,6 +198,41 @@ export default function EmulatorLauncher() {
     const folder = (raw || 'Ромы').slice(0, 24);
     setUploadFolder(folder);
     await onUpload(files, folder);
+  };
+
+  /* v0.65: БАЗА РОМОВ — сохранить ВСЮ базу (ромы + обложки картриджей) одним файлом
+     и загрузить её обратно: можно собрать базу на одном устройстве и залить на другое
+     БЕЗ загрузки карт/тайлов/фишек (в Опциях «Экспорт библиотеки» возит вообще всё). */
+  const baseRef = useRef<HTMLInputElement>(null);
+  const doExportBase = async () => {
+    try {
+      const json = await exportRomBase();
+      const n = (JSON.parse(json) as { roms?: unknown[] }).roms?.length ?? 0;
+      if (!n) { toast('База ромов пуста — сначала загрузите ромы', 'err'); return; }
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `retropolia-rombase-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      sfx.coin();
+      toast(`База ромов выгружена в файл (ромов: ${n}, с обложками)`, 'ok');
+    } catch {
+      toast('Не удалось выгрузить базу ромов', 'err');
+    }
+  };
+  const doImportBase = async (file: File) => {
+    try {
+      const text = await file.text();
+      const { added, skipped } = await importRomBase(text);
+      await refresh();
+      sfx.success();
+      toast(added ? `База ромов загружена: новых ${added}, уже были ${skipped}` : 'Новых ромов нет — все уже были в базе', 'ok');
+    } catch (e) {
+      sfx.fail();
+      toast(e instanceof Error ? e.message : 'Неверный файл базы ромов', 'err');
+    }
   };
 
   /* создать папку: имя вводится в строке под списком; пустая папка хранится в localStorage */
@@ -469,6 +504,10 @@ export default function EmulatorLauncher() {
           </h1>
           <PxBtn color="coral" className="ml-auto" onClick={() => fileRef.current?.click()}>{Ic.upload(15)} Загрузить ромы</PxBtn>
           <PxBtn color="coral" onClick={() => dirRef.current?.click()}>{Ic.folder(15)} Загрузить папку</PxBtn>
+          {/* v0.65: база ромов одним файлом (ромы + обложки) — сохранить/загрузить */}
+          <GhostBtn onClick={() => void doExportBase()} title="Сохранить ВСЮ базу ромов одним файлом (ромы + обложки картриджей)">{Ic.download(14)} Сохранить базу</GhostBtn>
+          <GhostBtn onClick={() => baseRef.current?.click()} title="Загрузить базу ромов из файла (ромы + обложки; уже существующие не дублируются)">{Ic.upload(14)} Загрузить базу</GhostBtn>
+          <input ref={baseRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void doImportBase(f); e.target.value = ''; }} />
           <input ref={fileRef} type="file" accept=".nes,.md,.gen,.bin,.sms,.gg,.sfc,.smc,.fig,.gb,.gbc,.gba,.32x,.a26,.pce" multiple className="hidden" onChange={(e) => { void onUpload(e.target.files); e.target.value = ''; }} />
           <input ref={dirRef} type="file" multiple className="hidden" {...({ webkitdirectory: 'true', directory: 'true' } as Record<string, string>)} onChange={(e) => { void onUploadFolder(e.target.files); e.target.value = ''; }} />
         </div>
@@ -482,6 +521,7 @@ export default function EmulatorLauncher() {
           Ромы раскладываются по папкам-спойлерам (как тайлы): создайте папку кнопкой «+ Папка», выберите её в списке и загрузите сразу пачку файлов.
           Каждому рому можно дать ОБЛОЖКУ КАРТРИДЖА: 📷 — готовая картинка (размер и пропорции читаются из файла), ✂ — вырезать картридж из картинки ТОЧНО ТАК ЖЕ, как тайлы в редакторе карт: фон АВТО/палитра/пипетка, допуск, мин. размер, склейка частей — клик по вырезанному тайлу ставит его обложкой (пропорции честные, прозрачный фон остаётся прозрачным). В режиме КАРТИНОК (кнопка 🖼 на папке) ромы показываются фотографиями реальных картриджей, а кнопка ⛶ разворачивает большой список картинок в отдельном окне.
           Удаление папок, ромов, сохранений и УБИРАНИЕ ОБЛОЖЕК (✕) подчиняются режиму из «Опций», а Ctrl+Z вернёт последнее удалённое.
+          БАЗА РОМОВ: кнопка «Сохранить базу» выгружает ВСЕ ромы одним файлом — вместе с обложками картриджей; «Загрузить базу» заливает такой файл целиком (уже существующие ромы не дублируются) — можно собрать базу на одном устройстве и перенести на другое без загрузки всего остального.
         </p>
 
         <div className="grid lg:grid-cols-[300px_1fr] gap-5">

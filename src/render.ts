@@ -299,6 +299,7 @@ export interface TokenDraw {
   size?: number;       // размер на поле в px по большей стороне (нет: анимированная 64, обычная 34)
   override?: AnimClip;  // разовый клип fx (победа/поражение) — играется ОДИН раз вместо обычного
   overrideStart?: number; // старт клипа override в мс rAF-часов (performance.now)
+  carried?: number;     // v0.65: фишку ПОЙМАЛ босс и несёт (фаза 0..1) — барахтается (крен) + красная вспышка в момент поимки
 }
 
 export interface BoardDrawOpts {
@@ -342,6 +343,10 @@ export interface BoardDrawOpts {
   patrolBase?: number;
   patrolNow?: number;
   patrolFreeze?: Record<string, number>; // PlacedBoss.id → момент (мс), в который босс погиб и замер
+  /* v0.65: КИНО-ЗАХВАТ — босс НЕСЁТ пойманную фишку к точке 1: позиция босса задаётся
+     НАПРЯМУЮ (bossCarry[id] = { x, y, phase }), минуя формулу патруля; phase 0..1 —
+     прогресс несения: рывок-«схватил» (тряска + всплеск размера) и бобыление в дороге */
+  bossCarry?: Record<string, { x: number; y: number; phase: number }>;
   npcFreeze?: Record<string, number>; // v0.54: PlacedNpc.id → момент (мс), в который NPC замер — с ним ОТКРЫТ ДИАЛОГ (патруль стоит, пока идёт разговор)
   npcPin?: Record<string, { x: number; y: number }>; // v0.57: ЖЁСТКАЯ привязка NPC на время заморозки мира (диалог/торговля/кат-сцена): позиция посчитана ОДИН раз на момент заморозки и рисуется напрямую, минуя формулу патруля — NPC гарантированно стоит
   patrolRoutes?: { pts: { x: number; y: number }[]; color: string }[];
@@ -1175,13 +1180,16 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     if (!def) continue;
     /* ПАТРУЛЬ: живой босс стоит в точке маршрута (формула от времени партии);
        повержённый замерает в точке гибели (patrolFreeze — ts fx bossDef, а в QUEST v0.53 —
-       момент победы из qBossDownAt: побеждённый босс больше не патрулирует) */
+       момент победы из qBossDownAt: побеждённый босс больше не патрулирует).
+       v0.65: босс, НЕСУЩИЙ пойманную фишку (bossCarry), рисуется в заданной точке —
+       он идёт к точке 1 с фишкой рядом; в редакторе bossCarry не передаётся. */
+    const carry = o.bossCarry?.[pb.id];
     const frozenTs = o.bossDown?.[pb.id] || o.patrolFreeze?.[pb.id] !== undefined ? o.patrolFreeze?.[pb.id] : undefined;
     const pp = pb.patrol && o.patrolBase !== undefined
       ? patrolPos(pb.patrol, o.patrolBase, o.patrolNow ?? 0, frozenTs)
       : null;
-    const bx = pp ? pp.x : pb.x;
-    const by = pp ? pp.y : pb.y;
+    const bx = carry ? carry.x : (pp ? pp.x : pb.x);
+    const by = carry ? carry.y : (pp ? pp.y : pb.y);
     // круг радиуса — только в редакторе карт (радиус работает и для реакций, и для звука ожидания)
     if (o.sndRadii && pb.r && pb.r > 0) {
       ctx.save();
@@ -1222,6 +1230,15 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
     if (!img) continue;
     ctx.save();
     ctx.translate(bx, by);
+    /* v0.65: ДОП. АНИМАЦИЯ босса, несущего фишку: в первые 25% пути — рывок «СХВАТИЛ»
+       (быстрая тряска + всплеск размера), дальше — лёгкое бобыление в такт шагам,
+       босс слегка «горбится» под тяжестью (scale 1.04) */
+    if (carry) {
+      const grabK = Math.max(0, 1 - carry.phase * 4);
+      ctx.rotate(Math.sin(o.time / 14) * 0.09 * grabK);
+      const sc = 1 + 0.18 * Math.sin(Math.PI * Math.min(1, carry.phase * 3)) + 0.04 * Math.sin(o.time / 95);
+      ctx.scale(sc, sc);
+    }
     ctx.imageSmoothingEnabled = true;
     if (o.bossDown?.[pb.id] && !fxC) ctx.globalAlpha = 0.85; // побеждённый — чуть приглушён
     ctx.drawImage(img, -pb.w / 2, -pb.h / 2, pb.w, pb.h);
@@ -1296,6 +1313,12 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
        в обоих режимах, плавном и прыжками»): фишка идёт ровно, без синусоиды.
        Постоянный сдвиг -6 — приподнятость над тенью, это не покачивание. */
     ctx.translate(0, -6);
+    /* v0.65: БОСС ПОЙМАЛ И НЕСЁТ — фишка БАРАХТАЕТСЯ (кренится из стороны в сторону;
+       в момент поимки — сильнее) + красная вспышка-кольцо на первых 30% пути */
+    if (t.carried !== undefined) {
+      const grabK = Math.max(0, 1 - t.carried * 5);
+      ctx.rotate(Math.sin(o.time / 55) * (0.10 + 0.16 * grabK));
+    }
     const s = t.active ? 1.12 : 1;
     ctx.scale(s, s);
     ctx.globalAlpha = t.alive ? 1 : 0.35;
@@ -1360,6 +1383,15 @@ export function drawBoard(ctx: CanvasRenderingContext2D, map: GameMap, o: BoardD
       ctx.fillStyle = body;
       ctx.fillRect(-1, -18, 2, 6);
       ctx.fillRect(-3, -21, 6, 4);
+    }
+    /* v0.65: красная вспышка поимки — тает за первые 30% несения */
+    if (t.carried !== undefined && t.carried < 0.3) {
+      ctx.globalAlpha = 0.42 * (1 - t.carried / 0.3);
+      ctx.fillStyle = '#ff5d73';
+      ctx.beginPath();
+      ctx.ellipse(0, -sz * 0.12, sz * 0.58, sz * 0.52, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = t.alive ? 1 : 0.35;
     }
     ctx.restore();
   }

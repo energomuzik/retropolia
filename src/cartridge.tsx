@@ -61,12 +61,30 @@ const CART_LABELS: Record<CartKey, string> = {
 
 export const cartLabelOf = (rom: { ext: string; fileName: string }): string => CART_LABELS[cartKeyOf(rom.ext, rom.fileName)];
 
-/* v0.62: ЕДИНОЕ выделение названий платформ в подсказках — как у GAME GEAR в v0.61:
-   каждая приставка (NES, SEGA Mega Drive, Master System, GAME GEAR, SNES,
-   Game Boy/Color, GBA, SEGA 32X, Atari 2600, PC Engine) — в одном золотом
-   пиксельном стиле, чтобы все платформы читались одинаково */
+/* v0.62: единое выделение названий платформ в подсказках (как GAME GEAR в v0.61);
+   v0.65: каждая платформа — в СВОЁМ цвете (PLAT_COLOR ниже) */
+/* v0.65: ЦВЕТ ПЛАТФОРМЫ — название приставки в подсказках красится в цвет СВОЕЙ
+   платформы (вместо единого золота): SEGA — синий, Game Boy — серый, GAME GEAR —
+   пурпур (цвет её этикетки на бейдже), 32X — красный, Atari — оранжевый и т.д.
+   Ключи — текст, как он написан в <PlatName>…</PlatName> (регистр не важен). */
+const PLAT_COLOR: Record<string, string> = {
+  'nes': 'text-dim',
+  'sega': 'text-sky',
+  'sega mega drive': 'text-sky',
+  'mega drive': 'text-sky',
+  'master system': 'text-sky',
+  'game gear': 'text-[#c048b8]',
+  'snes': 'text-paper',
+  'game boy/color': 'text-dim',
+  'gba': 'text-[#8f7bff]',
+  'sega 32x': 'text-coral',
+  'atari 2600': 'text-magma',
+  'pc engine': 'text-gold',
+};
+
 export function PlatName({ children }: { children: ReactNode }) {
-  return <span className="text-gold font-display uppercase">{children}</span>;
+  const key = String(children).trim().toLowerCase();
+  return <span className={`${PLAT_COLOR[key] ?? 'text-gold'} font-display uppercase`}>{children}</span>;
 }
 
 type CartShape = { rows: string[]; pal: Record<string, string> };
