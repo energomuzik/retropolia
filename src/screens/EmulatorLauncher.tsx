@@ -4,7 +4,7 @@ import { EmuVolumeChip, Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
 import SegaBox, { type SegaApi } from '../SegaBox';
 import KeyBinder from '../KeyBinder';
 import { idbDel, idbPut, uid } from '../db';
-import { CartridgeBadge, CoverPickBtn, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
+import { CartridgeBadge, CoverCropBtn, CoverCropModal, CoverPickBtn, PlatName, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
 import type { RomDef, SaveDef, SaveKind } from '../types';
 import { SAVE_KIND_CLS, SAVE_KIND_SHORT, saveKindOf, saveKindNum } from '../types';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
@@ -19,6 +19,9 @@ import {
 import { sfx } from '../sound';
 
 const fmtSize = (b: number) => (b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} МБ` : `${Math.max(1, Math.round(b / 1024))} КБ`);
+
+/* v0.62: короткое имя компонента единого выделения платформ (как GAME GEAR в v0.61) */
+const P = PlatName;
 
 /* пустые папки ромов (без ромов) — в localStorage, чтобы пустая папка не исчезала */
 const ROM_FOLDERS_KEY = 'retropolia-rom-folders';
@@ -55,10 +58,12 @@ export default function EmulatorLauncher() {
   const [newFolderName, setNewFolderName] = useState('');
   const [emptyFolders, setEmptyFolders] = useState<string[]>(loadEmptyRomFolders);
   const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({});
-  // v0.61: режим показа ромов в папке (по умолчанию СПИСОК) + размер плиток + развёрнутое окно картинок
+  /* v0.61: режим показа ромов в папке (по умолчанию СПИСОК) + размер плиток + развёрнутое окно картинок
+     v0.62: cropJob — ром и картинка, из которой пользователь вырезает картридж ножницами ✂ */
   const [folderViews, setFolderViews] = useState<Record<string, 'list' | 'pics'>>({});
   const [picsTileSize, setPicsTileSize] = useState(64);
   const [expandFolder, setExpandFolder] = useState<string | null>(null);
+  const [cropJob, setCropJob] = useState<{ rom: RomDef; file: File } | null>(null);
 
   /* ---------- полный экран эмулятора — как в задании в игре ----------
      Кнопка «Во весь экран» рядом с эмулятором разворачивает ТОЛЬКО экран игры,
@@ -350,15 +355,20 @@ export default function EmulatorLauncher() {
     toast(`Папка «${folder}» удалена (ромов: ${inF.length})`, 'err');
   };
 
-  /* v0.61: обложка картриджа — загрузить/заменить/убрать (хранится вместе с ромом) */
+  /* v0.61: обложка картриджа — загрузить/заменить/убрать (хранится вместе с ромом)
+     v0.62: applyCover — общая запись для 📷 (готовая картинка) и ✂ (вырезание);
+     обложка сохраняется КАК ЕСТЬ — размер и соотношение сторон не искажаются,
+     показывается целиком (contain), без обрезки и сплющивания */
+  const applyCover = async (r: RomDef, cover: string) => {
+    await storeRomCover(r, cover);
+    await refresh();
+    sfx.coin();
+    toast(`Обложка картриджа обновлена: «${r.name}»`, 'ok');
+  };
   const setCover = async (r: RomDef, file: File | null) => {
     if (!file) return;
     try {
-      const cover = await fileToCover(file);
-      await storeRomCover(r, cover);
-      await refresh();
-      sfx.coin();
-      toast(`Обложка картриджа обновлена: «${r.name}»`, 'ok');
+      await applyCover(r, await fileToCover(file));
     } catch {
       toast('Не удалось прочитать картинку — попробуйте другой файл', 'err');
     }
@@ -384,6 +394,25 @@ export default function EmulatorLauncher() {
     toast(`Сохранение (слот ${s.slot}) удалено`, 'err');
   };
 
+  /* v0.62: «УДАЛИТЬ ВСЕ СОХРАНЕНИЯ» — одним махом стирает ВСЕ сохранения ТЕКУЩЕГО
+     рома (кнопка в панели «Сохранения», где они загружаются); подчиняется режиму
+     удаления из Опций (подтверждение/удержание), а Ctrl+Z возвращает ВСЕ слоты разом */
+  const delAllSaves = async () => {
+    if (!rom || !romSaves.length) return;
+    const list = romSaves;
+    rememberDeleted({
+      label: `все сохранения рома «${rom.name}» (${list.length})`,
+      restore: async () => {
+        for (const s of list) await idbPut('saves', s.id, { ...s });
+        await refresh();
+      },
+    });
+    await Promise.all(list.map((s) => idbDel('saves', s.id)));
+    await refresh();
+    sfx.fail();
+    toast(`Удалены все сохранения рома «${rom.name}» (${list.length})`, 'err');
+  };
+
   /* строка рома в левой панели (в папке-спойлере или без папки);
      v0.61: вместо плоской надписи платформы — КАРТРИДЖ в форме и цвете своей
      платформы (или загруженная обложка) + кнопка 📷 загрузки обложки */
@@ -399,7 +428,8 @@ export default function EmulatorLauncher() {
       <div className="flex items-center justify-between mt-1.5">
         <span className="tick-label text-faint truncate">{r.fileName}</span>
         <span className="flex items-center gap-2 shrink-0">
-          <CoverPickBtn onPick={(file) => void setCover(r, file)} title={r.cover ? 'Заменить обложку картриджа' : 'Загрузить обложку картриджа (фото реального картриджа)'} className="text-[11px] leading-none text-faint" />
+          <CoverPickBtn onPick={(file) => void setCover(r, file)} title={r.cover ? 'Заменить обложку картриджа' : 'Загрузить обложку картриджа (готовая картинка)'} className="text-[11px] leading-none text-faint" />
+          <CoverCropBtn onPick={(file) => setCropJob({ rom: r, file })} title="✂ Вырезать картридж из картинки (фото/скан) — рядом с 📷" className="text-[11px] leading-none text-faint" />
           {r.cover && (
             <button
               type="button"
@@ -437,14 +467,14 @@ export default function EmulatorLauncher() {
           <input ref={dirRef} type="file" multiple className="hidden" {...({ webkitdirectory: 'true', directory: 'true' } as Record<string, string>)} onChange={(e) => { void onUploadFolder(e.target.files); e.target.value = ''; }} />
         </div>
         <p className="text-[13px] text-dim mb-6 max-w-3xl">
-          Тестовый стенд: гоняйте ромы (NES, SEGA Mega Drive / Master System / <span className="text-gold font-display uppercase">GAME GEAR</span>, SNES, Game Boy/Color, GBA, SEGA 32X, Atari 2600, PC Engine) — в том числе доступны для запуска РОМЫ GAME GEAR (.gg), они играют в родных пропорциях 160×144. Проходите до нужного места и записывайте состояние одной из ЧЕТЫРЁХ кнопок:
+          Тестовый стенд: гоняйте ромы (<P>NES</P>, <P>SEGA Mega Drive</P> / <P>Master System</P> / <P>GAME GEAR</P>, <P>SNES</P>, <P>Game Boy/Color</P>, <P>GBA</P>, <P>SEGA 32X</P>, <P>Atari 2600</P>, <P>PC Engine</P>) — в том числе доступны для запуска ромы <P>GAME GEAR</P> (.gg), они играют в родных пропорциях 160×144. Проходите до нужного места и записывайте состояние одной из ЧЕТЫРЁХ кнопок:
           <span className="text-gold font-display uppercase"> «Сохранить уровень»</span> (Уровень 1, 2, …),
           <span className="text-coral font-display uppercase"> «Сохранить босса»</span> (Босс 1, 2, …),
           <span className="text-teal font-display uppercase"> «Сохранить моё задание»</span> (одно на игру, перезаписывается) и
           <span className="text-sky font-display uppercase"> «Частное сохранение»</span> («Назови меня N» — переименовывается ✏).
           В игре после захвата ячейки выбираются уровни/боссы/моё задание; частные — только в редакторе заданий.
           Ромы раскладываются по папкам-спойлерам (как тайлы): создайте папку кнопкой «+ Папка», выберите её в списке и загрузите сразу пачку файлов.
-          Каждому рому можно дать ОБЛОЖКУ КАРТРИДЖА (📷 в строке рома): в режиме КАРТИНОК (кнопка 🖼 на папке) ромы показываются фотографиями реальных картриджей, а кнопка ⛶ разворачивает большой список картинок в отдельном окне.
+          Каждому рому можно дать ОБЛОЖКУ КАРТРИДЖА: 📷 — готовая картинка (размер и пропорции читаются из файла), ✂ — вырезать картридж прямо из фото/скана; обложка показывается ЦЕЛИКОМ, без обрезки и искажения пропорций. В режиме КАРТИНОК (кнопка 🖼 на папке) ромы показываются фотографиями реальных картриджей, а кнопка ⛶ разворачивает большой список картинок в отдельном окне.
           Удаление папок, ромов и сохранений подчиняется режиму из «Опций», а Ctrl+Z вернёт последнее удалённое.
         </p>
 
@@ -551,6 +581,7 @@ export default function EmulatorLauncher() {
                               selected={romId === r.id}
                               onPick={() => { setRomId(r.id); setRunning(false); sfx.hover(); }}
                               onCover={(file) => void setCover(r, file)}
+                              onCropFile={(file) => setCropJob({ rom: r, file })}
                               onRemoveCover={() => void clearCover(r)}
                             />
                           ))}
@@ -668,7 +699,23 @@ export default function EmulatorLauncher() {
 
             {rom && (
               <Panel title={`Сохранения «${rom.name}» · ${romSaves.length}`} icon={Ic.save(16)}>
-                <div className="p-3 grid sm:grid-cols-2 gap-2">
+                <div className="p-3 space-y-2">
+                  {/* v0.62: стереть ВСЕ сохранения этого рома одной кнопкой
+                      (режим удаления из Опций: подтверждение/удержание; Ctrl+Z вернёт всё) */}
+                  {romSaves.length > 0 && (
+                    <div className="flex justify-end">
+                      <HoldDeleteButton
+                        onFire={() => void delAllSaves()}
+                        label={`ВСЕ сохранения рома «${rom.name}» (${romSaves.length})`}
+                        ariaLabel="Удалить все сохранения этого рома"
+                        title="Удалить ВСЕ сохранения этого рома разом"
+                        className="px-2.5 py-1 border-2 border-edge text-[10px] font-display uppercase text-dim hover:text-coral hover:border-coral/50 cursor-pointer"
+                      >
+                        <span className="inline-flex items-center gap-1.5">{Ic.trash(11)} Удалить все сохранения</span>
+                      </HoldDeleteButton>
+                    </div>
+                  )}
+                  <div className="grid sm:grid-cols-2 gap-2">
                   {romSaves.map((s) => {
                     const k = saveKindOf(s);
                     return (
@@ -710,6 +757,7 @@ export default function EmulatorLauncher() {
                     );
                   })}
                   {romSaves.length === 0 && <div className="text-[12px] text-dim sm:col-span-2 py-3 text-center">Сохранений нет — запустите ром и запишите первое состояние</div>}
+                  </div>
                 </div>
               </Panel>
             )}
@@ -726,7 +774,18 @@ export default function EmulatorLauncher() {
           onClose={() => setExpandFolder(null)}
           onPick={(r) => { setRomId(r.id); setRunning(false); setExpandFolder(null); sfx.hover(); }}
           onCover={(r, file) => void setCover(r, file)}
+          onCrop={(r, file) => setCropJob({ rom: r, file })}
           onRemoveCover={(r) => void clearCover(r)}
+        />
+      )}
+
+      {/* v0.62: НОЖНИЦЫ — окно вырезания картриджа из картинки (из 📷-строк, плиток и окна картинок) */}
+      {cropJob && (
+        <CoverCropModal
+          rom={cropJob.rom}
+          file={cropJob.file}
+          onClose={() => setCropJob(null)}
+          onSave={(url) => { void applyCover(cropJob.rom, url); setCropJob(null); }}
         />
       )}
 

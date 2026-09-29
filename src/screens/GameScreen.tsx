@@ -577,6 +577,20 @@ export default function GameScreen() {
   const cutPlayedRef = useRef<Set<string>>(new Set()); // локальная защита от повторного запуска за сессию
   const cutLastNpcTsRef = useRef(Date.now()); // сигналы NPC старше монтирования — просроченные (сейв)
   const npcPinRef = useRef<{ key: number; map: Record<string, { x: number; y: number }> } | null>(null); // v0.57: жёсткая привязка NPC на время заморозки
+  /* v0.62: ПРОПУСК КАТ-СЦЕНЫ БЕЗ ПОСТОЯННОЙ НАДПИСИ: пока кино идёт, экран чистый;
+     нажали ESC — подсказка «ДЕРЖИТЕ ESC — ПРОПУСК» плавно проявляется, и полоска
+     внутри заполняется, ПОКА клавиша удерживается; додержали ~1 с — кат-сцена
+     пропускается, отпустили раньше — подсказка плавно гаснет (пропуска нет) */
+  const CUT_ESC_HOLD_MS = 1000;
+  const [cutEscHint, setCutEscHint] = useState(false); // подсказка видна (плавная прозрачность)
+  const [cutEscSession, setCutEscSession] = useState(0); // номер нажатия — перезапуск полоски
+  const cutEscSinceRef = useRef<number | null>(null); // момент нажатия ESC (null — не нажата)
+  const cutEscTimerRef = useRef<number | null>(null); // таймер удержания
+  const cutEscRelease = () => {
+    if (cutEscTimerRef.current !== null) { window.clearTimeout(cutEscTimerRef.current); cutEscTimerRef.current = null; }
+    cutEscSinceRef.current = null;
+    setCutEscHint(false);
+  };
   /* v0.57: ПЛАВНЫЙ УХОД кино-полос — в конце кат-сцены полосы не исчезают мгновенно:
      оверлей держится ещё ~0.85 с с классом cut-out (растворяющиеся тают, классические
      уезжают), и только потом убирается. Стиль полос — из общих опций (cutBars). */
@@ -654,7 +668,9 @@ export default function GameScreen() {
     sfx.click();
   };
   const closeDialog = () => { setDlgNpcId(null); setDlgNode(null); setTradeNpcId(null); dlgOpenIdRef.current = null; };
-  /* клавиша E — поговорить с NPC в радиусе; ESC — закрыть диалог/пропустить кат-сцену */
+  /* клавиша E — поговорить с NPC в радиусе; ESC — закрыть диалог / пропуск кат-сцены
+     (v0.62: НЕ мгновенно — нажатие плавно показывает подсказку, ПРОДОЛЖИТЕЛЬНОЕ
+     удержание пропускает; см. CUT_ESC_HOLD_MS) */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() === 'e' || e.key.toLowerCase() === 'у') {
@@ -662,21 +678,47 @@ export default function GameScreen() {
         if (cur && !dlgNpcId && !cutActiveRef.current) { e.preventDefault(); openDialog(cur.npc.id); } // v0.56: в кат-сцене разговоров нет
       }
       if (e.key === 'Escape' && dlgNpcId) closeDialog();
-      /* v0.56: ESC пропускает кат-сцену (если автор разрешил пропуск) */
+      /* v0.56: ESC пропускает кат-сцену (если автор разрешил пропуск);
+         v0.62: только ПРОДОЛЖИТЕЛЬНОЕ удержание — полоска в подсказке */
       if (e.key === 'Escape' && cutActiveRef.current) {
         const def = cutRef.current?.def;
-        if (def?.skippable !== false) { e.preventDefault(); cutFinishRef.current(true); }
+        if (def?.skippable !== false) {
+          e.preventDefault();
+          if (!e.repeat && cutEscSinceRef.current === null) {
+            cutEscSinceRef.current = Date.now();
+            setCutEscSession((x) => x + 1);
+            setCutEscHint(true);
+            cutEscTimerRef.current = window.setTimeout(() => {
+              cutEscRelease();
+              if (cutActiveRef.current) cutFinishRef.current(true); // додержали — пропускаем
+            }, CUT_ESC_HOLD_MS);
+          }
+        }
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [nearNpc, dlgNpcId]);
+  /* v0.62: отпустили ESC (или окно потеряло фокус) — отсчёт сбрасывается,
+     подсказка плавно гаснет; при размонтировании таймер подчищается */
+  useEffect(() => {
+    const onKeyUp = (e: KeyboardEvent) => { if (e.key === 'Escape' && cutEscSinceRef.current !== null) cutEscRelease(); };
+    const onBlur = () => { if (cutEscSinceRef.current !== null) cutEscRelease(); };
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+      if (cutEscTimerRef.current !== null) { window.clearTimeout(cutEscTimerRef.current); cutEscTimerRef.current = null; }
+    };
+  }, []);
 
   /* ---------- v0.56: запуск/завершение кат-сцен + три триггера ----------
    Взаимная рекурсия старт/финиш — через ref'ы (функции обновляются каждый рендер,
    rAF-цикл и оверлей вызывают всегда свежие версии). */
   startCutRef.current = (def: CutsceneDef) => {
     if (!def || !(def.pts ?? []).length) return;
+    cutEscRelease(); // v0.62: подсказка пропуска всегда начинается с чистого экрана
     const v = viewRef.current;
     cutRef.current = { def, i: 0, phase: 'to', t0: Date.now(), fromX: v.x, fromY: v.y, fromZ: v.zoom };
     cutFreezeTsRef.current = Date.now(); // мир замирает С ЭТОГО кадра (все NPC/боссы/фишки)
@@ -4397,8 +4439,11 @@ export default function GameScreen() {
 
       {tplOpen && <TemplateModal cellIdx={active?.pos ?? 0} onClose={() => setTplOpen(false)} />}
 
-      {/* ---------- v0.56: КАТ-СЦЕНА — кино-полосы + кнопка «Пропустить» (v0.60 — без плашки;
-           v0.61 — у «Растворяющихся» тоже РЕЗКИЙ край: сплошной чёрный без градиента) ---------- */}
+      {/* ---------- v0.56: КАТ-СЦЕНА — кино-полосы (v0.60 — без плашки;
+           v0.61 — у «Растворяющихся» тоже РЕЗКИЙ край: сплошной чёрный без градиента;
+           v0.62 — постоянной кнопки «⏭ ПРОПУСТИТЬ [ESC]» больше нет: подсказка
+           плавно проявляется ТОЛЬКО при нажатом ESC, полоска заполняется, пока
+           клавиша удерживается; додержал — кат-сцена пропущена) ---------- */}
       {(cutActive || cutBarsOut) && (() => {
         const canSkip = cutRef.current?.def.skippable !== false;
         const dissolving = (options.cutBars ?? 'dissolve') !== 'classic'; // v0.57: стиль полос из общих опций
@@ -4410,17 +4455,24 @@ export default function GameScreen() {
           <div className="fixed inset-0 z-[70] pointer-events-none cut-keep">
             <div className={`absolute inset-x-0 top-0 bg-black ${barCls('top')}`} style={{ height: dissolving ? '13vh' : '7vh' }} />
             <div className={`absolute inset-x-0 bottom-0 bg-black ${barCls('bottom')}`} style={{ height: dissolving ? '13vh' : '7vh' }} />
-            {cutActive && (
-              <>
-                {canSkip && (
-                  <button
-                    onClick={() => { cutFinishRef.current(true); sfx.hover(); }}
-                    className="pointer-events-auto absolute right-4 bottom-[8.5vh] px-4 py-2 border-2 border-gold bg-[rgba(4,6,14,0.7)] font-pixel text-[10px] text-gold cursor-pointer hover:bg-gold/10"
-                  >
-                    ⏭ ПРОПУСТИТЬ [ESC]
-                  </button>
-                )}
-              </>
+            {cutActive && canSkip && (
+              /* v0.62: подсказка пропуска — только визуальная (pointer-events-none);
+                 держится смонтированной всё кино, чтобы работать transition гашения */
+              <div
+                aria-hidden
+                className={`cut-esc-hint absolute right-4 bottom-[8.5vh] px-4 py-2 border-2 border-gold bg-[rgba(4,6,14,0.7)] font-pixel text-[10px] text-gold text-center ${cutEscHint ? 'cut-esc-on' : ''}`}
+              >
+                ДЕРЖИТЕ ESC — ПРОПУСК
+                <span className="block h-[3px] mt-1.5 bg-[rgba(255,207,63,0.18)] overflow-hidden">
+                  {cutEscHint && (
+                    <span
+                      key={cutEscSession}
+                      className="block h-full bg-gold"
+                      style={{ width: '0%', animation: `cutEscFill ${CUT_ESC_HOLD_MS}ms linear forwards` }}
+                    />
+                  )}
+                </span>
+              </div>
             )}
           </div>
         );

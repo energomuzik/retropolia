@@ -8,7 +8,7 @@ import type { CardDef, CardEffect, CellType, ChaosKind, EffectType, GameMap, Rom
 import { CHAOS_LIST, chaosLabel, mkChaosCard, JOY_LIST, SAVE_KIND_CLS, SAVE_KIND_LABEL, SAVE_KIND_SHORT, saveKindOf } from '../types';
 import { renumberByPath, fixLinksAfterDelete } from '../render';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
-import { CartridgeBadge, CoverPickBtn, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
+import { CartridgeBadge, CoverCropBtn, CoverCropModal, CoverPickBtn, PlatName, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
 import { sfx } from '../sound';
 
 const EFFECTS: { key: EffectType; label: string; hasValue?: boolean; hasTarget?: boolean; unit?: string; def: number }[] = [
@@ -201,14 +201,20 @@ export default function TaskEditor() {
   const [romFolderViews, setRomFolderViews] = useState<Record<string, 'list' | 'pics'>>({});
   const [romPicsTileSize, setRomPicsTileSize] = useState(56);
   const [expandRomFolder, setExpandRomFolder] = useState<string | null>(null);
+  /* v0.62: cropJob — ром и картинка, из которой вырезается картридж ножницами ✂ */
+  const [romCropJob, setRomCropJob] = useState<{ rom: RomDef; file: File } | null>(null);
+  /* v0.62: applyRomCover — общая запись для 📷 (готовая картинка) и ✂ (вырезание):
+     обложка сохраняется КАК ЕСТЬ — пропорции честные, показывается целиком */
+  const applyRomCover = async (r: RomDef, cover: string) => {
+    await storeRomCover(r, cover);
+    await refresh();
+    sfx.coin();
+    toast(`Обложка картриджа обновлена: «${r.name}»`, 'ok');
+  };
   const setRomCoverFor = async (r: RomDef, file: File | null) => {
     if (!file) return;
     try {
-      const cover = await fileToCover(file);
-      await storeRomCover(r, cover);
-      await refresh();
-      sfx.coin();
-      toast(`Обложка картриджа обновлена: «${r.name}»`, 'ok');
+      await applyRomCover(r, await fileToCover(file));
     } catch {
       toast('Не удалось прочитать картинку — попробуйте другой файл', 'err');
     }
@@ -244,9 +250,10 @@ export default function TaskEditor() {
           </div>
           <div className="tick-label text-faint mt-1">{cartLabelOf(r)} · сохранений: {svCount}</div>
         </button>
-        {/* v0.61: 📷 обложка картриджа прямо в строке рома */}
+        {/* v0.61: 📷 обложка картриджа прямо в строке рома; v0.62: ✂ — вырезать из картинки */}
         <div className="absolute top-1 right-1 flex items-center gap-1 bg-[rgba(4,6,14,0.72)] px-1 rounded-sm">
-          <CoverPickBtn onPick={(file) => void setRomCoverFor(r, file)} title={r.cover ? 'Заменить обложку картриджа' : 'Загрузить обложку картриджа'} className="text-[10px] leading-none py-0.5 text-faint" />
+          <CoverPickBtn onPick={(file) => void setRomCoverFor(r, file)} title={r.cover ? 'Заменить обложку картриджа' : 'Загрузить обложку картриджа (готовая картинка)'} className="text-[10px] leading-none py-0.5 text-faint" />
+          <CoverCropBtn onPick={(file) => setRomCropJob({ rom: r, file })} title="✂ Вырезать картридж из картинки (фото/скан)" className="text-[10px] leading-none py-0.5 text-faint" />
           {r.cover && (
             <button
               type="button"
@@ -605,6 +612,7 @@ export default function TaskEditor() {
                             selected={fRom === r.id}
                             onPick={() => pickRom(r)}
                             onCover={(file) => void setRomCoverFor(r, file)}
+                            onCropFile={(file) => setRomCropJob({ rom: r, file })}
                             onRemoveCover={() => void clearRomCoverFor(r)}
                           />
                         ))}
@@ -626,7 +634,10 @@ export default function TaskEditor() {
               <p className="text-[11px] text-magma leading-tight">Ромов нет — загрузите их в «Запуске эмулятора» (там же они раскладываются по папкам).</p>
             )}
             {roms.length > 0 && romFolders.length > 0 && (
-              <p className="text-[10px] text-gold leading-tight mt-1">Папки раскрываются кликом — внутри ромы; клик по рому выбирает его для этого задания. Доступны ромы NES, SEGA (Mega Drive / Master System / GAME GEAR), SNES, Game Boy/Color, GBA, SEGA 32X, Atari 2600, PC Engine; кнопка 🖼 у папки покажет ромы КАРТИНКАМИ картриджей/обложек.</p>
+              <p className="text-[10px] text-gold leading-tight mt-1">
+                Папки раскрываются кликом — внутри ромы; клик по рому выбирает его для этого задания.
+                Доступны ромы <PlatName>NES</PlatName>, <PlatName>SEGA</PlatName> (<PlatName>Mega Drive</PlatName> / <PlatName>Master System</PlatName> / <PlatName>GAME GEAR</PlatName>), <PlatName>SNES</PlatName>, <PlatName>Game Boy/Color</PlatName>, <PlatName>GBA</PlatName>, <PlatName>SEGA 32X</PlatName>, <PlatName>Atari 2600</PlatName>, <PlatName>PC Engine</PlatName>; кнопка 🖼 у папки покажет ромы КАРТИНКАМИ картриджей/обложек, у каждого рома есть 📷 (готовая картинка) и ✂ (вырезать картридж из фото/скана).
+              </p>
             )}
           </div>
         )}
@@ -991,7 +1002,17 @@ export default function TaskEditor() {
           onClose={() => setExpandRomFolder(null)}
           onPick={(r) => { pickRom(r); setExpandRomFolder(null); }}
           onCover={(r, file) => void setRomCoverFor(r, file)}
+          onCrop={(r, file) => setRomCropJob({ rom: r, file })}
           onRemoveCover={(r) => void clearRomCoverFor(r)}
+        />
+      )}
+      {/* v0.62: НОЖНИЦЫ — окно вырезания картриджа из картинки */}
+      {romCropJob && (
+        <CoverCropModal
+          rom={romCropJob.rom}
+          file={romCropJob.file}
+          onClose={() => setRomCropJob(null)}
+          onSave={(url) => { void applyRomCover(romCropJob.rom, url); setRomCropJob(null); }}
         />
       )}
       </div>
