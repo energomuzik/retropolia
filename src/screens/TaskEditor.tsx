@@ -4,10 +4,11 @@ import { Coin, Field, GhostBtn, Ic, Panel, PxBtn, Stepper } from '../ui';
 import { cellAtPoint, drawBoard, fitView } from '../render';
 import { idbGet, idbPut, uid } from '../db';
 import { cartridgeArt, cardArt, fileToDataUrl } from '../assets';
-import type { CardDef, CardEffect, CellType, ChaosKind, EffectType, GameMap, SaveKind, TaskDef } from '../types';
+import type { CardDef, CardEffect, CellType, ChaosKind, EffectType, GameMap, RomDef, SaveKind, TaskDef } from '../types';
 import { CHAOS_LIST, chaosLabel, mkChaosCard, JOY_LIST, SAVE_KIND_CLS, SAVE_KIND_LABEL, SAVE_KIND_SHORT, saveKindOf } from '../types';
 import { renumberByPath, fixLinksAfterDelete } from '../render';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
+import { CartridgeBadge, CoverPickBtn, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
 import { sfx } from '../sound';
 
 const EFFECTS: { key: EffectType; label: string; hasValue?: boolean; hasTarget?: boolean; unit?: string; def: number }[] = [
@@ -196,6 +197,28 @@ export default function TaskEditor() {
    клик по рому выбирает его для задания. Никаких списков на сотни строк. */
   const [romFoldersOpen, setRomFoldersOpen] = useState<Record<string, boolean>>({});
   const [romSavesOpen, setRomSavesOpen] = useState(true); // спойлер сохранений под выбранным ромом
+  // v0.61: режим показа ромов в папке (дефолт СПИСОК) + размер плиток + развёрнутое окно картинок + обложки
+  const [romFolderViews, setRomFolderViews] = useState<Record<string, 'list' | 'pics'>>({});
+  const [romPicsTileSize, setRomPicsTileSize] = useState(56);
+  const [expandRomFolder, setExpandRomFolder] = useState<string | null>(null);
+  const setRomCoverFor = async (r: RomDef, file: File | null) => {
+    if (!file) return;
+    try {
+      const cover = await fileToCover(file);
+      await storeRomCover(r, cover);
+      await refresh();
+      sfx.coin();
+      toast(`Обложка картриджа обновлена: «${r.name}»`, 'ok');
+    } catch {
+      toast('Не удалось прочитать картинку — попробуйте другой файл', 'err');
+    }
+  };
+  const clearRomCoverFor = async (r: RomDef) => {
+    await storeRomCover(r, null);
+    await refresh();
+    sfx.click();
+    toast(`Обложка убрана: «${r.name}»`, 'ok');
+  };
   const romFolders = useMemo(() => [...new Set(roms.map((r) => r.folder ?? '').filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru')), [roms]);
   const looseRoms = useMemo(() => roms.filter((r) => !r.folder), [roms]);
   const romsIn = (folder: string) => roms.filter((r) => r.folder === folder);
@@ -204,22 +227,36 @@ export default function TaskEditor() {
     setFSave('');
     sfx.hover();
   };
-  const romPanelRow = (r: { id: string; name: string; ext: string; fileName: string }) => {
+  const romPanelRow = (r: RomDef) => {
     const sel = fRom === r.id;
     const svCount = saves.filter((s) => s.romId === r.id).length;
     return (
       <div key={r.id}>
+        <div className={`relative border-2 px-2.5 py-2 transition-colors ${sel ? 'border-gold bg-gold/10' : 'border-edge bg-panel hover:border-edge2'}`}>
         <button
           onClick={() => pickRom(r)}
           title={`${r.name} — клик: выбрать ром для задания`}
-          className={`w-full text-left border-2 px-2.5 py-2 cursor-pointer transition-colors ${sel ? 'border-gold bg-gold/10' : 'border-edge bg-panel hover:border-edge2'}`}
+          className="w-full text-left cursor-pointer"
         >
           <div className="flex items-center gap-2">
-            <span className={`font-pixel text-[7px] px-1 py-0.5 shrink-0 ${r.ext === 'nes' ? 'bg-sky text-abyss' : 'bg-magma text-abyss'}`}>{r.ext.toUpperCase()}</span>
+            <CartridgeBadge rom={r} h={18} />
             <span className={`font-display text-[11px] uppercase truncate ${sel ? 'text-gold' : 'text-paper'}`}>{sel ? '✓ ' : ''}{r.name}</span>
           </div>
-          <div className="tick-label text-faint mt-1">сохранений: {svCount}</div>
+          <div className="tick-label text-faint mt-1">{cartLabelOf(r)} · сохранений: {svCount}</div>
         </button>
+        {/* v0.61: 📷 обложка картриджа прямо в строке рома */}
+        <div className="absolute top-1 right-1 flex items-center gap-1 bg-[rgba(4,6,14,0.72)] px-1 rounded-sm">
+          <CoverPickBtn onPick={(file) => void setRomCoverFor(r, file)} title={r.cover ? 'Заменить обложку картриджа' : 'Загрузить обложку картриджа'} className="text-[10px] leading-none py-0.5 text-faint" />
+          {r.cover && (
+            <button
+              type="button"
+              className="text-[9px] leading-none text-faint hover:text-coral cursor-pointer"
+              title="Убрать обложку"
+              onClick={() => void clearRomCoverFor(r)}
+            >✕</button>
+          )}
+        </div>
+        </div>
         {/* СПОЙЛЕР СОХРАНЕНИЙ под выбранным ромом — как в редакторе сохранений:
             цветные метки видов (уровень/босс/моё задание/частное), клик выбирает сохранение */}
         {sel && svCount > 0 && (
@@ -507,19 +544,75 @@ export default function TaskEditor() {
             {romFolders.map((f) => {
               const inF = romsIn(f);
               const open = romFoldersOpen[f] ?? false;
+              const pics = (romFolderViews[f] ?? 'list') === 'pics'; // v0.61: дефолт — СПИСОК
               return (
                 <div key={`rf-${f}`} className="mb-2">
-                  <button
-                    onClick={() => setRomFoldersOpen((s) => ({ ...s, [f]: !open }))}
-                    className="w-full flex items-center gap-1 text-left cursor-pointer hover:bg-[rgba(255,93,115,0.08)] px-1 py-0.5"
-                    title={open ? 'Свернуть' : 'Развернуть'}
-                  >
-                    <span className={`text-[10px] shrink-0 ${open ? 'text-gold' : 'text-faint'}`}>{open ? '▾' : '▸'}</span>
-                    <span className="text-[10px] text-faint shrink-0">📁</span>
-                    <span className="font-display text-[10px] uppercase text-dim truncate">{f}</span>
-                    <span className="tick-label text-faint shrink-0">· {inF.length}</span>
-                  </button>
-                  {open && <div className="space-y-1.5 mt-1">{inF.map((r) => romPanelRow(r))}</div>}
+                  <div className="flex items-center gap-0.5">
+                    <button
+                      onClick={() => setRomFoldersOpen((s) => ({ ...s, [f]: !open }))}
+                      className="flex-1 min-w-0 flex items-center gap-1 text-left cursor-pointer hover:bg-[rgba(255,93,115,0.08)] px-1 py-0.5"
+                      title={open ? 'Свернуть' : 'Развернуть'}
+                    >
+                      <span className={`text-[10px] shrink-0 ${open ? 'text-gold' : 'text-faint'}`}>{open ? '▾' : '▸'}</span>
+                      <span className="text-[10px] text-faint shrink-0">📁</span>
+                      <span className="font-display text-[10px] uppercase text-dim truncate">{f}</span>
+                      <span className="tick-label text-faint shrink-0">· {inF.length}</span>
+                    </button>
+                    {/* v0.61: СПИСОК ↔ КАРТИНКИ + разворот картинок в отдельном окне */}
+                    {inF.length > 0 && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => { setRomFolderViews((s) => ({ ...s, [f]: pics ? 'list' : 'pics' })); sfx.click(); }}
+                          title={pics ? 'Показать обычным списком' : 'Показать картинками картриджей/обложек'}
+                          className="text-faint hover:text-gold cursor-pointer shrink-0 px-0.5"
+                        >
+                          {pics ? <span className="text-[11px] leading-none">☰</span> : Ic.grid(11)}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setExpandRomFolder(f); sfx.click(); }}
+                          title="Развернуть список картинок этой папки в отдельном окне"
+                          className="text-faint hover:text-gold cursor-pointer shrink-0 px-0.5"
+                        >
+                          <span className="text-[11px] leading-none">⛶</span>
+                        </button>
+                      </>
+                    )}
+                  </div>
+                  {open && (pics ? (
+                    /* v0.61: КАРТИНКИ картриджей/обложек — клик по плитке выбирает ром для задания */
+                    <div className="mt-1">
+                      <div className="flex items-center gap-1.5 mb-1 px-0.5">
+                        <span className="tick-label text-faint shrink-0">размер</span>
+                        <input
+                          type="range"
+                          min={44}
+                          max={120}
+                          step={2}
+                          value={romPicsTileSize}
+                          onChange={(e) => setRomPicsTileSize(Number(e.target.value))}
+                          className="flex-1 min-w-0 accent-[var(--color-gold)] cursor-pointer"
+                          title="Больше — виднее, меньше — больше помещается"
+                        />
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {inF.map((r) => (
+                          <RomTile
+                            key={r.id}
+                            rom={r}
+                            size={romPicsTileSize}
+                            selected={fRom === r.id}
+                            onPick={() => pickRom(r)}
+                            onCover={(file) => void setRomCoverFor(r, file)}
+                            onRemoveCover={() => void clearRomCoverFor(r)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5 mt-1">{inF.map((r) => romPanelRow(r))}</div>
+                  ))}
                 </div>
               );
             })}
@@ -533,7 +626,7 @@ export default function TaskEditor() {
               <p className="text-[11px] text-magma leading-tight">Ромов нет — загрузите их в «Запуске эмулятора» (там же они раскладываются по папкам).</p>
             )}
             {roms.length > 0 && romFolders.length > 0 && (
-              <p className="text-[10px] text-gold leading-tight mt-1">Папки раскрываются кликом — внутри ромы; клик по рому выбирает его для этого задания.</p>
+              <p className="text-[10px] text-gold leading-tight mt-1">Папки раскрываются кликом — внутри ромы; клик по рому выбирает его для этого задания. Доступны ромы NES, SEGA (Mega Drive / Master System / GAME GEAR), SNES, Game Boy/Color, GBA, SEGA 32X, Atari 2600, PC Engine; кнопка 🖼 у папки покажет ромы КАРТИНКАМИ картриджей/обложек.</p>
             )}
           </div>
         )}
@@ -673,7 +766,10 @@ export default function TaskEditor() {
                     <Field label="Ром (выбирается в ЛЕВОЙ панели «Ромы»)">
                       {fRom ? (
                         <div className="flex items-center gap-2 border-2 border-gold/60 bg-gold/5 px-2.5 py-2">
-                          <span className={`font-pixel text-[7px] px-1 py-0.5 shrink-0 ${roms.find((r) => r.id === fRom)?.ext === 'nes' ? 'bg-sky text-abyss' : 'bg-magma text-abyss'}`}>{(roms.find((r) => r.id === fRom)?.ext ?? '?').toUpperCase()}</span>
+                          {(() => {
+                            const cur = roms.find((r) => r.id === fRom);
+                            return cur ? <CartridgeBadge rom={cur} h={18} /> : null;
+                          })()}
                           <span className="font-display text-[11px] uppercase text-gold truncate">✓ {romName(fRom)}</span>
                         </div>
                       ) : (
@@ -886,6 +982,18 @@ export default function TaskEditor() {
             </>
           )}
         </div>
+      {/* v0.61: развёрнутый список картинок папки ромов — отдельное окно (слайдер размера + прокрутка колёсиком) */}
+      {expandRomFolder && (
+        <RomPicsModal
+          title={expandRomFolder}
+          roms={romsIn(expandRomFolder)}
+          selectedId={fRom}
+          onClose={() => setExpandRomFolder(null)}
+          onPick={(r) => { pickRom(r); setExpandRomFolder(null); }}
+          onCover={(r, file) => void setRomCoverFor(r, file)}
+          onRemoveCover={(r) => void clearRomCoverFor(r)}
+        />
+      )}
       </div>
     </div>
   );

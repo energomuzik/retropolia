@@ -4,6 +4,7 @@ import { EmuVolumeChip, Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
 import SegaBox, { type SegaApi } from '../SegaBox';
 import KeyBinder from '../KeyBinder';
 import { idbDel, idbPut, uid } from '../db';
+import { CartridgeBadge, CoverPickBtn, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
 import type { RomDef, SaveDef, SaveKind } from '../types';
 import { SAVE_KIND_CLS, SAVE_KIND_SHORT, saveKindOf, saveKindNum } from '../types';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
@@ -54,6 +55,10 @@ export default function EmulatorLauncher() {
   const [newFolderName, setNewFolderName] = useState('');
   const [emptyFolders, setEmptyFolders] = useState<string[]>(loadEmptyRomFolders);
   const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({});
+  // v0.61: режим показа ромов в папке (по умолчанию СПИСОК) + размер плиток + развёрнутое окно картинок
+  const [folderViews, setFolderViews] = useState<Record<string, 'list' | 'pics'>>({});
+  const [picsTileSize, setPicsTileSize] = useState(64);
+  const [expandFolder, setExpandFolder] = useState<string | null>(null);
 
   /* ---------- полный экран эмулятора — как в задании в игре ----------
      Кнопка «Во весь экран» рядом с эмулятором разворачивает ТОЛЬКО экран игры,
@@ -345,6 +350,26 @@ export default function EmulatorLauncher() {
     toast(`Папка «${folder}» удалена (ромов: ${inF.length})`, 'err');
   };
 
+  /* v0.61: обложка картриджа — загрузить/заменить/убрать (хранится вместе с ромом) */
+  const setCover = async (r: RomDef, file: File | null) => {
+    if (!file) return;
+    try {
+      const cover = await fileToCover(file);
+      await storeRomCover(r, cover);
+      await refresh();
+      sfx.coin();
+      toast(`Обложка картриджа обновлена: «${r.name}»`, 'ok');
+    } catch {
+      toast('Не удалось прочитать картинку — попробуйте другой файл', 'err');
+    }
+  };
+  const clearCover = async (r: RomDef) => {
+    await storeRomCover(r, null);
+    await refresh();
+    sfx.click();
+    toast(`Обложка убрана: «${r.name}»`, 'ok');
+  };
+
   const delSave = async (s: SaveDef) => {
     rememberDeleted({
       label: `сохранение «${s.name}» (слот ${s.slot})`,
@@ -359,25 +384,38 @@ export default function EmulatorLauncher() {
     toast(`Сохранение (слот ${s.slot}) удалено`, 'err');
   };
 
-  /* строка рома в левой панели (в папке-спойлере или без папки) */
+  /* строка рома в левой панели (в папке-спойлере или без папки);
+     v0.61: вместо плоской надписи платформы — КАРТРИДЖ в форме и цвете своей
+     платформы (или загруженная обложка) + кнопка 📷 загрузки обложки */
   const romRow = (r: RomDef) => (
     <div key={r.id} className={`border-2 px-3 py-2 transition-colors ${romId === r.id ? 'border-coral bg-coral/10' : 'border-edge bg-panel hover:border-edge2'}`}>
       <button className="w-full text-left cursor-pointer" onClick={() => { setRomId(r.id); setRunning(false); sfx.hover(); }}>
         <div className="flex items-center gap-2">
-          <span className={`font-pixel text-[7px] px-1 py-0.5 ${r.ext === 'nes' ? 'bg-sky text-abyss' : 'bg-magma text-abyss'}`}>{r.ext.toUpperCase()}</span>
+          <CartridgeBadge rom={r} h={20} />
           <span className="font-display text-[12px] uppercase text-paper truncate">{r.name}</span>
         </div>
-        <div className="tick-label text-faint mt-1">{fmtSize(r.size)} · сохранений: {saves.filter((s) => s.romId === r.id).length}</div>
+        <div className="tick-label text-faint mt-1">{cartLabelOf(r)} · {fmtSize(r.size)} · сохранений: {saves.filter((s) => s.romId === r.id).length}</div>
       </button>
       <div className="flex items-center justify-between mt-1.5">
         <span className="tick-label text-faint truncate">{r.fileName}</span>
-        <HoldDeleteButton
-          onFire={() => void delRom(r)}
-          label={`ром «${r.name}»`}
-          ariaLabel="Удалить ром"
-          title="Удалить ром"
-          className="text-faint hover:text-coral cursor-pointer"
-        >{Ic.trash(14)}</HoldDeleteButton>
+        <span className="flex items-center gap-2 shrink-0">
+          <CoverPickBtn onPick={(file) => void setCover(r, file)} title={r.cover ? 'Заменить обложку картриджа' : 'Загрузить обложку картриджа (фото реального картриджа)'} className="text-[11px] leading-none text-faint" />
+          {r.cover && (
+            <button
+              type="button"
+              className="text-[10px] leading-none text-faint hover:text-coral cursor-pointer"
+              title="Убрать обложку"
+              onClick={() => void clearCover(r)}
+            >✕</button>
+          )}
+          <HoldDeleteButton
+            onFire={() => void delRom(r)}
+            label={`ром «${r.name}»`}
+            ariaLabel="Удалить ром"
+            title="Удалить ром"
+            className="text-faint hover:text-coral cursor-pointer"
+          >{Ic.trash(14)}</HoldDeleteButton>
+        </span>
       </div>
     </div>
   );
@@ -399,13 +437,14 @@ export default function EmulatorLauncher() {
           <input ref={dirRef} type="file" multiple className="hidden" {...({ webkitdirectory: 'true', directory: 'true' } as Record<string, string>)} onChange={(e) => { void onUploadFolder(e.target.files); e.target.value = ''; }} />
         </div>
         <p className="text-[13px] text-dim mb-6 max-w-3xl">
-          Тестовый стенд: гоняйте ромы (NES, SEGA, SNES, Game Boy/Color, GBA, SEGA 32X, Atari 2600, PC Engine), проходите до нужного места и записывайте состояние одной из ЧЕТЫРЁХ кнопок:
+          Тестовый стенд: гоняйте ромы (NES, SEGA Mega Drive / Master System / <span className="text-gold font-display uppercase">GAME GEAR</span>, SNES, Game Boy/Color, GBA, SEGA 32X, Atari 2600, PC Engine) — в том числе доступны для запуска РОМЫ GAME GEAR (.gg), они играют в родных пропорциях 160×144. Проходите до нужного места и записывайте состояние одной из ЧЕТЫРЁХ кнопок:
           <span className="text-gold font-display uppercase"> «Сохранить уровень»</span> (Уровень 1, 2, …),
           <span className="text-coral font-display uppercase"> «Сохранить босса»</span> (Босс 1, 2, …),
           <span className="text-teal font-display uppercase"> «Сохранить моё задание»</span> (одно на игру, перезаписывается) и
           <span className="text-sky font-display uppercase"> «Частное сохранение»</span> («Назови меня N» — переименовывается ✏).
           В игре после захвата ячейки выбираются уровни/боссы/моё задание; частные — только в редакторе заданий.
           Ромы раскладываются по папкам-спойлерам (как тайлы): создайте папку кнопкой «+ Папка», выберите её в списке и загрузите сразу пачку файлов.
+          Каждому рому можно дать ОБЛОЖКУ КАРТРИДЖА (📷 в строке рома): в режиме КАРТИНОК (кнопка 🖼 на папке) ромы показываются фотографиями реальных картриджей, а кнопка ⛶ разворачивает большой список картинок в отдельном окне.
           Удаление папок, ромов и сохранений подчиняется режиму из «Опций», а Ctrl+Z вернёт последнее удалённое.
         </p>
 
@@ -444,6 +483,7 @@ export default function EmulatorLauncher() {
               {folderNames.map((f) => {
                 const inF = romsIn(f);
                 const collapsed = collapsedFolders[f] ?? false;
+                const pics = (folderViews[f] ?? 'list') === 'pics'; // v0.61: режим показа папки (дефолт — СПИСОК)
                 return (
                   <div key={`f-${f}`}>
                     <div className="flex items-center gap-1 mb-1">
@@ -457,6 +497,27 @@ export default function EmulatorLauncher() {
                         <span className="font-display text-[10px] uppercase text-dim truncate">{f}</span>
                         <span className="tick-label text-faint shrink-0">· {inF.length}</span>
                       </button>
+                      {/* v0.61: переключатель СПИСОК ↔ КАРТИНКИ + разворот картинок в отдельном окне */}
+                      {inF.length > 0 && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => { setFolderViews((s) => ({ ...s, [f]: pics ? 'list' : 'pics' })); sfx.click(); }}
+                            title={pics ? 'Показать обычным списком' : 'Показать картинками картриджей/обложек'}
+                            className="text-faint hover:text-gold cursor-pointer shrink-0 px-0.5"
+                          >
+                            {pics ? <span className="text-[11px] leading-none">☰</span> : Ic.grid(11)}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { setExpandFolder(f); sfx.click(); }}
+                            title="Развернуть список картинок этой папки в отдельном окне"
+                            className="text-faint hover:text-gold cursor-pointer shrink-0 px-0.5"
+                          >
+                            <span className="text-[11px] leading-none">⛶</span>
+                          </button>
+                        </>
+                      )}
                       <HoldDeleteButton
                         onFire={() => void delRomFolder(f)}
                         label={`папку ромов «${f}» (${inF.length})`}
@@ -465,7 +526,39 @@ export default function EmulatorLauncher() {
                         className="text-faint hover:text-coral cursor-pointer shrink-0 px-0.5"
                       >{Ic.cross(10)}</HoldDeleteButton>
                     </div>
-                    {!collapsed && <div className="space-y-1.5">{inF.map((r) => romRow(r))}</div>}
+                    {!collapsed && (pics ? (
+                      /* v0.61: КАРТИНКИ картриджей/обложек этой папки + слайдер размера плиток */
+                      <div>
+                        <div className="flex items-center gap-1.5 mb-1 px-0.5">
+                          <span className="tick-label text-faint shrink-0">размер</span>
+                          <input
+                            type="range"
+                            min={48}
+                            max={140}
+                            step={2}
+                            value={picsTileSize}
+                            onChange={(e) => setPicsTileSize(Number(e.target.value))}
+                            className="flex-1 min-w-0 accent-[var(--color-coral)] cursor-pointer"
+                            title="Больше — виднее, меньше — больше помещается"
+                          />
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {inF.map((r) => (
+                            <RomTile
+                              key={r.id}
+                              rom={r}
+                              size={picsTileSize}
+                              selected={romId === r.id}
+                              onPick={() => { setRomId(r.id); setRunning(false); sfx.hover(); }}
+                              onCover={(file) => void setCover(r, file)}
+                              onRemoveCover={() => void clearCover(r)}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5">{inF.map((r) => romRow(r))}</div>
+                    ))}
                   </div>
                 );
               })}
@@ -484,7 +577,7 @@ export default function EmulatorLauncher() {
               {roms.length === 0 && (
                 <div className="text-center py-8 px-3">
                   <span className="text-coral inline-block floaty">{Ic.cart(36)}</span>
-                  <p className="text-[12px] text-dim mt-3">Загрузите файл .nes, .md, .sfc, .gb, .gba, .pce — и вперёд</p>
+                  <p className="text-[12px] text-dim mt-3">Загрузите файл .nes, .md, .sms, .gg (GAME GEAR), .sfc, .gb, .gba, .pce — и вперёд</p>
                   <p className="text-[10px] text-faint mt-2 leading-tight">Создайте папку («+ Папка»), выберите её в списке — и жмите «Загрузить ромы»: можно сразу несколько файлов</p>
                 </div>
               )}
@@ -623,6 +716,19 @@ export default function EmulatorLauncher() {
           </div>
         </div>
       </div>
+
+      {/* v0.61: развёрнутый список картинок папки — отдельное окно со своим слайдером размера и прокруткой колёсиком */}
+      {expandFolder && (
+        <RomPicsModal
+          title={expandFolder}
+          roms={romsIn(expandFolder)}
+          selectedId={romId}
+          onClose={() => setExpandFolder(null)}
+          onPick={(r) => { setRomId(r.id); setRunning(false); setExpandFolder(null); sfx.hover(); }}
+          onCover={(r, file) => void setCover(r, file)}
+          onRemoveCover={(r) => void clearCover(r)}
+        />
+      )}
 
       {/* наш редактор управления (клавиатура + геймпад) */}
       {controlsOpen && (

@@ -4397,7 +4397,8 @@ export default function GameScreen() {
 
       {tplOpen && <TemplateModal cellIdx={active?.pos ?? 0} onClose={() => setTplOpen(false)} />}
 
-      {/* ---------- v0.56: КАТ-СЦЕНА — кино-полосы + кнопка «Пропустить» (v0.60 — без плашки) ---------- */}
+      {/* ---------- v0.56: КАТ-СЦЕНА — кино-полосы + кнопка «Пропустить» (v0.60 — без плашки;
+           v0.61 — у «Растворяющихся» тоже РЕЗКИЙ край: сплошной чёрный без градиента) ---------- */}
       {(cutActive || cutBarsOut) && (() => {
         const canSkip = cutRef.current?.def.skippable !== false;
         const dissolving = (options.cutBars ?? 'dissolve') !== 'classic'; // v0.57: стиль полос из общих опций
