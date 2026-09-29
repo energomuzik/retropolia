@@ -382,6 +382,9 @@ export default function GameScreen() {
   const [rSaveState, setRSaveState] = useState<unknown>(null);
   const [rEmuKey, setREmuKey] = useState(0);
   const rRomDef = myRubgTask ? st.roms.find((r) => r.id === myRubgTask.romId) : undefined;
+  /* v0.60: расширение для ПРОПОРЦИЙ полного экрана: старые SEGA-ромы хранятся как 'sega'
+     (gg/sms/md — всё внутри), поэтому .gg без распознавания получил бы 4:3 вместо родных 160×144 */
+  const rRomExt = rRomDef ? (rRomDef.ext === 'sega' ? (rRomDef.fileName.split('.').pop() ?? 'md').toLowerCase() : rRomDef.ext) : undefined;
   useEffect(() => {
     let on = true;
     setRRomBuf(null); setRSaveState(null);
@@ -410,6 +413,8 @@ export default function GameScreen() {
   const [qSaveState, setQSaveState] = useState<unknown>(null);
   const [qEmuKey, setQEmuKey] = useState(0);
   const qRomDef = myQTask ? st.roms.find((r) => r.id === myQTask.romId) : undefined;
+  /* v0.60: см. rRomExt — реальное расширение для пропорций полного экрана */
+  const qRomExt = qRomDef ? (qRomDef.ext === 'sega' ? (qRomDef.fileName.split('.').pop() ?? 'md').toLowerCase() : qRomDef.ext) : undefined;
   useEffect(() => {
     let on = true;
     setQRomBuf(null); setQSaveState(null);
@@ -3405,7 +3410,7 @@ export default function GameScreen() {
                             </GhostBtn>
                           </div>
                           <div ref={emuWrapRef} className={isFs ? 'bg-[#05070f] h-full w-full flex items-center justify-center p-4' : ''}>
-                            <div style={isFs ? { width: `min(92vw, calc(88vh * ${consoleAspect(taskRom?.ext).toFixed(4)}))` } : undefined}>
+                            <div style={isFs ? { width: `min(92vw, calc(88vh * ${consoleAspect(taskRom?.ext === 'sega' ? segExt : taskRom?.ext).toFixed(4)}))` } : undefined}>
                         {romBuf ? (
                           <SegaBox
                             key={emuKey}
@@ -3860,7 +3865,7 @@ export default function GameScreen() {
                     </div>
                     <div className="min-w-0 space-y-3">
                       <div ref={rubgEmuWrapRef} className={isFs ? 'bg-[#05070f] h-full w-full flex items-center justify-center p-4' : ''}>
-                        <div style={isFs ? { width: `min(92vw, calc(88vh * ${consoleAspect(qRomDef?.ext).toFixed(4)}))` } : undefined}>
+                        <div style={isFs ? { width: `min(92vw, calc(88vh * ${consoleAspect(qRomExt).toFixed(4)}))` } : undefined}>
                   {qRomBuf ? (
                     <SegaBox
                       key={qEmuKey}
@@ -3974,7 +3979,7 @@ export default function GameScreen() {
                   {/* правая колонка: эмулятор + итоги */}
                   <div className="min-w-0 space-y-3">
                     <div ref={rubgEmuWrapRef} className={isFs ? 'bg-[#05070f] h-full w-full flex items-center justify-center p-4' : ''}>
-                      <div style={isFs ? { width: `min(92vw, calc(88vh * ${consoleAspect(rRomDef?.ext).toFixed(4)}))` } : undefined}>
+                      <div style={isFs ? { width: `min(92vw, calc(88vh * ${consoleAspect(rRomExt).toFixed(4)}))` } : undefined}>
                   {rRomBuf ? (
                     <SegaBox
                       key={rEmuKey}
@@ -4392,7 +4397,7 @@ export default function GameScreen() {
 
       {tplOpen && <TemplateModal cellIdx={active?.pos ?? 0} onClose={() => setTplOpen(false)} />}
 
-      {/* ---------- v0.56: КАТ-СЦЕНА — кино-полосы + кнопка «Пропустить» ---------- */}
+      {/* ---------- v0.56: КАТ-СЦЕНА — кино-полосы + кнопка «Пропустить» (v0.60 — без плашки) ---------- */}
       {(cutActive || cutBarsOut) && (() => {
         const canSkip = cutRef.current?.def.skippable !== false;
         const dissolving = (options.cutBars ?? 'dissolve') !== 'classic'; // v0.57: стиль полос из общих опций
@@ -4406,7 +4411,6 @@ export default function GameScreen() {
             <div className={`absolute inset-x-0 bottom-0 bg-black ${barCls('bottom')}`} style={{ height: dissolving ? '13vh' : '7vh' }} />
             {cutActive && (
               <>
-                <div className="absolute left-1/2 -translate-x-1/2 top-[7.8vh] font-pixel text-[9px] text-gold/80 tracking-widest blink-hard">🎬 КАТ-СЦЕНА</div>
                 {canSkip && (
                   <button
                     onClick={() => { cutFinishRef.current(true); sfx.hover(); }}

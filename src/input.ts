@@ -354,6 +354,7 @@ export function consoleAspect(ext: string | undefined): number {
     case 'gb':
     case 'gbc': return 160 / 144;      // 1.1111
     case 'gba': return 240 / 160;      // 1.5
+    case 'gg': return 160 / 144;       // v0.60: SEGA GAME GEAR — родные пропорции 160×144 (1.1111)
     default: return 4 / 3;             // SEGA/PCE/32X/Atari — 1.3333
   }
 }

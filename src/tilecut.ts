@@ -19,6 +19,7 @@ export interface ExtractParams {
   minSize: number;  // минимальная сторона тайла, px
   mergeGap: number; // склейка частей: раздувание маски, px (0 = выкл)
   keepText: boolean;// оставить мелкий ч/б текст (подписи на листе)
+  oneSize: boolean; // v0.60: один размер кадров — все тайлы на холсте самого крупного, без масштабирования, прижаты к земле
 }
 
 export interface ExtractInfo { W: number; H: number; data: Uint8ClampedArray }
@@ -176,8 +177,11 @@ export async function extractTilesFromImage(file: File, p: ExtractParams, infoRe
     for (let q = 0; q < N; q++) if (data[q * 4 + 3] < 128) transp++;
     const hasAlpha = transp > N * 0.25;
 
-    // 2) цвет фона: АВТО = самый частый цвет ВСЕЙ картинки (квантование 5 бит/канал —
-    //    шум JPEG не дробит цвет); или выбранный пользователем (пипетка/палитра)
+    // 2) цвет фона: АВТО = самый частый цвет КОЛЬЦА ПО ПЕРИМЕТРУ листа (v0.60: край листа —
+    //    почти всегда фон; раньше фоном называли самый частый цвет ВСЕЙ картинки, и на листе
+    //    с чёрными персонажами «авто» вырезал чёрный). Кандидат с края принимается только
+    //    если он занимает ≥20% кольца И ≥100 сэмплов — иначе откат к старому способу.
+    //    Или выбранный пользователем (пипетка/палитра). Квантование 5 бит/канал — шум JPEG не дробит цвет
     let foundBg = '';
     let br = 0, bgc = 0, bb = 0;
     if (p.bgMode === 'custom') {
@@ -187,19 +191,31 @@ export async function extractTilesFromImage(file: File, p: ExtractParams, infoRe
       bb = parseInt(h.slice(4, 6), 16) || 0;
       foundBg = p.bg;
     } else {
-      const buckets = new Map<number, { r: number; g: number; b: number; n: number }>();
-      for (let q = 0; q < N; q++) {
-        const i = q * 4;
-        if (data[i + 3] < 128) continue;
-        const key = ((data[i] >> 3) << 10) | ((data[i + 1] >> 3) << 5) | (data[i + 2] >> 3);
-        const b = buckets.get(key);
-        if (b) { b.r += data[i]; b.g += data[i + 1]; b.b += data[i + 2]; b.n++; }
-        else buckets.set(key, { r: data[i], g: data[i + 1], b: data[i + 2], n: 1 });
-      }
-      const list = Array.from(buckets.values());
-      if (!list.length) return { tiles: [], bg: '#000000', hasAlpha };
-      list.sort((a, b) => b.n - a.n);
-      br = Math.round(list[0].r / list[0].n); bgc = Math.round(list[0].g / list[0].n); bb = Math.round(list[0].b / list[0].n);
+      const bucketOf = (r: number, g: number, b: number) => ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+      const pick = (want: (x: number, y: number) => boolean) => {
+        const buckets = new Map<number, { r: number; g: number; b: number; n: number }>();
+        let seen = 0;
+        for (let q = 0; q < N; q++) {
+          const i = q * 4;
+          if (data[i + 3] < 128) continue;
+          if (!want(q % W, (q / W) | 0)) continue;
+          seen++;
+          const key = bucketOf(data[i], data[i + 1], data[i + 2]);
+          const b = buckets.get(key);
+          if (b) { b.r += data[i]; b.g += data[i + 1]; b.b += data[i + 2]; b.n++; }
+          else buckets.set(key, { r: data[i], g: data[i + 1], b: data[i + 2], n: 1 });
+        }
+        const list = Array.from(buckets.values());
+        if (!list.length) return null;
+        list.sort((a, b) => b.n - a.n);
+        return { win: list[0], seen };
+      };
+      const ring = pick((x, y) => x === 0 || y === 0 || x === W - 1 || y === H - 1); // кольцо 1 px по периметру
+      const whole = pick(() => true);
+      const ringOk = ring && ring.win.n >= 100 && ring.win.n >= ring.seen * 0.2;
+      const src = ringOk ? ring.win : (whole ? whole.win : null);
+      if (!src) return { tiles: [], bg: '#000000', hasAlpha };
+      br = Math.round(src.r / src.n); bgc = Math.round(src.g / src.n); bb = Math.round(src.b / src.n);
       const hex = (v: number) => Math.round(v).toString(16).padStart(2, '0');
       foundBg = `#${hex(br)}${hex(bgc)}${hex(bb)}`;
     }
@@ -207,12 +223,15 @@ export async function extractTilesFromImage(file: File, p: ExtractParams, infoRe
     const tol = p.thr;
 
     // 3) маска переднего плана: НЕ прозрачный И НЕ близкий к фону
-    //    (допуск — сумма |ΔR|+|ΔG|+|ΔB|, как в проверенном отдельном экстракторе)
+    //    (допуск — сумма |ΔR|+|ΔG|+|ΔB|, как в проверенном отдельном экстракторе).
+    //    v0.60: PNG с альфой (≥25% прозрачных) — ЦВЕТОВОЙ КЛЮЧ НЕ ПРИМЕНЯЕТСЯ ВОВСЕ:
+    //    фон и так прозрачен, а ключ по «самому частому цвету» вырезал бы куски спрайтов
+    const useKey = !hasAlpha;
     const fg = new Uint8Array(N);
     for (let q = 0; q < N; q++) {
       const i = q * 4;
       if (data[i + 3] < 128) continue;
-      if (Math.abs(data[i] - br) + Math.abs(data[i + 1] - bgc) + Math.abs(data[i + 2] - bb) > tol) fg[q] = 1;
+      if (useKey && Math.abs(data[i] - br) + Math.abs(data[i + 1] - bgc) + Math.abs(data[i + 2] - bb) > tol) fg[q] = 1;
     }
 
     // 4) пятна ищем по РАЗДУТОЙ маске (склейка частей через щель работает по
@@ -257,7 +276,8 @@ export async function extractTilesFromImage(file: File, p: ExtractParams, infoRe
         for (let x = 0; x < w; x++) {
           const s = ((c.y0 + y) * W + (c.x0 + x)) * 4;
           if (Math.abs(data[s] - lr) + Math.abs(data[s + 1] - lg) + Math.abs(data[s + 2] - lb2) <= tol) lb[y * w + x] = 1;
-          if (Math.abs(data[s] - br) + Math.abs(data[s + 1] - bgc) + Math.abs(data[s + 2] - bb) <= tol) gb[y * w + x] = 1;
+          // v0.60: ключ фона — только для листов БЕЗ альфы (см. useKey выше)
+          if (useKey && Math.abs(data[s] - br) + Math.abs(data[s + 1] - bgc) + Math.abs(data[s + 2] - bb) <= tol) gb[y * w + x] = 1;
         }
       }
       const outer = floodBorder(lb, w, h);
@@ -293,9 +313,14 @@ export async function extractTilesFromImage(file: File, p: ExtractParams, infoRe
     if (!ordered.length) return { tiles: [], bg: foundBg, hasAlpha };
 
     // 7) вырезаем каждый тайл в PNG с прозрачным фоном; маску обрезаем ТУГО
-    //    (убираем прозрачные поля, оставшиеся от раздувания маски)
-    const out: TileImg[] = [];
-    ordered.forEach((t, ci) => {
+    //    (убираем прозрачные поля, оставшиеся от раздувания маски).
+    //    v0.60: «ОДИН РАЗМЕР (АНИМАЦИИ)» — все кадры ложатся на холст САМОГО КРУПНОГО
+    //    тайла (по ширине и высоте отдельно), БЕЗ масштабирования, прижаты к линии
+    //    земли (низ кадра) и по центру по горизонтали: позы одного персонажа разной
+    //    высоты — в полный рост и наполовину под пол — получают один размер кадра,
+    //    и анимация не дёргается
+    const boxes: { t: ExTile; w: number; h: number; ox: number; oy: number }[] = [];
+    ordered.forEach((t) => {
       let bx0 = t.w, by0 = t.h, bx1 = -1, by1 = -1;
       for (let y = 0; y < t.h; y++) {
         for (let x = 0; x < t.w; x++) {
@@ -307,16 +332,24 @@ export async function extractTilesFromImage(file: File, p: ExtractParams, infoRe
         }
       }
       if (bx1 < 0) return;
-      const w = bx1 - bx0 + 1, h = by1 - by0 + 1;
-      const ox = t.x + bx0, oy = t.y + by0; // тугой bbox в координатах листа
+      boxes.push({ t, w: bx1 - bx0 + 1, h: by1 - by0 + 1, ox: t.x + bx0, oy: t.y + by0 });
+    });
+    const maxW = boxes.reduce((m, b) => Math.max(m, b.w), 1);
+    const maxH = boxes.reduce((m, b) => Math.max(m, b.h), 1);
+    const out: TileImg[] = [];
+    boxes.forEach((b, ci) => {
+      const w = p.oneSize ? maxW : b.w;
+      const h = p.oneSize ? maxH : b.h;
+      const dx = p.oneSize ? Math.floor((maxW - b.w) / 2) : 0; // центр по горизонтали
+      const dy = p.oneSize ? maxH - b.h : 0;                   // прижат к линии земли
       const tcv = document.createElement('canvas');
       tcv.width = w; tcv.height = h;
       const tcx = tcv.getContext('2d')!;
       const timg = tcx.createImageData(w, h);
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          if (!t.mask[(by0 + y) * t.w + (bx0 + x)]) continue;
-          const si = ((oy + y) * W + (ox + x)) * 4, di = (y * w + x) * 4;
+      for (let y = 0; y < b.h; y++) {
+        for (let x = 0; x < b.w; x++) {
+          if (!b.t.mask[(b.oy - b.t.y + y) * b.t.w + (b.ox - b.t.x + x)]) continue;
+          const si = ((b.oy + y) * W + (b.ox + x)) * 4, di = ((dy + y) * w + (dx + x)) * 4;
           timg.data[di] = data[si];
           timg.data[di + 1] = data[si + 1];
           timg.data[di + 2] = data[si + 2];

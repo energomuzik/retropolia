@@ -262,7 +262,7 @@ export default function MapEditor() {
   const [tilesOpen, setTilesOpen] = useState(false); // спойлер «Карты-плитки» (плиточный режим) в левой панели
   const [selTileId, setSelTileId] = useState<string | null>(null); // активная карта-плитка (схема + её фон)
   const [bgScope, setBgScope] = useState<'plate' | 'all'>('plate'); // куда ложится НОВЫЙ фон: «на эту плитку» (своя локация) или «на всю карту»
-  const [extract, setExtract] = useState<{ file: File; src: string; name: string; busy: boolean; bgMode: 'auto' | 'custom'; bg: string; foundBg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; tiles: TileImg[] } | null>(null);
+  const [extract, setExtract] = useState<{ file: File; src: string; name: string; busy: boolean; bgMode: 'auto' | 'custom'; bg: string; foundBg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; oneSize: boolean; tiles: TileImg[] } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
@@ -1139,12 +1139,12 @@ export default function MapEditor() {
   const exRunRef = useRef(0);
   const exTimerRef = useRef<number | null>(null);
 
-  const runExtract = async (base: { file: File; src: string; bgMode: 'auto' | 'custom'; bg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; name: string }, patch: Partial<typeof base>) => {
+  const runExtract = async (base: { file: File; src: string; bgMode: 'auto' | 'custom'; bg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; oneSize: boolean; name: string }, patch: Partial<typeof base>) => {
     const next = { ...base, ...patch };
     setExtract((ex) => (ex && ex.src === next.src ? { ...ex, ...next, busy: true } : ex));
     const run = ++exRunRef.current;
     try {
-      const r = await extractTilesFromImage(next.file, { bgMode: next.bgMode, bg: next.bg, thr: next.thr, minSize: next.minSize, mergeGap: next.mergeGap, keepText: next.keepText }, exInfoRef);
+      const r = await extractTilesFromImage(next.file, { bgMode: next.bgMode, bg: next.bg, thr: next.thr, minSize: next.minSize, mergeGap: next.mergeGap, keepText: next.keepText, oneSize: next.oneSize }, exInfoRef);
       if (exRunRef.current !== run) return;
       setExtract((ex) => (ex && ex.src === next.src ? { ...ex, tiles: r.tiles, foundBg: r.bg, busy: false } : ex));
       if (!r.tiles.length) toast('Ничего не нашлось: снизьте мин. размер, поменяйте фон или допуск', 'err');
@@ -1157,7 +1157,7 @@ export default function MapEditor() {
   };
 
   /* смена параметра: мгновенно показываем цифру, пересчёт — с небольшой задержкой */
-  const tuneExtract = (patch: { bgMode?: 'auto' | 'custom'; bg?: string; thr?: number; minSize?: number; mergeGap?: number; keepText?: boolean }) => {
+  const tuneExtract = (patch: { bgMode?: 'auto' | 'custom'; bg?: string; thr?: number; minSize?: number; mergeGap?: number; keepText?: boolean; oneSize?: boolean }) => {
     if (!extract) return;
     const base = { ...extract, ...patch };
     setExtract(base);
@@ -1190,7 +1190,7 @@ export default function MapEditor() {
     if (!f) return;
     if (!f.type.startsWith('image/')) { toast('Это не картинка', 'err'); return; }
     const name = f.name.replace(/\.[a-z0-9]+$/i, '').slice(0, 20) || 'Вырезанное';
-    const st = { file: f, src: URL.createObjectURL(f), name, busy: true, bgMode: 'auto' as const, bg: '#000000', foundBg: '', thr: 25, minSize: 6, mergeGap: 1, keepText: false, tiles: [] as TileImg[] };
+    const st = { file: f, src: URL.createObjectURL(f), name, busy: true, bgMode: 'auto' as const, bg: '#000000', foundBg: '', thr: 25, minSize: 6, mergeGap: 1, keepText: false, oneSize: true, tiles: [] as TileImg[] };
     setExtract(st);
     sfx.hover();
     await runExtract(st, {});
@@ -4732,6 +4732,14 @@ export default function MapEditor() {
                   className={`px-2 py-1 text-[9px] font-pixel border-2 cursor-pointer ${extract.keepText ? 'border-gold text-gold' : 'border-edge text-faint hover:text-dim'}`}
                   title="Мелкий чёрно-белый текст (подписи автора на листе): выбросить или оставить"
                 >{extract.keepText ? 'ОСТАВИТЬ' : 'ВЫБРОСИТЬ'}</button>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-dim">Один размер (анимации)</span>
+                <button
+                  onClick={() => tuneExtract({ oneSize: !extract.oneSize })}
+                  className={`px-2 py-1 text-[9px] font-pixel border-2 cursor-pointer ${extract.oneSize ? 'border-gold text-gold' : 'border-edge text-faint hover:text-dim'}`}
+                  title="Все кадры — на холсте самого крупного тайла (без масштабирования, прижаты к линии земли): позы разной высоты получают один размер кадра, анимация не дёргается. Выключите, если нужны кадры своих размеров"
+                >{extract.oneSize ? 'ВКЛ' : 'ВЫКЛ'}</button>
               </div>
               <p className="text-[10px] text-faint leading-tight">
                 ЛИШНЕЕ прилипло к тайлам — уменьшите допуск. Тайл РАЗВАЛИЛСЯ на части — увеличьте склейку.

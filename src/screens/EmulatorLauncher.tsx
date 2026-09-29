@@ -43,6 +43,7 @@ export default function EmulatorLauncher() {
   // единый API эмулятора EmulatorJS (и NES, и SEGA)
   const ejsApiRef = useRef<SegaApi | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const dirRef = useRef<HTMLInputElement>(null); // v0.60: выбор ЦЕЛОЙ ПАПКИ ромов (webkitdirectory)
   // какой ром сейчас реально крутится в эмуляторе (для загрузки сохранений без перезапуска)
   const launchedRomRef = useRef<string | null>(null);
   // наш редактор управления (открывается кнопкой «Управление» рядом с эмулятором)
@@ -145,11 +146,12 @@ export default function EmulatorLauncher() {
     };
   }, []);
 
-  /* загрузка СРАЗУ НЕСКОЛЬКИХ ромов в выбранную папку (select над кнопкой) */
-  const onUpload = async (files: FileList | null) => {
+  /* загрузка СРАЗУ НЕСКОЛЬКИХ ромов в выбранную папку (select над кнопкой);
+     v0.60: folderOverride — имя папки при загрузке ЦЕЛОЙ ПАПКИ кнопкой «Загрузить папку» */
+  const onUpload = async (files: FileList | null, folderOverride?: string) => {
     const list = Array.from(files ?? []);
     if (!list.length) return;
-    const folder = uploadFolder.trim().slice(0, 24);
+    const folder = (folderOverride ?? uploadFolder).trim().slice(0, 24);
     let lastId: string | null = null;
     let loaded = 0, skipped = 0;
     for (const f of list) {
@@ -174,6 +176,18 @@ export default function EmulatorLauncher() {
     setRunning(false);
     sfx.coin();
     toast(skipped ? `Ромов загружено: ${loaded} → папка «${folder || 'Без папки'}» · пропущено чужих: ${skipped}` : `Ромов загружено: ${loaded}${folder ? ` → папка «${folder}»` : ''}`, 'ok');
+  };
+
+  /* v0.60: «ЗАГРУЗИТЬ ПАПКУ» — скрытый input с webkitdirectory выбирает папку на диске;
+     имя папки = первый сегмент webkitRelativePath (≤24 символов, fallback «Ромы»),
+     папка сама встаёт на панель, спойлер называется как папка на диске */
+  const onUploadFolder = async (files: FileList | null) => {
+    const list = Array.from(files ?? []);
+    if (!list.length) return;
+    const raw = ((list[0] as File & { webkitRelativePath?: string }).webkitRelativePath || '').split('/')[0].trim();
+    const folder = (raw || 'Ромы').slice(0, 24);
+    setUploadFolder(folder);
+    await onUpload(files, folder);
   };
 
   /* создать папку: имя вводится в строке под списком; пустая папка хранится в localStorage */
@@ -380,7 +394,9 @@ export default function EmulatorLauncher() {
             <span className="text-coral">{Ic.chip(22)}</span> Запуск эмулятора
           </h1>
           <PxBtn color="coral" className="ml-auto" onClick={() => fileRef.current?.click()}>{Ic.upload(15)} Загрузить ромы</PxBtn>
+          <PxBtn color="coral" onClick={() => dirRef.current?.click()}>{Ic.folder(15)} Загрузить папку</PxBtn>
           <input ref={fileRef} type="file" accept=".nes,.md,.gen,.bin,.sms,.gg,.sfc,.smc,.fig,.gb,.gbc,.gba,.32x,.a26,.pce" multiple className="hidden" onChange={(e) => { void onUpload(e.target.files); e.target.value = ''; }} />
+          <input ref={dirRef} type="file" multiple className="hidden" {...({ webkitdirectory: 'true', directory: 'true' } as Record<string, string>)} onChange={(e) => { void onUploadFolder(e.target.files); e.target.value = ''; }} />
         </div>
         <p className="text-[13px] text-dim mb-6 max-w-3xl">
           Тестовый стенд: гоняйте ромы (NES, SEGA, SNES, Game Boy/Color, GBA, SEGA 32X, Atari 2600, PC Engine), проходите до нужного места и записывайте состояние одной из ЧЕТЫРЁХ кнопок:
