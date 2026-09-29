@@ -3,8 +3,8 @@ import { useApp, getRomData } from '../store';
 import { EmuVolumeChip, Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
 import SegaBox, { type SegaApi } from '../SegaBox';
 import KeyBinder from '../KeyBinder';
-import { idbDel, idbPut, uid } from '../db';
-import { CartridgeBadge, CoverCropBtn, CoverCropModal, CoverPickBtn, PlatName, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
+import { idbDel, idbGet, idbPut, uid } from '../db';
+import { CartridgeBadge, CartCutModal, CoverCropBtn, CoverPickBtn, CoverRemoveBtn, PlatName, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
 import type { RomDef, SaveDef, SaveKind } from '../types';
 import { SAVE_KIND_CLS, SAVE_KIND_SHORT, saveKindOf, saveKindNum } from '../types';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
@@ -358,7 +358,9 @@ export default function EmulatorLauncher() {
   /* v0.61: обложка картриджа — загрузить/заменить/убрать (хранится вместе с ромом)
      v0.62: applyCover — общая запись для 📷 (готовая картинка) и ✂ (вырезание);
      обложка сохраняется КАК ЕСТЬ — размер и соотношение сторон не искажаются,
-     показывается целиком (contain), без обрезки и сплющивания */
+     показывается целиком (contain), без обрезки и сплющивания
+     v0.63: «убрать обложку» — по тем же правилам, что удаление тайлов в редакторе
+     карт: режим из Опций (у кнопки ✕) + запоминание для Ctrl+Z (вернёт обложку) */
   const applyCover = async (r: RomDef, cover: string) => {
     await storeRomCover(r, cover);
     await refresh();
@@ -374,9 +376,18 @@ export default function EmulatorLauncher() {
     }
   };
   const clearCover = async (r: RomDef) => {
+    const old = r.cover;
+    if (old) {
+      rememberDeleted({
+        label: `обложку картриджа «${r.name}»`,
+        restore: async () => {
+          const cur = await idbGet<RomDef>('roms', r.id);
+          if (cur) { await idbPut('roms', r.id, { ...cur, cover: old }); await refresh(); }
+        },
+      });
+    }
     await storeRomCover(r, null);
     await refresh();
-    sfx.click();
     toast(`Обложка убрана: «${r.name}»`, 'ok');
   };
 
@@ -429,14 +440,9 @@ export default function EmulatorLauncher() {
         <span className="tick-label text-faint truncate">{r.fileName}</span>
         <span className="flex items-center gap-2 shrink-0">
           <CoverPickBtn onPick={(file) => void setCover(r, file)} title={r.cover ? 'Заменить обложку картриджа' : 'Загрузить обложку картриджа (готовая картинка)'} className="text-[11px] leading-none text-faint" />
-          <CoverCropBtn onPick={(file) => setCropJob({ rom: r, file })} title="✂ Вырезать картридж из картинки (фото/скан) — рядом с 📷" className="text-[11px] leading-none text-faint" />
+          <CoverCropBtn onPick={(file) => setCropJob({ rom: r, file })} title="✂ Вырезать картридж из картинки — вырезатель тайлов, как в редакторе карт" className="text-[11px] leading-none text-faint" />
           {r.cover && (
-            <button
-              type="button"
-              className="text-[10px] leading-none text-faint hover:text-coral cursor-pointer"
-              title="Убрать обложку"
-              onClick={() => void clearCover(r)}
-            >✕</button>
+            <CoverRemoveBtn romName={r.name} onRemove={() => void clearCover(r)} className="text-[10px] leading-none text-faint hover:text-coral cursor-pointer" />
           )}
           <HoldDeleteButton
             onFire={() => void delRom(r)}
@@ -474,8 +480,8 @@ export default function EmulatorLauncher() {
           <span className="text-sky font-display uppercase"> «Частное сохранение»</span> («Назови меня N» — переименовывается ✏).
           В игре после захвата ячейки выбираются уровни/боссы/моё задание; частные — только в редакторе заданий.
           Ромы раскладываются по папкам-спойлерам (как тайлы): создайте папку кнопкой «+ Папка», выберите её в списке и загрузите сразу пачку файлов.
-          Каждому рому можно дать ОБЛОЖКУ КАРТРИДЖА: 📷 — готовая картинка (размер и пропорции читаются из файла), ✂ — вырезать картридж прямо из фото/скана; обложка показывается ЦЕЛИКОМ, без обрезки и искажения пропорций. В режиме КАРТИНОК (кнопка 🖼 на папке) ромы показываются фотографиями реальных картриджей, а кнопка ⛶ разворачивает большой список картинок в отдельном окне.
-          Удаление папок, ромов и сохранений подчиняется режиму из «Опций», а Ctrl+Z вернёт последнее удалённое.
+          Каждому рому можно дать ОБЛОЖКУ КАРТРИДЖА: 📷 — готовая картинка (размер и пропорции читаются из файла), ✂ — вырезать картридж из картинки ТОЧНО ТАК ЖЕ, как тайлы в редакторе карт: фон АВТО/палитра/пипетка, допуск, мин. размер, склейка частей — клик по вырезанному тайлу ставит его обложкой (пропорции честные, прозрачный фон остаётся прозрачным). В режиме КАРТИНОК (кнопка 🖼 на папке) ромы показываются фотографиями реальных картриджей, а кнопка ⛶ разворачивает большой список картинок в отдельном окне.
+          Удаление папок, ромов, сохранений и УБИРАНИЕ ОБЛОЖЕК (✕) подчиняются режиму из «Опций», а Ctrl+Z вернёт последнее удалённое.
         </p>
 
         <div className="grid lg:grid-cols-[300px_1fr] gap-5">
@@ -779,9 +785,10 @@ export default function EmulatorLauncher() {
         />
       )}
 
-      {/* v0.62: НОЖНИЦЫ — окно вырезания картриджа из картинки (из 📷-строк, плиток и окна картинок) */}
+      {/* v0.62→v0.63: НОЖНИЦЫ — окно вырезания картриджа из картинки ТОМ ЖЕ вырезателем,
+          что режет тайлы в редакторе карт (из 📷-строк, плиток и окна картинок) */}
       {cropJob && (
-        <CoverCropModal
+        <CartCutModal
           rom={cropJob.rom}
           file={cropJob.file}
           onClose={() => setCropJob(null)}

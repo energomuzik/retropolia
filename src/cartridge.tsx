@@ -1,6 +1,11 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { idbPut } from './db';
-import type { RomDef } from './types';
+import type { RomDef, TileImg } from './types';
+import { extractTilesFromImage, type ExtractInfo } from './tilecut';
+import { HoldDeleteButton } from './delGuard';
+import { GhostBtn, Ic, Modal, PxBtn, Stepper } from './ui';
+import { sfx } from './sound';
+import { useApp } from './store';
 
 /* ---------- v0.61: КАРТРИДЖИ ПЛАТФОРМ ----------
    Пиксельный бейдж рома в ФОРМЕ и ЦВЕТЕ картриджа/карты своей платформы
@@ -326,8 +331,9 @@ export function CoverPickBtn({ onPick, title, className = '' }: { onPick: (file:
 }
 
 /* кнопка ✂ со скрытым input file — ВЫРЕЗАТЬ картридж из картинки (v0.62):
-   рядом с 📷 («готовая картинка целиком») — для фото полки/скана/скриншота,
-   где картридж нужно ещё ВЫРЕЗАТЬ; пропорции выреза сохраняются честно */
+   рядом с 📷 («готовая картинка целиком») — для скана/скриншота/фото с однотонным
+   фоном, где картридж нужно ещё ВЫРЕЗАТЬ. v0.63: открывает ТОТ ЖЕ вырезатель,
+   что режет тайлы в редакторе карт (CartCutModal), — не рамку-кроппер */
 export function CoverCropBtn({ onPick, title, className = '' }: { onPick: (file: File) => void; title?: string; className?: string }) {
   const ref = useRef<HTMLInputElement>(null);
   return (
@@ -335,7 +341,7 @@ export function CoverCropBtn({ onPick, title, className = '' }: { onPick: (file:
       <button
         type="button"
         className={`cursor-pointer hover:text-gold ${className}`}
-        title={title ?? '✂ Вырезать картридж из картинки'}
+        title={title ?? '✂ Вырезать картридж из картинки (вырезатель тайлов, как в редакторе карт)'}
         onClick={(e) => { e.stopPropagation(); e.preventDefault(); ref.current?.click(); }}
       >
         ✂
@@ -349,6 +355,34 @@ export function CoverCropBtn({ onPick, title, className = '' }: { onPick: (file:
         onChange={(e) => { const f = e.target.files?.[0]; if (f) onPick(f); e.target.value = ''; }}
       />
     </>
+  );
+}
+
+/* ---------- v0.63: ✕ «Убрать обложку» — ПО ТЕМ ЖЕ ПРАВИЛАМ, ЧТО УДАЛЕНИЕ В РЕДАКТОРЕ КАРТ ----------
+   Кнопка подчиняется режиму удаления из Опций (options.delMode: мгновенно /
+   с подтверждением / удержанием с полоской) — как крестики тайлов и «Удалить все
+   сохранения». Само «убирание» запоминается вызывающей стороной через
+   rememberDeleted — Ctrl+Z возвращает обложку на место. */
+export function CoverRemoveBtn({
+  romName, onRemove, className = 'text-[10px] leading-none py-0.5 text-faint hover:text-coral cursor-pointer', as = 'button',
+}: {
+  romName: string;
+  onRemove: () => void;
+  className?: string;
+  as?: 'button' | 'span'; // span — когда крестик лежит ВНУТРИ кликабельной плитки (нужен stopPropagation)
+}) {
+  return (
+    <HoldDeleteButton
+      as={as}
+      verb="Убрать"
+      confirmTitle="Убрать обложку картриджа"
+      hintWord="уберу"
+      label={`обложку картриджа «${romName}»`}
+      ariaLabel="Убрать обложку картриджа"
+      title="Убрать обложку (режим удаления — в Опциях, как в редакторе карт)"
+      onFire={onRemove}
+      className={className}
+    >✕</HoldDeleteButton>
   );
 }
 
@@ -387,17 +421,16 @@ export function RomTile({
       <div className="absolute top-0.5 right-0.5 flex items-center gap-0.5 bg-[rgba(4,6,14,0.72)] px-0.5 rounded-sm">
         <CoverPickBtn onPick={onCover} className="text-[9px] leading-none py-0.5" title={rom.cover ? 'Заменить обложку' : 'Загрузить обложку картриджа'} />
         {onCropFile && (
-          <CoverCropBtn onPick={onCropFile} className="text-[9px] leading-none py-0.5" title="✂ Вырезать картридж из картинки (фото/скан)" />
+          <CoverCropBtn onPick={onCropFile} className="text-[9px] leading-none py-0.5" title="✂ Вырезать картридж из картинки — вырезатель тайлов, как в редакторе карт" />
         )}
+        {/* v0.63: убрать обложку — по правилам удаления из Опций (подтверждение/удержание) */}
         {rom.cover && onRemoveCover && (
-          <button
-            type="button"
+          <CoverRemoveBtn
+            as="span"
+            romName={rom.name}
+            onRemove={onRemoveCover}
             className="text-[9px] leading-none py-0.5 text-faint hover:text-coral cursor-pointer"
-            title="Убрать обложку"
-            onClick={(e) => { e.stopPropagation(); e.preventDefault(); onRemoveCover(); }}
-          >
-            ✕
-          </button>
+          />
         )}
       </div>
     </div>
@@ -471,46 +504,46 @@ export function RomPicsModal({
   );
 }
 
-/* ---------- v0.62: НОЖНИЦЫ — вырезать картридж из картинки ----------
-   Окно открывается кнопкой ✂ (рядом с 📷) и работает с ЛЮБОЙ картинкой —
-   фото полки, скан, скриншот: пользователь рамкой выделяет картридж,
-   и ВЫРЕЗАННЫЙ ФРАГМЕНТ становится обложкой рома.
-   ГЛАВНОЕ — честные пропорции: что вырезали, то и хранится и показывается;
-   вертикальная HuCARD остаётся вытянутой по вертикали и НЕ обрезается,
-   широкий картридж (Famicom, SEGA MD) НЕ обрезается по бокам.
-   Рамку можно двигать (внутри) и тянуть за 4 угла; при желании
-   фиксируется соотношение сторон (свободно / 1:1 / 4:3 / 3:4 / …). */
 
-/* вырезанный фрагмент → dataURL обложки: длинная сторона сжимается до 320px,
-   JPEG 0.82 — те же правила, что у fileToCover (обложка едет вместе с RomDef) */
-export function cropToCover(img: HTMLImageElement, sx: number, sy: number, sw: number, sh: number, maxSide = 320): string {
-  const k = Math.min(1, maxSide / Math.max(sw, sh));
-  const w = Math.max(1, Math.round(sw * k));
-  const h = Math.max(1, Math.round(sh * k));
+/* ---------- v0.63: ВЫРЕЗАТЕЛЬ КАРТИКОВ = ВЫРЕЗАТЕЛЬ ТАЙЛОВ ИЗ РЕДАКТОРА КАРТ ----------
+   Кнопка ✂ открывает картинку (скан, скриншот, фото с однотонным фоном), и дальше
+   работает ТОТ ЖЕ ДВИЖОК НАРЕЗКИ ТАЙЛОВ, что в редакторе карт (tilecut.ts):
+   фон АВТО/палитра/пипетка, допуск, мин. размер, склейка частей, мелкий текст —
+   нарезка пересчитывается на лету. КЛИК ПО ВЫРЕЗАННОМУ ТАЙЛУ — тайл становится
+   обложкой рома: пропорции сохраняются честно (HuCARD остаётся вертикальной,
+   широкий картридж — широким), прозрачный фон остаётся прозрачным.
+   Режим «Один размер (анимации)» из редактора карт тут НЕ показан: обложке он
+   только вредил бы (пустые поля вокруг картриджа) — каждый тайл режется в своём
+   собственном размере. */
+
+/* вырезанный тайл (PNG с прозрачным фоном) → обложка: длинная сторона ≤ 320px,
+   PNG — прозрачность сохраняется; тайл, который уже влезает, остаётся как есть */
+export async function tileToCover(dataUrl: string, maxSide = 320): Promise<string> {
+  const img = await new Promise<HTMLImageElement>((res, rej) => {
+    const im = new Image();
+    im.onload = () => res(im);
+    im.onerror = () => rej(new Error('не картинка'));
+    im.src = dataUrl;
+  });
+  const w0 = img.naturalWidth || 1;
+  const h0 = img.naturalHeight || 1;
+  if (Math.max(w0, h0) <= maxSide) return dataUrl;
+  const k = maxSide / Math.max(w0, h0);
   const cv = document.createElement('canvas');
-  cv.width = w;
-  cv.height = h;
+  cv.width = Math.max(1, Math.round(w0 * k));
+  cv.height = Math.max(1, Math.round(h0 * k));
   const cx = cv.getContext('2d');
   if (!cx) throw new Error('нет canvas');
-  cx.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
-  return cv.toDataURL('image/jpeg', 0.82);
+  cx.drawImage(img, 0, 0, cv.width, cv.height);
+  return cv.toDataURL('image/png');
 }
 
-type CropRect = { x: number; y: number; w: number; h: number };
-type Corner = 'nw' | 'ne' | 'sw' | 'se';
+type CutParams = { bgMode: 'auto' | 'custom'; bg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean };
 
-const CROP_RATIOS: { label: string; v: number }[] = [
-  { label: 'Свободно', v: 0 },
-  { label: '1:1 квадрат', v: 1 },
-  { label: '4:3 горизонтально', v: 4 / 3 },
-  { label: '3:4 вертикально', v: 3 / 4 },
-  { label: '3:2 горизонтально', v: 3 / 2 },
-  { label: '2:3 вертикально', v: 2 / 3 },
-  { label: '16:9 горизонтально', v: 16 / 9 },
-  { label: '9:16 вертикально', v: 9 / 16 },
-];
+/* те же стартовые параметры нарезки, что у вырезателя тайлов в редакторе карт */
+const CUT_START: CutParams = { bgMode: 'auto', bg: '#000000', thr: 25, minSize: 6, mergeGap: 1, keepText: false };
 
-export function CoverCropModal({
+export function CartCutModal({
   rom, file, onClose, onSave,
 }: {
   rom: { name: string };
@@ -518,227 +551,178 @@ export function CoverCropModal({
   onClose: () => void;
   onSave: (dataUrl: string) => void;
 }) {
-  const [imgUrl, setImgUrl] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [ratio, setRatio] = useState(0); // 0 — свободно
-  const [rect, setRect] = useState<CropRect | null>(null);
-  const [ready, setReady] = useState(false); // картинка открыта и размер замерен
-  const imgRef = useRef<HTMLImageElement | null>(null);
-  const boxRef = useRef<HTMLDivElement | null>(null); // контейнер ровно по картинке
-  const natRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 }); // натуральный размер
-  const boxSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 }); // показанный размер
-  const dragRef = useRef<{
-    mode: 'new' | 'move' | 'resize';
-    corner?: Corner;
-    sx: number; sy: number; // точка старта (экранные px внутри картинки)
-    r0: CropRect | null;    // рамка на момент старта
-  } | null>(null);
-  const ratioRef = useRef(0);
-  ratioRef.current = ratio;
+  const toast = useApp((s) => s.toast);
+  const [src, setSrc] = useState<string | null>(null);
+  const [prm, setPrm] = useState<CutParams>(CUT_START);
+  const [busy, setBusy] = useState(true);
+  const [tiles, setTiles] = useState<TileImg[]>([]);
+  const [foundBg, setFoundBg] = useState('');
+  const [picked, setPicked] = useState<string | null>(null); // выбранный тайл → станет обложкой
+  const [sizes, setSizes] = useState<Record<string, { w: number; h: number }>>({});
+  const [saving, setSaving] = useState(false);
+  const infoRef = useRef<ExtractInfo | null>(null);
+  const runRef = useRef(0);
+  const timerRef = useRef<number | null>(null);
 
-  const MIN = 12; // минимальная рамка в экранных px
-
+  /* превью исходника: objectURL живёт, пока открыто окно */
   useEffect(() => {
     const url = URL.createObjectURL(file);
-    setImgUrl(url);
-    setReady(false);
-    setRect(null);
+    setSrc(url);
     return () => URL.revokeObjectURL(url);
   }, [file]);
 
-  /* Esc в окне — просто закрыть (кат-сцены и окна заданий тут не живут) */
+  const runCut = useCallback(async (p: CutParams) => {
+    const run = ++runRef.current;
+    setBusy(true);
+    try {
+      const r = await extractTilesFromImage(file, { ...p, oneSize: false }, infoRef);
+      if (runRef.current !== run) return;
+      setTiles(r.tiles);
+      setFoundBg(r.bg);
+      setPicked(null);
+      setBusy(false);
+      if (r.tiles.length) sfx.coin();
+      else toast('Ничего не нашлось: снизьте мин. размер, поменяйте фон или допуск', 'err');
+    } catch {
+      if (runRef.current !== run) return;
+      setBusy(false);
+      toast('Не удалось обработать картинку', 'err');
+    }
+  }, [file, toast]);
+
+  /* смена параметра: цифра меняется сразу, пересчёт — с небольшой задержкой
+     (как в редакторе карт); эффект срабатывает и на монтировании — первый прогон */
   useEffect(() => {
-    const fn = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
-    window.addEventListener('keydown', fn, true);
-    return () => window.removeEventListener('keydown', fn, true);
-  }, [onClose]);
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => void runCut(prm), 180);
+    return () => { if (timerRef.current) window.clearTimeout(timerRef.current); };
+  }, [prm, runCut]);
 
-  const measure = () => {
-    const im = imgRef.current;
-    if (!im || !im.naturalWidth) return;
-    natRef.current = { w: im.naturalWidth, h: im.naturalHeight };
-    const b = im.getBoundingClientRect();
-    boxSizeRef.current = { w: b.width, h: b.height };
-    setReady(true);
+  /* пипетка: клик по превью — взять цвет фона из этой точки (как в редакторе карт) */
+  const pipetteBg = (e: { clientX: number; clientY: number; currentTarget: HTMLImageElement }) => {
+    const im = e.currentTarget;
+    const info = infoRef.current;
+    if (!info || !im.naturalWidth) return;
+    const r = im.getBoundingClientRect();
+    const sc0 = Math.min(r.width / im.naturalWidth, r.height / im.naturalHeight); // object-contain: учитываем поля
+    const dw = im.naturalWidth * sc0, dh = im.naturalHeight * sc0;
+    const ox = (r.width - dw) / 2, oy = (r.height - dh) / 2;
+    const fx = (e.clientX - r.left - ox) / dw;
+    const fy = (e.clientY - r.top - oy) / dh;
+    if (fx < 0 || fy < 0 || fx >= 1 || fy >= 1) return;
+    const x = Math.min(info.W - 1, Math.round(fx * info.W));
+    const y = Math.min(info.H - 1, Math.round(fy * info.H));
+    const i = (y * info.W + x) * 4;
+    const hex = (v: number) => v.toString(16).padStart(2, '0');
+    setPrm((p) => ({ ...p, bgMode: 'custom', bg: `#${hex(info.data[i])}${hex(info.data[i + 1])}${hex(info.data[i + 2])}` }));
+    sfx.hover();
   };
 
-  /* соотношение сторон: подгоняем w/h так, чтобы w/h = ratio (большая сторона ведёт) */
-  const fitRatio = (w: number, h: number): { w: number; h: number } => {
-    const r = ratioRef.current;
-    if (!r) return { w, h };
-    return w / Math.max(h, 1) > r ? { w, h: w / r } : { w: h * r, h };
-  };
+  const pickedTile = tiles.find((t) => t.id === picked) ?? null;
+  const psz = picked ? sizes[picked] : undefined;
 
-  const clampRect = (r: CropRect): CropRect => {
-    const W = boxSizeRef.current.w, H = boxSizeRef.current.h;
-    const w = Math.max(MIN, Math.min(r.w, W));
-    const h = Math.max(MIN, Math.min(r.h, H));
-    const x = Math.max(0, Math.min(r.x, W - w));
-    const y = Math.max(0, Math.min(r.y, H - h));
-    return { x, y, w, h };
-  };
-
-  const localPt = (e: React.PointerEvent): { x: number; y: number } => {
-    const b = boxRef.current?.getBoundingClientRect();
-    const bw = b?.width ?? 0, bh = b?.height ?? 0;
-    return {
-      x: Math.max(0, Math.min(e.clientX - (b?.left ?? 0), bw)),
-      y: Math.max(0, Math.min(e.clientY - (b?.top ?? 0), bh)),
-    };
-  };
-
-  const startDrag = (e: React.PointerEvent, mode: 'new' | 'move' | 'resize', corner?: Corner) => {
-    if (!ready) return;
-    e.stopPropagation();
-    e.preventDefault();
-    const p = localPt(e);
-    dragRef.current = { mode, corner, sx: p.x, sy: p.y, r0: rect ? { ...rect } : null };
-    boxRef.current?.setPointerCapture?.(e.pointerId);
-    if (mode === 'new') setRect(clampRect({ x: p.x, y: p.y, w: MIN, h: MIN }));
-  };
-
-  const onMove = (e: React.PointerEvent) => {
-    const d = dragRef.current;
-    if (!d) return;
-    const p = localPt(e);
-    if (d.mode === 'new') {
-      let w = Math.abs(p.x - d.sx);
-      let h = Math.abs(p.y - d.sy);
-      ({ w, h } = fitRatio(Math.max(w, MIN), Math.max(h, MIN)));
-      setRect(clampRect({ x: p.x >= d.sx ? d.sx : d.sx - w, y: p.y >= d.sy ? d.sy : d.sy - h, w, h }));
-      return;
-    }
-    if (d.mode === 'move' && d.r0) {
-      setRect(clampRect({ ...d.r0, x: d.r0.x + (p.x - d.sx), y: d.r0.y + (p.y - d.sy) }));
-      return;
-    }
-    if (d.mode === 'resize' && d.r0 && d.corner) {
-      const c = d.corner;
-      const ax = c === 'nw' || c === 'sw' ? d.r0.x + d.r0.w : d.r0.x; // якорь — противоположный угол
-      const ay = c === 'nw' || c === 'ne' ? d.r0.y + d.r0.h : d.r0.y;
-      let w = Math.max(MIN, Math.abs(p.x - ax));
-      let h = Math.max(MIN, Math.abs(p.y - ay));
-      ({ w, h } = fitRatio(w, h));
-      setRect(clampRect({
-        x: c === 'nw' || c === 'sw' ? ax - w : ax,
-        y: c === 'nw' || c === 'ne' ? ay - h : ay,
-        w,
-        h,
-      }));
+  const confirmCut = async () => {
+    if (!pickedTile || saving) return;
+    setSaving(true);
+    try {
+      onSave(await tileToCover(pickedTile.dataUrl));
+    } catch {
+      toast('Не удалось подготовить обложку', 'err');
+      setSaving(false);
     }
   };
-
-  const endDrag = (e: React.PointerEvent) => {
-    if (!dragRef.current) return;
-    dragRef.current = null;
-    try { boxRef.current?.releasePointerCapture?.(e.pointerId); } catch { /* не критично */ }
-  };
-
-  /* смена фиксированного соотношения — текущая рамка сразу подгоняется */
-  const changeRatio = (v: number) => {
-    setRatio(v);
-    ratioRef.current = v;
-    setRect((r) => (r && v ? clampRect({ ...r, h: r.w / v }) : r));
-  };
-
-  const doCrop = () => {
-    const im = imgRef.current;
-    const r = rect;
-    const b = boxSizeRef.current;
-    if (!im || !r || !b.w || !natRef.current.w) return;
-    const scale = natRef.current.w / b.w; // экранные px → натуральные
-    const sx = Math.max(0, Math.round(r.x * scale));
-    const sy = Math.max(0, Math.round(r.y * scale));
-    const sw = Math.max(1, Math.round(r.w * scale));
-    const sh = Math.max(1, Math.round(r.h * scale));
-    onSave(cropToCover(im, sx, sy, sw, sh));
-  };
-
-  const nw = rect && boxSizeRef.current.w ? Math.max(1, Math.round((rect.w * natRef.current.w) / boxSizeRef.current.w)) : 0;
-  const nh = rect && boxSizeRef.current.h ? Math.max(1, Math.round((rect.h * natRef.current.h) / boxSizeRef.current.h)) : 0;
-
-  const cornerBtn = (c: Corner, cls: string) => (
-    <span
-      onPointerDown={(e) => startDrag(e, 'resize', c)}
-      className={`absolute w-3 h-3 bg-gold border border-[#05070f] ${c === 'nw' || c === 'se' ? 'cursor-nwse-resize' : 'cursor-nesw-resize'} ${cls}`}
-    />
-  );
 
   return (
-    <div className="fixed inset-0 z-[96] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-[rgba(4,6,14,0.9)]" onClick={onClose} />
-      <div className="relative pixel-panel pixel-corners pop-in w-full max-w-4xl p-4 flex flex-col max-h-[92vh]">
-        <div className="flex items-center gap-2 mb-3 flex-wrap">
-          <span className="font-display uppercase tracking-wider text-paper text-sm">✂ Вырезать картридж · {rom.name}</span>
-          <span className="tick-label text-gold">тяните по картинке — выделите картридж; рамка двигается и тянется за углы</span>
-          <button type="button" onClick={onClose} className="ml-auto text-faint hover:text-coral cursor-pointer font-display text-[11px] uppercase">✕ Закрыть</button>
-        </div>
-        <div className="flex-1 min-h-0 overflow-auto flex items-center justify-center bg-[#05070f] border-2 border-edge p-2">
-          {failed ? (
-            <p className="text-[12px] text-magma p-6 text-center">Не удалось открыть картинку — попробуйте другой файл.</p>
-          ) : (
-            /* контейнер РОВНО по картинке — координаты рамки считаются от него */
-            <div
-              ref={boxRef}
-              className="relative overflow-hidden select-none"
-              style={{ touchAction: 'none', cursor: 'crosshair' }}
-              onPointerDown={(e) => startDrag(e, 'new')}
-              onPointerMove={onMove}
-              onPointerUp={endDrag}
-              onPointerCancel={endDrag}
-            >
-              <img
-                ref={imgRef}
-                src={imgUrl ?? ''}
-                alt="исходная картинка"
-                draggable={false}
-                onLoad={measure}
-                onError={() => setFailed(true)}
-                className="block max-w-full"
-                style={{ maxHeight: '56vh' }}
-              />
-              {rect && ready && (
-                <div
-                  onPointerDown={(e) => startDrag(e, 'move')}
-                  className="absolute border-2 border-gold cursor-move"
-                  style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h, boxShadow: '0 0 0 9999px rgba(4,6,14,0.62)' }}
-                >
-                  {cornerBtn('nw', '-left-1 -top-1')}
-                  {cornerBtn('ne', '-right-1 -top-1')}
-                  {cornerBtn('sw', '-left-1 -bottom-1')}
-                  {cornerBtn('se', '-right-1 -bottom-1')}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-        <div className="flex items-center gap-2 mt-3 flex-wrap">
-          <span className="tick-label text-faint shrink-0">соотношение сторон</span>
-          <select
-            className="field-in px-2 py-1.5 text-[11px] cursor-pointer"
-            value={ratio}
-            onChange={(e) => changeRatio(Number(e.target.value))}
-            title="Свободно — рамка любого размера; фиксированное — рамка тянется только по заданной пропорции"
-          >
-            {CROP_RATIOS.map((r) => <option key={r.label} value={r.v}>{r.label}</option>)}
-          </select>
-          <span className="tick-label text-dim shrink-0">
-            {rect && ready ? `выделено: ${nw}×${nh} px` : 'выделите картридж рамкой'}
-          </span>
-          <span className="tick-label text-faint shrink-0">вырезанное станет обложкой — пропорции сохранятся честно</span>
-          <span className="ml-auto flex items-center gap-2">
-            <button type="button" onClick={onClose} className="px-3 py-1.5 border-2 border-edge text-[11px] font-display uppercase text-dim hover:text-paper cursor-pointer">Отмена</button>
+    <Modal title={`✂ Вырезать картридж · ${rom.name}`} icon={<span className="text-teal">{Ic.cart(16)}</span>} onClose={onClose} w="max-w-2xl">
+      <p className="text-[12px] text-dim mb-3">
+        Тот же вырезатель, что у тайлов в редакторе карт. Картинка с картриджами на однотонном фоне (скан, скриншот, фото на простом фоне):
+        укажите фон (клик по превью = пипетка, или АВТО/палитра), подберите допуск, минимальный размер и склейку — нарезка пересчитается сама.
+        КЛИК ПО ВЫРЕЗАННОМУ ТАЙЛУ — он станет обложкой: пропорции тайла сохраняются честно, прозрачный фон остаётся прозрачным.
+      </p>
+      <div className="flex gap-3 mb-3">
+        <img
+          src={src ?? ''}
+          alt="исходник"
+          onClick={pipetteBg}
+          className="w-36 h-36 shrink-0 object-contain border-2 border-edge bg-[repeating-conic-gradient(#141833_0_25%,#0b0e1c_0_50%)_0_0/12px_12px] cursor-crosshair"
+          title="Клик — взять цвет фона пипеткой"
+        />
+        <div className="flex-1 min-w-0 space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-dim shrink-0">Фон:</span>
             <button
-              type="button"
-              onClick={doCrop}
-              disabled={!rect || !ready}
-              className={`px-3 py-1.5 border-2 font-display uppercase text-[11px] cursor-pointer ${rect && ready ? 'border-gold text-gold bg-gold/10 hover:bg-gold/20' : 'border-edge text-faint cursor-not-allowed'}`}
-            >
-              ✂ Вырезать и поставить
-            </button>
-          </span>
+              onClick={() => setPrm((p) => ({ ...p, bgMode: 'auto' }))}
+              className={`px-2 py-1 text-[9px] font-pixel border-2 cursor-pointer ${prm.bgMode === 'auto' ? 'border-gold text-gold' : 'border-edge text-faint hover:text-dim'}`}
+              title="Найти фон автоматически (самый частый цвет картинки)"
+            >АВТО</button>
+            <input
+              type="color"
+              value={prm.bg}
+              onChange={(e) => setPrm((p) => ({ ...p, bgMode: 'custom', bg: e.target.value }))}
+              className="w-8 h-8 border-2 border-edge bg-transparent cursor-pointer p-0"
+              title="Выбрать цвет фона палитрой"
+            />
+            <span className="tick-label text-faint truncate">
+              {prm.bgMode === 'custom' ? prm.bg : (foundBg || '…')}
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-dim">Допуск фона</span>
+            <Stepper value={prm.thr} onChange={(v) => setPrm((p) => ({ ...p, thr: v }))} min={0} max={200} step={5} />
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-dim">Мин. размер (px)</span>
+            <Stepper value={prm.minSize} onChange={(v) => setPrm((p) => ({ ...p, minSize: v }))} min={2} max={120} step={2} />
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-dim">Склейка частей (px)</span>
+            <Stepper value={prm.mergeGap} onChange={(v) => setPrm((p) => ({ ...p, mergeGap: v }))} min={0} max={20} step={1} />
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-dim">Мелкий текст (подписи)</span>
+            <button
+              onClick={() => setPrm((p) => ({ ...p, keepText: !p.keepText }))}
+              className={`px-2 py-1 text-[9px] font-pixel border-2 cursor-pointer ${prm.keepText ? 'border-gold text-gold' : 'border-edge text-faint hover:text-dim'}`}
+              title="Мелкий чёрно-белый текст (подписи автора на листе): выбросить или оставить"
+            >{prm.keepText ? 'ОСТАВИТЬ' : 'ВЫБРОСИТЬ'}</button>
+          </div>
+          <p className="text-[10px] text-faint leading-tight">
+            ЛИШНЕЕ прилипло к картриджу — уменьшите допуск. Картридж РАЗВАЛИЛСЯ на части — увеличьте склейку.
+            Соседние КАРТРИДЖИ СЛИПЛИСЬ — уменьшите склейку (и проверьте фон пипеткой). Мусор в списке — увеличьте мин. размер.
+          </p>
+          {busy && <div className="text-gold font-display text-[10px] uppercase animate-pulse">Нарезаю…</div>}
         </div>
       </div>
-    </div>
+      {tiles.length > 0 && (
+        <div className="grid grid-cols-8 gap-1.5 mb-3 max-h-44 overflow-y-auto border-2 border-edge p-1.5 bg-[rgba(11,14,28,0.6)]">
+          {tiles.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => { setPicked(t.id); sfx.hover(); }}
+              className={`aspect-square border-2 overflow-hidden cursor-pointer bg-[repeating-conic-gradient(#141833_0_25%,#0b0e1c_0_50%)_0_0/8px_8px] ${picked === t.id ? 'border-gold' : 'border-edge hover:border-edge2'}`}
+              title={`Тайл ${t.name} — вырезать и поставить обложку`}
+            >
+              <img
+                src={t.dataUrl}
+                alt={t.name}
+                className="w-full h-full object-contain"
+                style={{ imageRendering: 'pixelated' }}
+                onLoad={(e) => setSizes((m) => (m[t.id] ? m : { ...m, [t.id]: { w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight } }))}
+              />
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex items-center justify-end gap-3 flex-wrap">
+        <span className="tick-label text-dim mr-auto">
+          {pickedTile ? (psz ? `вырезано: ${psz.w}×${psz.h} px — станет обложкой` : 'тайл выбран — станет обложкой') : 'клик по тайлу — выбрать обложку'}
+        </span>
+        <GhostBtn onClick={onClose}>Отмена</GhostBtn>
+        <PxBtn color="teal" onClick={() => void confirmCut()} disabled={!pickedTile || busy || saving}>
+          ✂ Поставить обложку
+        </PxBtn>
+      </div>
+    </Modal>
   );
 }

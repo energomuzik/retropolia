@@ -8,7 +8,7 @@ import type { CardDef, CardEffect, CellType, ChaosKind, EffectType, GameMap, Rom
 import { CHAOS_LIST, chaosLabel, mkChaosCard, JOY_LIST, SAVE_KIND_CLS, SAVE_KIND_LABEL, SAVE_KIND_SHORT, saveKindOf } from '../types';
 import { renumberByPath, fixLinksAfterDelete } from '../render';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
-import { CartridgeBadge, CoverCropBtn, CoverCropModal, CoverPickBtn, PlatName, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
+import { CartridgeBadge, CartCutModal, CoverCropBtn, CoverPickBtn, CoverRemoveBtn, PlatName, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
 import { sfx } from '../sound';
 
 const EFFECTS: { key: EffectType; label: string; hasValue?: boolean; hasTarget?: boolean; unit?: string; def: number }[] = [
@@ -204,7 +204,9 @@ export default function TaskEditor() {
   /* v0.62: cropJob — ром и картинка, из которой вырезается картридж ножницами ✂ */
   const [romCropJob, setRomCropJob] = useState<{ rom: RomDef; file: File } | null>(null);
   /* v0.62: applyRomCover — общая запись для 📷 (готовая картинка) и ✂ (вырезание):
-     обложка сохраняется КАК ЕСТЬ — пропорции честные, показывается целиком */
+     обложка сохраняется КАК ЕСТЬ — пропорции честные, показывается целиком
+     v0.63: «убрать обложку» — по тем же правилам, что удаление тайлов в редакторе
+     карт: режим из Опций (у кнопки ✕) + запоминание для Ctrl+Z (вернёт обложку) */
   const applyRomCover = async (r: RomDef, cover: string) => {
     await storeRomCover(r, cover);
     await refresh();
@@ -220,9 +222,18 @@ export default function TaskEditor() {
     }
   };
   const clearRomCoverFor = async (r: RomDef) => {
+    const old = r.cover;
+    if (old) {
+      rememberDeleted({
+        label: `обложку картриджа «${r.name}»`,
+        restore: async () => {
+          const cur = await idbGet<RomDef>('roms', r.id);
+          if (cur) { await idbPut('roms', r.id, { ...cur, cover: old }); await refresh(); }
+        },
+      });
+    }
     await storeRomCover(r, null);
     await refresh();
-    sfx.click();
     toast(`Обложка убрана: «${r.name}»`, 'ok');
   };
   const romFolders = useMemo(() => [...new Set(roms.map((r) => r.folder ?? '').filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru')), [roms]);
@@ -250,17 +261,13 @@ export default function TaskEditor() {
           </div>
           <div className="tick-label text-faint mt-1">{cartLabelOf(r)} · сохранений: {svCount}</div>
         </button>
-        {/* v0.61: 📷 обложка картриджа прямо в строке рома; v0.62: ✂ — вырезать из картинки */}
+        {/* v0.61: 📷 обложка картриджа прямо в строке рома; v0.63: ✂ — вырезатель тайлов как в редакторе карт,
+            ✕ убрать обложку — по правилам удаления из Опций */}
         <div className="absolute top-1 right-1 flex items-center gap-1 bg-[rgba(4,6,14,0.72)] px-1 rounded-sm">
           <CoverPickBtn onPick={(file) => void setRomCoverFor(r, file)} title={r.cover ? 'Заменить обложку картриджа' : 'Загрузить обложку картриджа (готовая картинка)'} className="text-[10px] leading-none py-0.5 text-faint" />
-          <CoverCropBtn onPick={(file) => setRomCropJob({ rom: r, file })} title="✂ Вырезать картридж из картинки (фото/скан)" className="text-[10px] leading-none py-0.5 text-faint" />
+          <CoverCropBtn onPick={(file) => setRomCropJob({ rom: r, file })} title="✂ Вырезать картридж из картинки — вырезатель тайлов, как в редакторе карт" className="text-[10px] leading-none py-0.5 text-faint" />
           {r.cover && (
-            <button
-              type="button"
-              className="text-[9px] leading-none text-faint hover:text-coral cursor-pointer"
-              title="Убрать обложку"
-              onClick={() => void clearRomCoverFor(r)}
-            >✕</button>
+            <CoverRemoveBtn romName={r.name} onRemove={() => void clearRomCoverFor(r)} className="text-[9px] leading-none py-0.5 text-faint hover:text-coral cursor-pointer" />
           )}
         </div>
         </div>
@@ -636,7 +643,7 @@ export default function TaskEditor() {
             {roms.length > 0 && romFolders.length > 0 && (
               <p className="text-[10px] text-gold leading-tight mt-1">
                 Папки раскрываются кликом — внутри ромы; клик по рому выбирает его для этого задания.
-                Доступны ромы <PlatName>NES</PlatName>, <PlatName>SEGA</PlatName> (<PlatName>Mega Drive</PlatName> / <PlatName>Master System</PlatName> / <PlatName>GAME GEAR</PlatName>), <PlatName>SNES</PlatName>, <PlatName>Game Boy/Color</PlatName>, <PlatName>GBA</PlatName>, <PlatName>SEGA 32X</PlatName>, <PlatName>Atari 2600</PlatName>, <PlatName>PC Engine</PlatName>; кнопка 🖼 у папки покажет ромы КАРТИНКАМИ картриджей/обложек, у каждого рома есть 📷 (готовая картинка) и ✂ (вырезать картридж из фото/скана).
+                Доступны ромы <PlatName>NES</PlatName>, <PlatName>SEGA</PlatName> (<PlatName>Mega Drive</PlatName> / <PlatName>Master System</PlatName> / <PlatName>GAME GEAR</PlatName>), <PlatName>SNES</PlatName>, <PlatName>Game Boy/Color</PlatName>, <PlatName>GBA</PlatName>, <PlatName>SEGA 32X</PlatName>, <PlatName>Atari 2600</PlatName>, <PlatName>PC Engine</PlatName>; кнопка 🖼 у папки покажет ромы КАРТИНКАМИ картриджей/обложек, у каждого рома есть 📷 (готовая картинка) и ✂ (вырезать картридж из картинки тем же вырезателем, что тайлы в редакторе карт — клик по вырезанному тайлу ставит его обложкой).
               </p>
             )}
           </div>
@@ -1006,9 +1013,9 @@ export default function TaskEditor() {
           onRemoveCover={(r) => void clearRomCoverFor(r)}
         />
       )}
-      {/* v0.62: НОЖНИЦЫ — окно вырезания картриджа из картинки */}
+      {/* v0.62→v0.63: НОЖНИЦЫ — окно вырезания картриджа ТОМ ЖЕ вырезателем, что режет тайлы в редакторе карт */}
       {romCropJob && (
-        <CoverCropModal
+        <CartCutModal
           rom={romCropJob.rom}
           file={romCropJob.file}
           onClose={() => setRomCropJob(null)}
