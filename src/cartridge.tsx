@@ -433,23 +433,26 @@ export function RomTile({
           <CartridgeBadge rom={rom} h={Math.round(size * 0.5)} />
         )}
       </div>
-      <div className="px-1 py-0.5 text-center">
-        <div className="font-display text-[9px] uppercase text-paper truncate leading-tight">{rom.name}</div>
-      </div>
-      <div className="absolute top-0.5 right-0.5 flex items-center gap-0.5 bg-[rgba(4,6,14,0.72)] px-0.5 rounded-sm">
-        <CoverPickBtn onPick={onCover} className="text-[9px] leading-none py-0.5" title={rom.cover ? 'Заменить обложку' : 'Загрузить обложку картриджа'} />
-        {onCropFile && (
-          <CoverCropBtn onPick={onCropFile} className="text-[9px] leading-none py-0.5" title="✂ Вырезать картридж из картинки — вырезатель тайлов, как в редакторе карт" />
-        )}
-        {/* v0.63: убрать обложку — по правилам удаления из Опций (подтверждение/удержание) */}
-        {rom.cover && onRemoveCover && (
-          <CoverRemoveBtn
-            as="span"
-            romName={rom.name}
-            onRemove={onRemoveCover}
-            className="text-[9px] leading-none py-0.5 text-faint hover:text-coral cursor-pointer"
-          />
-        )}
+      {/* v0.66: кнопки 📷 ✂ ✕ УБРАНЫ С КАРТИНКИ — раньше висели поверх арта в правом
+          верхнем углу плитки; теперь они в нижней полосе, на месте надписи названия:
+          картинка чистая, кнопки не перекрывают картридж. Название осталось рядом. */}
+      <div className="px-1 py-0.5 flex items-center gap-1">
+        <span className="flex items-center gap-0.5 shrink-0">
+          <CoverPickBtn onPick={onCover} className="text-[9px] leading-none py-0.5" title={rom.cover ? 'Заменить обложку' : 'Загрузить обложку картриджа'} />
+          {onCropFile && (
+            <CoverCropBtn onPick={onCropFile} className="text-[9px] leading-none py-0.5" title="✂ Вырезать картридж из картинки — вырезатель тайлов, как в редакторе карт" />
+          )}
+          {/* v0.63: убрать обложку — по правилам удаления из Опций (подтверждение/удержание) */}
+          {rom.cover && onRemoveCover && (
+            <CoverRemoveBtn
+              as="span"
+              romName={rom.name}
+              onRemove={onRemoveCover}
+              className="text-[9px] leading-none py-0.5 text-faint hover:text-coral cursor-pointer"
+            />
+          )}
+        </span>
+        <span className="font-display text-[9px] uppercase text-paper truncate leading-tight flex-1 text-left">{rom.name}</span>
       </div>
     </div>
   );
