@@ -32,6 +32,12 @@ export interface SegaApi {
   captureFrame: () => Promise<string | null>;
   /** Открыть встроенное меню настроек EmulatorJS (клавиатура + геймпад). */
   openSettings: () => void;
+  /** v0.68 CodeSearch: ЖИВОЕ представление памяти ядра (WebAssembly heap).
+   *  iframe с эмулятором того же происхождения (srcDoc), поэтому родитель читает
+   *  и пишет байты напрямую. Представление НЕЛЬЗЯ кэшировать: при росте памяти
+   *  ядро пересоздаёт буфер — вызывайте перед каждым использованием.
+   *  null — ядро ещё не поднялось (не готово). */
+  getHeap: () => Uint8Array | null;
 }
 
 function coreFor(ext: string): string {
@@ -288,6 +294,14 @@ export default function SegaBox({
       },
       openSettings: () => {
         try { frameRef.current?.contentWindow?.postMessage({ type: 'open-settings' }, '*'); } catch { /* noop */ }
+      },
+      getHeap: () => {
+        try {
+          const w = frameRef.current?.contentWindow as (Window & { EJS_emulator?: { gameManager?: { Module?: { HEAPU8?: Uint8Array } }; Module?: { HEAPU8?: Uint8Array } } }) | null | undefined;
+          const emu = w?.EJS_emulator;
+          const heap = emu?.gameManager?.Module?.HEAPU8 ?? emu?.Module?.HEAPU8;
+          return heap && heap.length > 0 ? heap : null;
+        } catch { return null; }
       },
       captureFrame: () =>
         new Promise<string | null>((resolve) => {

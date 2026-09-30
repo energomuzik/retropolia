@@ -4,8 +4,9 @@ import { Coin, Field, GhostBtn, Ic, Panel, PxBtn, Stepper } from '../ui';
 import { cellAtPoint, drawBoard, fitView } from '../render';
 import { idbGet, idbPut, uid } from '../db';
 import { cartridgeArt, cardArt, fileToDataUrl } from '../assets';
-import type { CardDef, CardEffect, CellType, ChaosKind, EffectType, GameMap, RomDef, SaveKind, TaskDef } from '../types';
+import type { CardDef, CardEffect, CellType, ChaosKind, CodeOp, CodeType, EffectType, GameMap, MemCond, RomDef, SaveKind, TaskDef } from '../types';
 import { CHAOS_LIST, chaosLabel, mkChaosCard, JOY_LIST, SAVE_KIND_CLS, SAVE_KIND_LABEL, SAVE_KIND_SHORT, saveKindOf } from '../types';
+import { CODE_TYPE_LABEL, OP_LABEL, formatCond, hex8, memCondText, parseCond, parseHex } from '../memcode';
 import { renumberByPath, fixLinksAfterDelete } from '../render';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
 import { CartridgeBadge, CartCutModal, CoverCropBtn, CoverPickBtn, CoverRemoveBtn, PlatName, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
@@ -86,6 +87,14 @@ export default function TaskEditor() {
   const [vLabel, setVLabel] = useState('');
   const [vColor, setVColor] = useState('');
   const [vImg, setVImg] = useState('');
+  /* v0.68 ЗАЧЁТ ПО КОДУ: условие по памяти эмулятора (код из CodeSearch) */
+  const [fCond, setFCond] = useState<MemCond | null>(null);
+  const [codeIn, setCodeIn] = useState('');
+  const [codeErr, setCodeErr] = useState('');
+  /* v0.68 ПОРАЖЕНИЕ ПО КОДУ: условие провала задания (код из CodeSearch) */
+  const [fCondFail, setFCondFail] = useState<MemCond | null>(null);
+  const [codeFailIn, setCodeFailIn] = useState('');
+  const [codeFailErr, setCodeFailErr] = useState('');
 
   const tiles = useApp((st) => st.tiles);
   const tileById = useMemo(() => new Map(tiles.map((t) => [t.id, t])), [tiles]);
@@ -117,6 +126,12 @@ export default function TaskEditor() {
     setVLabel(cell.label ?? '');
     setVColor(cell.color ?? '');
     setVImg(cell.imageId ?? '');
+    setFCond(cell.task?.code ?? null);
+    setCodeIn(cell.task?.code ? formatCond(cell.task.code) : '');
+    setCodeErr('');
+    setFCondFail(cell.task?.codeFail ?? null);
+    setCodeFailIn(cell.task?.codeFail ? formatCond(cell.task.codeFail) : '');
+    setCodeFailErr('');
   }, [selCell, map?.id]);
 
   const CELL_COLORS = ['#ffcf3f', '#ff5d73', '#5aa9ff', '#2ee6a8', '#ff8b3f', '#9be84d', '#c07aff', '#e9ecff'];
@@ -334,6 +349,10 @@ export default function TaskEditor() {
       loseCoins: fLoseCoins !== '' ? Math.max(0, Math.floor(Number(fLoseCoins) || 0)) : undefined,
       winHp: fWinHp !== '' ? Math.max(0, Math.floor(Number(fWinHp) || 0)) : undefined,
       loseHp: fLoseHp !== '' ? Math.max(0, Math.floor(Number(fLoseHp) || 0)) : undefined,
+      /* v0.68: зачёт по коду — условие по памяти эмулятора (CodeSearch) */
+      ...(fCond ? { code: fCond } : {}),
+      /* v0.68: поражение по коду — условие провала задания (CodeSearch) */
+      ...(fCondFail ? { codeFail: fCondFail } : {}),
     };
     nextMap.cells[selCell].task = task;
     setMap(nextMap);
@@ -877,9 +896,87 @@ export default function TaskEditor() {
                         </div>
                       </div>
                     </Field>
+                    {/* v0.68: ЗАЧЁТ ПО КОДУ — условие по памяти эмулятора из CodeSearch */}
+                    <Field label="Зачёт по коду — CodeSearch (необязательно)">
+                      <div className="space-y-1.5 border-2 border-[rgba(46,230,168,0.4)] px-2 py-2">
+                        <p className="text-[10px] text-dim leading-tight">
+                          Запустите ром в «Запуске эмулятора», кнопкой <b className="text-teal">CodeSearch</b> найдите адрес
+                          (жизни, оружие, счётчик босса — поиск как в ArtMoney) и скопируйте код условия. Вставьте его сюда —
+                          тогда задание зачтётся <b className="text-paper">САМО</b>, когда условие выполнится, без «на доверии».
+                        </p>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <input
+                            className="field-in flex-1 min-w-[200px] px-2 py-1.5 text-[11px] font-mono"
+                            placeholder="RPC1:001AB2C8:u8:eq:3"
+                            value={codeIn}
+                            onChange={(e) => { setCodeIn(e.target.value); setCodeErr(''); }}
+                            onKeyDown={(e) => { if (e.key === 'Enter') { const c = parseCond(codeIn); if (c) { setFCond(c); sfx.hover(); } else setCodeErr('Не разобрать — нужен код вида RPC1:001AB2C8:u8:eq:3'); } }}
+                          />
+                          <GhostBtn small onClick={() => { const c = parseCond(codeIn); if (c) { setFCond(c); setCodeErr(''); sfx.hover(); } else setCodeErr('Не разобрать — нужен код вида RPC1:001AB2C8:u8:eq:3'); }} title="Разобрать код условия">Разобрать</GhostBtn>
+                          {fCond && <GhostBtn small onClick={() => { setFCond(null); setCodeIn(''); }} title="Убрать зачёт по коду">{Ic.cross(11)}</GhostBtn>}
+                        </div>
+                        {codeErr && <p className="text-[10.5px] text-coral">{codeErr}</p>}
+                        {fCond && (
+                          <div className="space-y-1.5">
+                            <div className="text-[11px] text-teal font-mono break-all">{formatCond(fCond)}</div>
+                            <div className="text-[10.5px] text-dim leading-tight">Задание зачтётся, когда: {memCondText(fCond)}.</div>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <select className="field-in px-2 py-1 text-[10px]" value={fCond.t} onChange={(e) => setFCond({ ...fCond, t: e.target.value as CodeType })} title="Тип значения">
+                                {(Object.keys(CODE_TYPE_LABEL) as CodeType[]).map((k) => <option key={k} value={k}>{CODE_TYPE_LABEL[k]}</option>)}
+                              </select>
+                              <select className="field-in px-2 py-1 text-[10px]" value={fCond.op} onChange={(e) => setFCond({ ...fCond, op: e.target.value as CodeOp })} title="Оператор">
+                                {(Object.keys(OP_LABEL) as CodeOp[]).map((k) => <option key={k} value={k}>{OP_LABEL[k]}</option>)}
+                              </select>
+                              <input className="field-in w-24 px-2 py-1 text-[11px]" value={String(fCond.v)} onChange={(e) => { const n = Number(e.target.value); if (Number.isFinite(n)) setFCond({ ...fCond, v: n }); }} title="Значение условия" />
+                              <input className="field-in w-28 px-2 py-1 text-[11px] font-mono" value={hex8(fCond.a)} onChange={(e) => { const n = parseHex(e.target.value); if (n !== null) setFCond({ ...fCond, a: n }); }} title="Адрес (hex)" />
+                            </div>
+                            <p className="text-[10px] text-faint leading-tight">Адрес привязан к ЭТОМУ файлу рома. Другой дамп той же игры может не совпасть — тогда пересоберите условие через CodeSearch.</p>
+                          </div>
+                        )}
+                      </div>
+                    </Field>
+                    {/* v0.68: ПОРАЖЕНИЕ ПО КОДУ — условие провала задания из CodeSearch */}
+                    <Field label="Поражение по коду — CodeSearch (необязательно)">
+                      <div className="space-y-1.5 border-2 border-[rgba(255,93,115,0.4)] px-2 py-2">
+                        <p className="text-[10px] text-dim leading-tight">
+                          Тот же код условия, но наоборот: выполнится — задание <b className="text-coral">ПРОВАЛИТСЯ САМО</b>:
+                          RUBG/QUEST — как кнопка «Провалено» (−HP; у нуля полоски — поражение партии), челлендж — автоперезапуск.
+                          Пример: адрес жизней = 0 — потерял последнюю жизнь, задание провалено.
+                        </p>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <input
+                            className="field-in flex-1 min-w-[200px] px-2 py-1.5 text-[11px] font-mono"
+                            placeholder="RPC1:001AB2C8:u8:le:0"
+                            value={codeFailIn}
+                            onChange={(e) => { setCodeFailIn(e.target.value); setCodeFailErr(''); }}
+                            onKeyDown={(e) => { if (e.key === 'Enter') { const c = parseCond(codeFailIn); if (c) { setFCondFail(c); sfx.hover(); } else setCodeFailErr('Не разобрать — нужен код вида RPC1:001AB2C8:u8:eq:3'); } }}
+                          />
+                          <GhostBtn small onClick={() => { const c = parseCond(codeFailIn); if (c) { setFCondFail(c); setCodeFailErr(''); sfx.hover(); } else setCodeFailErr('Не разобрать — нужен код вида RPC1:001AB2C8:u8:eq:3'); }} title="Разобрать код условия">Разобрать</GhostBtn>
+                          {fCondFail && <GhostBtn small onClick={() => { setFCondFail(null); setCodeFailIn(''); }} title="Убрать поражение по коду">{Ic.cross(11)}</GhostBtn>}
+                        </div>
+                        {codeFailErr && <p className="text-[10.5px] text-coral">{codeFailErr}</p>}
+                        {fCondFail && (
+                          <div className="space-y-1.5">
+                            <div className="text-[11px] text-coral font-mono break-all">{formatCond(fCondFail)}</div>
+                            <div className="text-[10.5px] text-dim leading-tight">Задание провалится, когда: {memCondText(fCondFail)}.</div>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <select className="field-in px-2 py-1 text-[10px]" value={fCondFail.t} onChange={(e) => setFCondFail({ ...fCondFail, t: e.target.value as CodeType })} title="Тип значения">
+                                {(Object.keys(CODE_TYPE_LABEL) as CodeType[]).map((k) => <option key={k} value={k}>{CODE_TYPE_LABEL[k]}</option>)}
+                              </select>
+                              <select className="field-in px-2 py-1 text-[10px]" value={fCondFail.op} onChange={(e) => setFCondFail({ ...fCondFail, op: e.target.value as CodeOp })} title="Оператор">
+                                {(Object.keys(OP_LABEL) as CodeOp[]).map((k) => <option key={k} value={k}>{OP_LABEL[k]}</option>)}
+                              </select>
+                              <input className="field-in w-24 px-2 py-1 text-[11px]" value={String(fCondFail.v)} onChange={(e) => { const n = Number(e.target.value); if (Number.isFinite(n)) setFCondFail({ ...fCondFail, v: n }); }} title="Значение условия" />
+                              <input className="field-in w-28 px-2 py-1 text-[11px] font-mono" value={hex8(fCondFail.a)} onChange={(e) => { const n = parseHex(e.target.value); if (n !== null) setFCondFail({ ...fCondFail, a: n }); }} title="Адрес (hex)" />
+                            </div>
+                            <p className="text-[10px] text-faint leading-tight">Поражение приоритетнее зачёта: если оба условия совпали разом — задание провалено. Адрес привязан к ЭТОМУ файлу рома — другой дамп может не совпасть.</p>
+                          </div>
+                        )}
+                      </div>
+                    </Field>
                     <PxBtn className="w-full" onClick={() => void saveTask()}>{Ic.check(14)} Сохранить задание</PxBtn>
                     {cell.task && (
-                      <div className="text-[11px] text-teal">Сейчас: «{cell.task.title}» · {romName(cell.task.romId)}</div>
+                      <div className="text-[11px] text-teal">Сейчас: «{cell.task.title}» · {romName(cell.task.romId)}{cell.task.code ? ' · зачёт по коду ✓' : ''}{cell.task.codeFail ? ' · поражение по коду ✓' : ''}</div>
                     )}
                   </div>
                 </Panel>

@@ -7,6 +7,7 @@ import { cellRectOf, cellTaskOf, fmtClock, spentInfo } from '../engine';
 import { effectLabel } from './TaskEditor';
 import { cardArt, cartridgeArt } from '../assets';
 import SegaBox, { type SegaApi } from '../SegaBox';
+import { isFloatT, opOk, readAt } from '../memcode';
 import KeyBinder from '../KeyBinder';
 import {
   loadEmuPrefs, PREFS_EVENT, codeToEjsKey, listGamepads,
@@ -377,6 +378,8 @@ export default function GameScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadId]);
 
+  /* ---------- v0.68 ЗАЧЁТ ПО КОДУ (CodeSearch) — см. эффект ниже, после объявления qArmed/rubgJobArmed ---------- */
+
   /* ---------- RUBG: загрузка рома ЛИЧНОГО задания (эмулятор у самого игрока) ---------- */
   const [rRomBuf, setRRomBuf] = useState<ArrayBuffer | null>(null);
   const [rSaveState, setRSaveState] = useState<unknown>(null);
@@ -453,6 +456,67 @@ export default function GameScreen() {
      паузит игру без сброса — вернулся из карты мира / нажал «Продолжить» и играешь дальше */
   const [rubgPaused, setRubgPaused] = useState(false);
   useEffect(() => { setRubgPaused(false); }, [myJob?.cellIdx, rubgJobArmed]);
+
+  /* ---------- v0.68 ЗАЧЁТ ПО КОДУ (CodeSearch): пока играем задание с условием —
+     раз в полсекунды читаем память эмулятора. Условие ПОБЕДЫ выполнено → задание
+     зачитывается само: челлендж — как «Выполнено» (голосование как обычно), RUBG/QUEST —
+     личное задание закрыто с пометкой «по коду». УСЛОВИЕ ПОРАЖЕНИЯ (codeFail) приоритетнее:
+     выполнено — задание проваливается само (RUBG/QUEST — как кнопка «Провалено»,
+     челлендж — автоперезапуск задания). Пока эмулятор на паузе/не запущен — молчим. ---------- */
+  const codeFiredRef = useRef('');
+  const codeFailFiredRef = useRef('');
+  const chPlaying = !!ch && ch.status === 'playing' && !!ch.started;
+  const qJobOn = !!myQJob && !!myQTask && qArmed && !qPaused;
+  const rJobOn = myJob !== undefined && !!myRubgTask && rubgJobArmed && !rubgPaused;
+  const chCode = chPlaying && ch ? task?.code ?? undefined : undefined;
+  const qCode = qJobOn && myQJob ? myQTask?.code ?? undefined : undefined;
+  const rCode = rJobOn && myJob ? myRubgTask?.code ?? undefined : undefined;
+  const chCodeF = chPlaying && ch ? task?.codeFail ?? undefined : undefined;
+  const qCodeF = qJobOn && myQJob ? myQTask?.codeFail ?? undefined : undefined;
+  const rCodeF = rJobOn && myJob ? myRubgTask?.codeFail ?? undefined : undefined;
+  const activeCode = chCode ?? qCode ?? rCode;
+  const activeFail = chCodeF ?? qCodeF ?? rCodeF;
+  useEffect(() => {
+    if (!activeCode && !activeFail) return;
+    /* ключ захода не зависит от того, какие условия заданы: при перезапуске задания
+       (reloadId/startedAt меняются) срабатывание сбрасывается — условия проверяются заново */
+    const key = ch
+      ? `c:${ch.cellIdx}:${ch.reloadId}`
+      : myQJob
+        ? `q:${myQJob.cellIdx}:${myQJob.startedAt}`
+        : myJob
+          ? `r:${myJob.cellIdx}:${myJob.startedAt}`
+          : '';
+    if (!key) return;
+    const iv = setInterval(() => {
+      try {
+        const heap = ejsApiRef.current?.getHeap?.() ?? null;
+        if (!heap) return;
+        /* ПОРАЖЕНИЕ проверяем ПЕРВЫМ: если оба условия совпали разом — игрок проиграл */
+        if (activeFail && codeFailFiredRef.current !== key) {
+          const curF = readAt(heap, activeFail.a, activeFail.t);
+          if (curF !== null && opOk(curF, activeFail.op, activeFail.v, isFloatT(activeFail.t))) {
+            codeFailFiredRef.current = key;
+            if (chCodeF && ch) dispatch({ t: 'reloadSave', id: me, byCode: true });
+            else if (qCodeF && myQJob) dispatch({ t: 'qJobDone', id: me, cellIdx: myQJob.cellIdx, win: false, byCode: true });
+            else if (rCodeF && myJob) dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: false, byCode: true });
+            return;
+          }
+        }
+        if (!activeCode) return;
+        const cur = readAt(heap, activeCode.a, activeCode.t);
+        if (cur === null) return;
+        if (opOk(cur, activeCode.op, activeCode.v, isFloatT(activeCode.t)) && codeFiredRef.current !== key) {
+          codeFiredRef.current = key;
+          if (chCode && ch) dispatch({ t: 'declareDone', id: me, byCode: true });
+          else if (qCode && myQJob) dispatch({ t: 'qJobDone', id: me, cellIdx: myQJob.cellIdx, win: true, byCode: true });
+          else if (rCode && myJob) dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: true, byCode: true });
+        }
+      } catch { /* ядро перезапустилось — попробуем на следующем тике */ }
+    }, 500);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCode?.a, activeCode?.t, activeCode?.op, activeCode?.v, activeFail?.a, activeFail?.t, activeFail?.op, activeFail?.v, ch?.cellIdx, ch?.status, ch?.started, ch?.paused, ch?.reloadId, myQJob?.cellIdx, myQJob?.startedAt, qArmed, qPaused, myJob?.cellIdx, myJob?.startedAt, rubgJobArmed, rubgPaused, me]);
 
   /* ---------- ЗВУК ВЫСТРЕЛОВ: новый выстрел в rubg.shots — все клиенты играют звук
      (у пистолета/ПП/снайперки разные звуки). Повторы отсекаются по id выстрела ---------- */

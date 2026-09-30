@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp, getRomData } from '../store';
 import { EmuVolumeChip, Field, GhostBtn, Ic, Panel, PxBtn } from '../ui';
 import SegaBox, { type SegaApi } from '../SegaBox';
+import CodeSearchModal from '../CodeSearch';
 import KeyBinder from '../KeyBinder';
 import { idbDel, idbGet, idbPut, uid, exportRomBase, importRomBase } from '../db';
 import { CartridgeBadge, CartCutModal, CoverCropBtn, CoverPickBtn, CoverRemoveBtn, PlatName, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
@@ -52,6 +53,9 @@ export default function EmulatorLauncher() {
   const launchedRomRef = useRef<string | null>(null);
   // наш редактор управления (открывается кнопкой «Управление» рядом с эмулятором)
   const [controlsOpen, setControlsOpen] = useState(false);
+  /* v0.68: окно CodeSearch — поиск по памяти эмулятора (ArtMoney-стиль) для
+     создателей карт: найти адрес жизней/оружия и собрать УСЛОВИЕ ЗАДАНИЯ */
+  const [csOpen, setCsOpen] = useState(false);
   // папки ромов: выбранная папка для загрузки + какие спойлеры свернуты + пустые папки (localStorage)
   const [uploadFolder, setUploadFolder] = useState(''); // '' — «Без папки»
   const [newFolderOpen, setNewFolderOpen] = useState(false); // строка создания новой папки
@@ -522,6 +526,7 @@ export default function EmulatorLauncher() {
           Каждому рому можно дать ОБЛОЖКУ КАРТРИДЖА: 📷 — готовая картинка (размер и пропорции читаются из файла), ✂ — вырезать картридж из картинки ТОЧНО ТАК ЖЕ, как тайлы в редакторе карт: фон АВТО/палитра/пипетка, допуск, мин. размер, склейка частей — клик по вырезанному тайлу ставит его обложкой (пропорции честные, прозрачный фон остаётся прозрачным). В режиме КАРТИНОК (кнопка 🖼 на папке) ромы показываются фотографиями реальных картриджей, а кнопка ⛶ разворачивает большой список картинок в отдельном окне.
           Удаление папок, ромов, сохранений и УБИРАНИЕ ОБЛОЖЕК (✕) подчиняются режиму из «Опций», а Ctrl+Z вернёт последнее удалённое.
           БАЗА РОМОВ: кнопка «Сохранить базу» выгружает ВСЕ ромы одним файлом — вместе с обложками картриджей; «Загрузить базу» заливает такой файл целиком (уже существующие ромы не дублируются) — можно собрать базу на одном устройстве и перенести на другое без загрузки всего остального.
+          {' '}CODESEARCH: запустите ром и нажмите CodeSearch — поиск по памяти игры в стиле ArtMoney: найдите адрес жизней/оружия/счётчика и соберите КОД УСЛОВИЯ для задания (вставляется в редакторе заданий — тогда задание зачтётся само, без «на доверии»).
         </p>
 
         <div className="grid lg:grid-cols-[300px_1fr] gap-5">
@@ -702,9 +707,10 @@ export default function EmulatorLauncher() {
                     </div>
                     <div className="flex gap-2 mt-2 flex-wrap">
                       <GhostBtn onClick={() => { setControlsOpen(true); sfx.click(); }}>{Ic.gear(13)} Управление</GhostBtn>
+                      <GhostBtn onClick={() => { setCsOpen(true); sfx.click(); }} title="Поиск по памяти запущенной игры (как ArtMoney): найти адрес жизней/оружия и получить код условия для задания">{Ic.chip(13)} CodeSearch</GhostBtn>
                       <GhostBtn onClick={toggleFs} title="Развернуть экран игры на весь монитор (выход — Esc)">{isFs ? Ic.cross(12) : Ic.map(12)} {isFs ? 'Свернуть' : 'Во весь экран'}</GhostBtn>
                       <GhostBtn onClick={() => resetEmu()}>{Ic.rotate(13)} Сброс (с начала)</GhostBtn>
-                      <GhostBtn onClick={() => { setRunning(false); launchedRomRef.current = null; }}>{Ic.pause(13)} Выключить</GhostBtn>
+                      <GhostBtn onClick={() => { setRunning(false); launchedRomRef.current = null; setCsOpen(false); }}>{Ic.pause(13)} Выключить</GhostBtn>
                     </div>
                     {/* звук эмулятора — постоянная полоска под кнопкой «Управление» (вместо спрятанной панели EmulatorJS) */}
                     <div className="mt-2 max-w-[300px]">
@@ -852,6 +858,16 @@ export default function EmulatorLauncher() {
             <KeyBinder compact mode={padFam} />
           </div>
         </div>
+      )}
+
+      {/* v0.68: CodeSearch — поиск по памяти запущенного эмулятора (ArtMoney-стиль)
+          + сборка кода условия для заданий; поверх игры, игра продолжает работать */}
+      {csOpen && (
+        <CodeSearchModal
+          getApi={() => ejsApiRef.current}
+          romName={rom?.name ?? 'ROM'}
+          onClose={() => setCsOpen(false)}
+        />
       )}
     </div>
   );

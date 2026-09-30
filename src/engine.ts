@@ -37,8 +37,8 @@ export type Action =
   | { t: 'startTask'; id: string }
   | { t: 'togglePause'; id: string }
   | { t: 'token'; id: string; tokenImg: string | null; tokenId?: string; tokenSize?: number }
-  | { t: 'reloadSave'; id: string }
-  | { t: 'declareDone'; id: string }
+  | { t: 'reloadSave'; id: string; byCode?: boolean } // v0.68 byCode: автоперезапуск по УСЛОВИЮ ПОРАЖЕНИЯ (CodeSearch) — игрок проиграл в роме
+  | { t: 'declareDone'; id: string; byCode?: boolean } // v0.68 byCode: засчитано АВТОМАТИЧЕСКИ по памяти эмулятора (условие CodeSearch из задания)
   | { t: 'approve'; id: string }
   | { t: 'violate'; id: string }
   | { t: 'skip'; id: string; instant: boolean; spentMs: number; loads: number; resource?: 'time' | 'tries' | 'coins' }
@@ -62,7 +62,7 @@ export type Action =
   | { t: 'maplessFinish'; id: string } // БЕЗ КАРТЫ: все матчи сыграны — хост завершает партию победой (после анимаций)
   | { t: 'rubgJump'; id: string; x: number; y: number } // RUBG: прыжок из самолёта в точку (x,y — под самолётом в момент нажатия)
   | { t: 'rubgTick'; id: string } // RUBG: тик хоста (~1 с): фазы зоны, урон вне зоны, форс-высадка, финал
-  | { t: 'rubgJobDone'; id: string; cellIdx: number; win: boolean } // RUBG: игрок сам закрыл ЛИЧНОЕ задание (доверие): win — победа (+HP+лут), false — поражение (−HP)
+  | { t: 'rubgJobDone'; id: string; cellIdx: number; win: boolean; byCode?: boolean } // RUBG: игрок сам закрыл ЛИЧНОЕ задание (доверие): win — победа (+HP+лут), false — поражение (−HP); v0.68 byCode — зачтено по памяти (условие CodeSearch)
   | { t: 'rubgJobLeave'; id: string; cellIdx: number } // RUBG: игрок ушёл из личного задания без последствий
   | { t: 'rubgUseItem'; id: string; itemId: string } // RUBG: использовать хилку (+HP)
   | { t: 'rubgShoot'; id: string; itemId: string; targetId: string } // RUBG: выстрел по цели (играющему — 100%, идущему — шанс от расстояния); все видят летящую пулю
@@ -75,7 +75,7 @@ export type Action =
   | { t: 'rubgStopThief'; id: string } // RUBG: жертва нажала «Остановить вора» (кулаул 15 с)
   | { t: 'rubgStealth'; id: string } // RUBG: активировать стелс (сгорает карта стелса)
   | { t: 'rubgBelt'; id: string; itemId: string; on: boolean } // RUBG: надеть/снять предмет с ПОЯСА (на поясе макс. 3 — только они имеют кнопки действий; пояс не воруется)
-  | { t: 'qJobDone'; id: string; cellIdx: number; win: boolean } // QUEST: игрок закрыл ЛИЧНОЕ задание (доверие): победа — награда и прогресс, поражение — плата и счётчик провалов
+  | { t: 'qJobDone'; id: string; cellIdx: number; win: boolean; byCode?: boolean } // QUEST: игрок закрыл ЛИЧНОЕ задание (доверие): победа — награда и прогресс, поражение — плата и счётчик провалов; v0.68 byCode — зачтено по памяти (условие CodeSearch)
   | { t: 'qJobLeave'; id: string; cellIdx: number } // QUEST: игрок ушёл из личного задания без последствий
   | { t: 'qCardAck'; id: string } // QUEST: игрок подтвердил выпавшую карточку бонуса/ловушки
   | { t: 'dialogPick'; id: string; npcId: string; nodeId: string; optIdx: number } // QUEST: выбор игрока в диалоге NPC (награда/флаг/переход/концовка)
@@ -2105,11 +2105,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         const kind = rubgRandomKind();
         rubgGiveItem(p, kind); // на пояс, если есть слот (макс. 3), иначе в общий инвентарь
         s.captured[a.cellIdx] = p.id; // мгновенный хозяин ячейки (своё задание в RUBG не предлагается)
-        log(`🏆 ${p.name} ПРОШЁЛ задание №${a.cellIdx + 1}: +${stake.winH}% HP, трофей ${RUBG_ITEMS[kind].icon} ${RUBG_ITEMS[kind].name} — HP ${p.hp}%`);
+        log(`🏆 ${p.name} ПРОШЁЛ задание №${a.cellIdx + 1}${a.byCode ? ' — ЗАЧТЕНО ПО КОДУ 🤖' : ''}: +${stake.winH}% HP, трофей ${RUBG_ITEMS[kind].icon} ${RUBG_ITEMS[kind].name} — HP ${p.hp}%`);
       } else {
         const stake = taskStakeOf(a.cellIdx);
         p.hp = Math.max(0, (p.hp ?? RUBG_HP_MAX) - stake.loseH);
-        log(`💢 ${p.name} проиграл задание №${a.cellIdx + 1}: −${stake.loseH}% HP — HP ${p.hp}%`);
+        log(`💢 ${p.name} проиграл задание №${a.cellIdx + 1}${a.byCode ? ' — ПОРАЖЕНИЕ ПО КОДУ 🤖' : ''}: −${stake.loseH}% HP — HP ${p.hp}%`);
       }
       checkElim();
       break;
@@ -2179,7 +2179,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           if (bdef) log(`👹 Босс «${bdef.name}» ПОБЕЖДЕН игроком ${p.name}!`);
         }
         const tkw = cellTaskOf(s, map, a.cellIdx);
-        log(`🏆 ${p.name} ПРОШЁЛ задание «${(tkw?.title ?? `№${a.cellIdx + 1}`).slice(0, 30)}» — всего выполнено: ${done.length}`);
+        log(`🏆 ${p.name} ПРОШЁЛ задание «${(tkw?.title ?? `№${a.cellIdx + 1}`).slice(0, 30)}»${a.byCode ? ' — ЗАЧТЕНО ПО КОДУ 🤖' : ''} — всего выполнено: ${done.length}`);
       } else {
         s.qFails = s.qFails ?? {};
         s.qFails[p.id] = (s.qFails[p.id] ?? 0) + 1;
@@ -2204,7 +2204,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           s.qCaptureCd = s.qCaptureCd ?? {};
           s.qCaptureCd[p.id] = Date.now() + 8000;
         }
-        log(`💢 ${p.name} проиграл задание №${a.cellIdx + 1} (провалов: ${s.qFails[p.id]})`);
+        log(`💢 ${p.name} проиграл задание №${a.cellIdx + 1}${a.byCode ? ' — ПОРАЖЕНИЕ ПО КОДУ 🤖' : ''} (провалов: ${s.qFails[p.id]})`);
       }
       checkElim();
       break;
@@ -2786,7 +2786,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (ch.mode === 'coins' || ch.mode === 'hp') {
         ch.reloadId++;
         if (ch.paused) ch.paused = false;
-        log(`↻ ${p.name}: перезапуск задания (${ch.mode === 'hp' ? 'HP — без списаний' : 'монеты — без списаний'})`);
+        log(a.byCode
+          ? `💀 ${p.name}: ПОРАЖЕНИЕ ПО КОДУ 🤖 — задание перезапущено автоматически`
+          : `↻ ${p.name}: перезапуск задания (${ch.mode === 'hp' ? 'HP — без списаний' : 'монеты — без списаний'})`);
         break;
       }
       // при нуле ресурса перезапускать нечего: в попытках каждая загрузка стоит попытку,
@@ -2804,7 +2806,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         ch.paused = false;
         if (ch.mode === 'time') ch.startedAt = Date.now();
       }
-      if (ch.mode === 'tries') log(`↻ ${p.name}: перезапуск задания — попытка №${ch.loads}`);
+      if (a.byCode) log(`💀 ${p.name}: ПОРАЖЕНИЕ ПО КОДУ 🤖 — задание перезапущено автоматически${ch.mode === 'tries' ? ` (попытка №${ch.loads})` : ''}`);
+      else if (ch.mode === 'tries') log(`↻ ${p.name}: перезапуск задания — попытка №${ch.loads}`);
       else log(`↻ ${p.name}: перезапуск задания`);
       break;
     }
@@ -2819,7 +2822,9 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       ch.status = 'voting';
       ch.approvals = [p.id];
       ch.violations = [];
-      log(`✋ ${p.name}: «Задание выполнено!» — нужно подтверждение`);
+      log(a.byCode
+        ? `🤖 ${p.name}: условие ПО КОДУ выполнено — задание засчитано автоматически (нужно подтверждение)`
+        : `✋ ${p.name}: «Задание выполнено!» — нужно подтверждение`);
       break;
     }
     case 'approve': {
