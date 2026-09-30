@@ -512,7 +512,7 @@ export default function EmulatorLauncher() {
           <input ref={dirRef} type="file" multiple className="hidden" {...({ webkitdirectory: 'true', directory: 'true' } as Record<string, string>)} onChange={(e) => { void onUploadFolder(e.target.files); e.target.value = ''; }} />
         </div>
         <p className="text-[13px] text-dim mb-6 max-w-3xl">
-          Тестовый стенд: гоняйте ромы (<P>NES</P>, <P>SEGA Mega Drive</P> / <P>Master System</P> / <P>GAME GEAR</P>, <P>SNES</P>, <P>Game Boy/Color</P>, <P>GBA</P>, <P>SEGA 32X</P>, <P>Atari 2600</P>, <P>PC Engine</P>) — в том числе доступны для запуска ромы <P>GAME GEAR</P> (.gg), они играют в родных пропорциях 160×144. Проходите до нужного места и записывайте состояние одной из ЧЕТЫРЁХ кнопок:
+          Тестовый стенд: гоняйте ромы (<P>NES</P>, <P>SEGA Mega Drive</P> / <P>Master System</P> / <P>GAME GEAR</P>, <P>SNES</P>, <P>Game Boy/Color</P>, <P>GBA</P>, <P>SEGA 32X</P>, <P>Atari 2600</P>, <P>PC Engine</P>) — в том числе ромы .gg, они играют в родных пропорциях 160×144. Проходите до нужного места и записывайте состояние одной из ЧЕТЫРЁХ кнопок:
           <span className="text-gold font-display uppercase"> «Сохранить уровень»</span> (Уровень 1, 2, …),
           <span className="text-coral font-display uppercase"> «Сохранить босса»</span> (Босс 1, 2, …),
           <span className="text-teal font-display uppercase"> «Сохранить моё задание»</span> (одно на игру, перезаписывается) и

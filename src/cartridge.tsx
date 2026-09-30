@@ -6,6 +6,23 @@ import { HoldDeleteButton } from './delGuard';
 import { GhostBtn, Ic, Modal, PxBtn, Stepper } from './ui';
 import { sfx } from './sound';
 import { useApp } from './store';
+/* v0.67: ДЕФОЛТНЫЕ ОБЛОЖКИ — ФОТОГРАФИИ РЕАЛЬНЫХ КАРТРИДЖЕЙ (первые статические
+   ассеты проекта): PNG на прозрачном фоне, длинная сторона ≤320px. Вариант
+   картинки выбирается по ФОРМАТУ рома + РЕГИОНУ в имени файла (cartImgKeyOf ниже) */
+import cartImgNes from './assets/carts/nes.png';
+import cartImgFamicom from './assets/carts/famicom.png';
+import cartImgDendy from './assets/carts/dendy.png';
+import cartImgMd from './assets/carts/sega-mega-drive.png';
+import cartImgGenesis from './assets/carts/sega-genesis.png';
+import cartImgSnesJp from './assets/carts/snes-jp.png';
+import cartImgSnesUsa from './assets/carts/snes-usa.png';
+import cartImgSms from './assets/carts/sms.png';
+import cartImgGg from './assets/carts/gg.png';
+import cartImg32 from './assets/carts/sega32.png';
+import cartImgGb from './assets/carts/gb.png';
+import cartImgGba from './assets/carts/gba.png';
+import cartImgA26 from './assets/carts/a26.png';
+import cartImgPce from './assets/carts/pce.png';
 
 /* ---------- v0.61: КАРТРИДЖИ ПЛАТФОРМ ----------
    Пиксельный бейдж рома в ФОРМЕ и ЦВЕТЕ картриджа/карты своей платформы
@@ -60,6 +77,77 @@ const CART_LABELS: Record<CartKey, string> = {
 };
 
 export const cartLabelOf = (rom: { ext: string; fileName: string }): string => CART_LABELS[cartKeyOf(rom.ext, rom.fileName)];
+
+/* ---------- v0.67: фото-картриджи — дефолтная обложка по платформе и региону ----------
+   Платформа рома определяется ПО ФОРМАТУ (расширению файла), вариант — ПО РЕГИОНУ
+   из имени файла (метки в скобках, как принято в ромлистах):
+   · NES:  (P)/(pirate)/(dendy) → Dendy, (J)/(Jap)/(Japan) → Famicom,
+           иначе (вкл. (U)/(USA) и без метки) → NES;
+   · SNES: (J)/(Jap)/(Japan) → Super Famicom, иначе → SNES США;
+   · SEGA MD-семейство (.md/.gen/.bin): (U)/(USA) → Genesis, иначе (EU/JP/без
+           метки) → Mega Drive; .sms → Master System, .gg → Game Gear, .32x → 32X;
+   · остальные платформы регион не различают: .gb → Game Boy, .gbc → Game Boy
+     (фото Game Boy Color пока нет — показываем Game Boy), .gba → GBA,
+     .a26 → Atari 2600, .pce → PC Engine HuCARD.
+   Своя обложка рома (RomDef.cover) по-прежнему ГЛАВНЕЕ любой дефолтной. */
+const CART_IMG: Record<string, string> = {
+  'nes-usa': cartImgNes,
+  'nes-jp': cartImgFamicom,
+  'nes-pirate': cartImgDendy,
+  'md-eu': cartImgMd,
+  'md-usa': cartImgGenesis,
+  'snes-usa': cartImgSnesUsa,
+  'snes-jp': cartImgSnesJp,
+  'sms': cartImgSms,
+  'gg': cartImgGg,
+  'sega32': cartImg32,
+  'gb': cartImgGb,
+  'gbc': cartImgGb, // v0.67: фото GBC пока нет — дефолтим к Game Boy
+  'gba': cartImgGba,
+  'a26': cartImgA26,
+  'pce': cartImgPce,
+};
+
+/* метки региона из имени файла: содержимое ВСЕХ скобок, lower-case
+   (например "Duck Tales (U) [!]" → ['u', '!']) */
+function fileNameTags(fileName?: string): string[] {
+  const tags: string[] = [];
+  const re = /\(([^)]{1,24})\)/g;
+  const s = (fileName ?? '').toLowerCase();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s))) tags.push(m[1].trim());
+  return tags;
+}
+
+/* короткие метки ('u','j','p') сравниваем ТОЛЬКО целиком — чтобы «(unknown)»
+   не сработал как 'u'; длинные можно по префиксу ('japan', 'usa', 'pirate') */
+function tagHit(tags: string[], exact: string[], prefixes: string[]): boolean {
+  return tags.some((t) => exact.includes(t) || prefixes.some((n) => t.startsWith(n)));
+}
+
+/* ключ дефолтной фото-обложки рома; null — фото нет (рисуем как раньше) */
+export function cartImgKeyOf(ext: string | undefined, fileName?: string): string | null {
+  const e = (ext ?? '').toLowerCase();
+  const tags = fileNameTags(fileName);
+  const hasUSA = tagHit(tags, ['u', 'usa', 'us'], ['usa']);
+  const hasJ = tagHit(tags, ['j', 'jap', 'jp'], ['japan']);
+  const hasP = tagHit(tags, ['p'], ['pirate', 'dendy']);
+  if (e === 'nes') return hasP ? 'nes-pirate' : hasJ ? 'nes-jp' : 'nes-usa';
+  if (e === 'snes') return hasJ ? 'snes-jp' : 'snes-usa';
+  if (e === 'sega') {
+    const fe = ((fileName ?? '').split('.').pop() ?? '').toLowerCase();
+    if (fe === 'sms') return 'sms';
+    if (fe === 'gg') return 'gg';
+    if (fe === '32x') return 'sega32';
+    return hasUSA ? 'md-usa' : 'md-eu'; // .md/.gen/.bin и старые ромы без расширения
+  }
+  if (e === 'gb') return 'gb';
+  if (e === 'gbc') return 'gbc';
+  if (e === 'gba') return 'gba';
+  if (e === 'a26') return 'a26';
+  if (e === 'pce') return 'pce';
+  return null;
+}
 
 /* v0.62: единое выделение названий платформ в подсказках (как GAME GEAR в v0.61);
    v0.65: каждая платформа — в СВОЁМ цвете (PLAT_COLOR ниже) */
@@ -262,8 +350,9 @@ function CPix({ rows, pal, h, w }: { rows: string[]; pal: Record<string, string>
   );
 }
 
-/* ---------- бейдж рома: обложка (если загружена) или рисованный картридж ---------- */
+/* ---------- бейдж рома: обложка (если загружена) → фото-картридж платформы/региона → рисованный картридж ---------- */
 export function CartridgeBadge({ rom, h = 18, className = '' }: { rom: { cover?: string; ext: string; fileName: string; name: string }; h?: number; className?: string }) {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null); // фото не загрузилось → рисуем как раньше
   if (rom.cover) {
     /* v0.62: высота фиксирована, ширина — СВОБОДНАЯ (по natural-пропорции):
        вертикальная HuCARD не сплющивается, широкий картридж не обрезается */
@@ -274,6 +363,25 @@ export function CartridgeBadge({ rom, h = 18, className = '' }: { rom: { cover?:
         title={rom.name}
         style={{ height: h, width: 'auto' }}
         className={`border border-[#313c72] bg-[#05070f] shrink-0 ${className}`}
+      />
+    );
+  }
+  const label = CART_LABELS[cartKeyOf(rom.ext, rom.fileName)];
+  /* v0.67: у рома без своей обложки показываем ФОТОГРАФИЮ реального картриджа
+     его платформы (вариант — по региону в имени файла); если фото вдруг не
+     загрузилось (битый ассет) — откат к рисованной форме, как в v0.61 */
+  const imgKey = cartImgKeyOf(rom.ext, rom.fileName);
+  const imgSrc = (imgKey && CART_IMG[imgKey]) || null;
+  if (imgSrc && imgSrc !== failedSrc) {
+    return (
+      <img
+        src={imgSrc}
+        alt={label}
+        title={label}
+        style={{ height: h, width: 'auto' }}
+        className={`shrink-0 ${className}`}
+        draggable={false}
+        onError={() => setFailedSrc(imgSrc)}
       />
     );
   }

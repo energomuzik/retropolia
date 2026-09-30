@@ -3935,11 +3935,9 @@ export default function MapEditor() {
                       onClick={() => { updMap({ endings: [...(map.endings ?? []), { id: uid('end'), name: `КОНЦОВКА ${(map.endings ?? []).length + 1}`, desc: '' }] }); sfx.coin(); }}
                       className="w-full py-1.5 border-2 border-dashed border-edge text-faint font-display text-[10px] uppercase hover:text-paper cursor-pointer"
                     >+ Добавить концовку</button>
-                    <div className="flex items-center justify-between border-2 border-edge px-2 py-1.5">
-                      <span className="text-[10px] text-dim">Поражение при N провалах заданий</span>
-                      <Stepper value={map.questDefeatFails ?? 0} onChange={(v) => updMap({ questDefeatFails: v })} min={0} max={99} />
-                    </div>
-                    <p className="text-[9px] text-faint leading-tight">0 — только истощение ресурсов. Иначе игрок вылетает, когда провалит (или проиграет) столько заданий.</p>
+                    {/* v0.67: настройка «Поражение при N провалах заданий» УБРАНА — проигрыш
+                        в квесте ТОЛЬКО на нуле HP (или время/попытки у std-карт); поле
+                        questDefeatFails в данных старых карт остаётся, но не читается */}
                   </div>
                 )}
               </div>

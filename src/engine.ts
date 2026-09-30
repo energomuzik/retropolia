@@ -359,7 +359,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     const isRubg = map.mode === 'rubg';
     const hpRes = isRubg || map.resMode === 'hp'; // ресурс «полоска HP» — вылет по нулю HP (RUBG и карты с выбором «HP»)
     const resM = normResMode(map.resMode); // время+попытки — один ресурс (time/tries нормализуются в std)
-    const failsLimit = map.questDefeatFails && map.questDefeatFails > 0 ? Math.floor(map.questDefeatFails) : 0; // QUEST: поражение при N провалах
+    /* v0.67: ПРОИГРЫШ В QUEST — ТОЛЬКО РЕСУРСЫ: поражение по лимиту проваленных
+       заданий (questDefeatFails, напр. 5 проигрышей боссу) УБРАНО — ни quest,
+       ни quest solo не выбивают за провалы; партия проигрывается только на
+       нулевой полоске HP (или время/попытки у std-карт) */
     for (const p of s.players) {
       const hpZero = (p.hp ?? RUBG_HP_MAX) <= 0;
       let out: boolean;
@@ -377,8 +380,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       } else {
         out = p.secLeft <= 0 && p.triesLeft <= 0;
       }
-      const failedOut = !out && failsLimit > 0 && questMode && (s.qFails?.[p.id] ?? 0) >= failsLimit;
-      if (p.alive && !p.spect && (out || failedOut)) {
+      /* v0.67: выбывание ТОЛЬКО по ресурсам (failedOut из v0.54–v0.66 удалён) */
+      if (p.alive && !p.spect && out) {
         p.alive = false;
         if (s.challenge && current().id === p.id) s.challenge = null;
         if (s.pendingCard && s.pendingCard.player === p.id) s.pendingCard = null;
@@ -388,9 +391,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
         if (s.qCards) delete s.qCards[p.id];
         s.awaitPost = false;
         s.moving = null;
-        log(failedOut
-          ? `💀 ${p.name} выбывает — провалов заданий ${s.qFails?.[p.id] ?? 0} из допускаемых ${failsLimit}`
-          : hpRes ? `💀 ${p.name} ВЫБЫВАЕТ — полоска HP на нуле!` : `💀 ${p.name} выбывает — ${coinsFatal ? 'монеты исчерпаны' : 'ресурсы исчерпаны'}`);
+        log(hpRes ? `💀 ${p.name} ВЫБЫВАЕТ — полоска HP на нуле!` : `💀 ${p.name} выбывает — ${coinsFatal ? 'монеты исчерпаны' : 'ресурсы исчерпаны'}`);
         if (map.mode === 'skill' && p.isHost) log(`❌ SKILL CHALLENGE ПРОВАЛЕН: ресурсы исчерпаны до ${SKILL_TURNS} ходов`);
         if (map.mapless && p.isHost) log(`❌ ЧЕЛЛЕНДЖ ПРОВАЛЕН: ресурсы исчерпаны на матче ${(s.mapless?.done ?? 0) + 1} из ${s.mapless?.total ?? '?'}`);
       }
@@ -587,8 +588,6 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       }
     }
   };
-  /* «/N» для логов провалов (QUEST: доп. условие поражения создателя карты) */
-  const failsLimitText = (m: GameMap): string => (m.questDefeatFails && m.questDefeatFails > 0 ? `/${Math.floor(m.questDefeatFails)}` : '');
   /* Награда (квест NPC / выбор в диалоге): только включённые на карте ресурсы */
   const giveReward = (p: PlayerState, r: NpcReward, what: string): string => {
     const parts: string[] = [];
@@ -2205,7 +2204,7 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
           s.qCaptureCd = s.qCaptureCd ?? {};
           s.qCaptureCd[p.id] = Date.now() + 8000;
         }
-        log(`💢 ${p.name} проиграл задание №${a.cellIdx + 1}${failsLimitText(map) ? ` (провалов: ${s.qFails[p.id]}${failsLimitText(map)})` : ''}`);
+        log(`💢 ${p.name} проиграл задание №${a.cellIdx + 1} (провалов: ${s.qFails[p.id]})`);
       }
       checkElim();
       break;

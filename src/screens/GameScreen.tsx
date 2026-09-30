@@ -3290,19 +3290,14 @@ export default function GameScreen() {
                   </>
                 );
               })() : isQuest && !winner ? (() => {
-                /* v0.66: БАГФИКС «НИЧЬЯ» ПРИ ПРОВАЛЕ КВЕСТА — вылет по лимиту провалов
-                   заданий (questDefeatFails), нулю HP или ресурсам в QUEST раньше НЕ
-                   ставил концовку (s.ending пишется только при победе), оверлей
-                   проваливался в классическую ветку и показывал «ПОБЕДА · НИЧЬЯ»
-                   вместо поражения. Теперь честное «QUEST ПРОВАЛЕН» с причиной. */
-                const fl = map.questDefeatFails && map.questDefeatFails > 0 ? Math.floor(map.questDefeatFails) : 0;
+                /* v0.66: честное «QUEST ПРОВАЛЕН» вместо классического «ПОБЕДА · НИЧЬЯ»
+                   (s.ending пишется только при победе). v0.67: причина «Заданий
+                   провалено…» УДАЛЕНА — поражение по лимиту провалов больше не
+                   существует, квест проигрывается только на нуле HP/ресурсов. */
                 const dead = s.players.filter((p) => !p.alive);
-                const failedP = fl > 0 ? dead.find((p) => (s.qFails?.[p.id] ?? 0) >= fl) : undefined;
                 const hpP = dead.find((p) => (p.hp ?? RUBG_HP_MAX) <= 0);
-                const loser = failedP ?? hpP ?? dead[0];
-                const cause = failedP
-                  ? `Заданий провалено: ${s.qFails?.[failedP.id] ?? 0} из допускаемых ${fl} — столько ошибок квест не прощает.`
-                  : hpP
+                const loser = hpP ?? dead[0];
+                const cause = hpP
                   ? 'Полоска HP опустилась до нуля — квест остался незавершённым.'
                   : 'Ресурсы исчерпаны — квест остался незавершённым.';
                 return (
