@@ -1,4 +1,4 @@
-/* ---------- v0.68 CODESEARCH: ядро поиска по памяти эмулятора ----------
+/* ---------- v0.68/v0.69 CODESEARCH: ядро поиска по памяти эмулятора ----------
    Всё работает поверх ЖИВОГО представления памяти ядра (WebAssembly heap):
    SegaBox отдаёт его через SegaApi.getHeap() — iframe с эмулятором того же
    происхождения (srcDoc), поэтому родительское окно читает и пишет байты
@@ -9,6 +9,9 @@
    3) повторять, пока не останутся 1–3 адреса — это и есть адрес жизней;
    4) адрес можно править (проверка), заморозить и превратить в УСЛОВИЕ ЗАДАНИЯ
       (строка вида RPC1:001AB2C8:u8:eq:3) для редактора заданий.
+   v0.69: ПОСЛЕДОВАТЕЛЬНОСТИ (как «пользовательский тип» в ArtMoney) — можно
+   искать 2–4 значения ПОДРЯД в памяти (напр. текущее HP и максимум рядом):
+   адрес-кандидат — начало цепочки, все позиции должны сравниться.
    Дополнительно режим «неизвестное значение»: снимок памяти, дальше фильтры
    «изменилось/не изменилось/выросло/уменьшилось» — для величин, чьё начальное
    число неизвестно (полоска босса, счётчик открытого оружия и т.п.). */
@@ -140,13 +143,20 @@ export const memCondText = (c: MemCond) => `память 0x${hex8(c.a)} (${CODE_
 
 /* ---------- сканер ---------- */
 
-export type FilterKind = 'exact' | 'changed' | 'unchanged' | 'inc' | 'dec';
+/* v0.69: фильтры «среди найденных» — ПОЛНЫЙ набор: точное значение, операторы
+   (= ≠ > < ≥ ≤ — в v0.68 пять операторов были в UI, но тип/свитч их не знали и
+   фильтр молча не находил ничего — исправлено) и сравнение с прошлым значением. */
+export type FilterKind = 'exact' | 'ne' | 'gt' | 'lt' | 'ge' | 'le' | 'changed' | 'unchanged' | 'inc' | 'dec';
 
 export interface ScanState {
   t: CodeType;
+  /** v0.69: ширина ПОСЛЕДОВАТЕЛЬНОСТИ — сколько значений подряд ищем (1 = обычный поиск).
+      Фиксируется ПЕРВЫМ поиском; фильтры обязаны держать ту же ширину. */
+  seqN: number;
   /** Явный список адресов-кандидатов; null — «вся память» (после «неизвестного»). */
   addrs: Uint32Array | null;
-  /** Значения кандидатов на МОМЕНТ последнего прохода (параллельны addrs). */
+  /** Значения кандидатов на МОМЕНТ последнего прохода, ПОЗИЦИЯ ЗА ПОЗИЦИЕЙ:
+      vals[i*seqN + p] — прошлое значение p-го элемента цепочки (адрес addrs[i] + p*size(t)). */
   vals: Float64Array | null;
   /** Снимок всей памяти для режима «неизвестное значение» (пока addrs === null). */
   base: Uint8Array | null;
@@ -164,19 +174,14 @@ export interface ScanResult {
 /** Превышение — список не ведём, предлагаем сузить поиск. */
 export const SCAN_CAP = 1_500_000;
 
-const matchVal = (cur: number, kind: FilterKind, ref: number, v: number, float: boolean): boolean => {
-  switch (kind) {
-    case 'exact': return sameVal(cur, v, float);
-    case 'changed': return !sameVal(cur, ref, float);
-    case 'unchanged': return sameVal(cur, ref, float);
-    case 'inc': return cur > ref;
-    case 'dec': return cur < ref;
-  }
-};
-
 /**
  * Проход поиска. kind='exact' — точное значение v; остальные сравнивают текущее
  * значение с прошлым (для явного списка — vals, для «неизвестного» — снимок base).
+ * v0.69: seq — ЗНАЧЕНИЯ ПОСЛЕДОВАТЕЛЬНОСТИ (2–4 числа, лежащие ПОДРЯД в памяти;
+ * один элемент — одно значение типа t): адрес-кандидат — НАЧАЛО цепочки, сравнить
+ * нужно КАЖДУЮ позицию; для операторов (= ≠ > < ≥ ≤) позиция p сравнивается со
+ * своим seq[p], для «изменилось/не изменилось/выросло/уменьшилось» — со своим
+ * прошлым значением. Одиночный поиск = seq из одного элемента (или пустой).
  * Сканирование идёт ЧАНКАМИ с yield через setTimeout, чтобы страница не подвисала:
  * игра продолжает крутиться, значения меняются на глазах — это и нужно для фильтров.
  * st === null — ПЕРВЫЙ проход: для 'exact' это полный поиск, для остальных —
@@ -189,11 +194,14 @@ export async function runScan(
   kind: FilterKind,
   v: number,
   onChunk?: (done: number, total: number) => void,
+  seq: number[] = [],
 ): Promise<{ result: ScanResult; state: ScanState }> {
   const yieldToUi = () => new Promise<void>((r) => setTimeout(r, 0));
   const float = isFloatT(t);
   const sz = typeSize(t);
   const CHUNK = 8 * 1024 * 1024;
+  /* ширина цепочки фиксируется ПЕРВЫМ поиском; на фильтрах берём её из состояния */
+  const seqN = st ? st.seqN : Math.max(1, Math.min(4, seq.length || 1));
 
   let heap = getHeap();
   if (!heap || heap.length < sz) throw new Error('Память ядра ещё не готова — дайте игре запуститься');
@@ -205,27 +213,52 @@ export async function runScan(
     await yieldToUi();
     return {
       result: { addrs: null, vals: null, count: base.length, overflow: false, scanned: base.length },
-      state: { t, addrs: null, vals: null, base, baseLen: base.length },
+      state: { t, seqN, addrs: null, vals: null, base, baseLen: base.length },
     };
   }
 
-  const state: ScanState = st ?? { t, addrs: null, vals: null, base: null, baseLen: 0 };
+  const state: ScanState = st ?? { t, seqN, addrs: null, vals: null, base: null, baseLen: 0 };
   const out: number[] = [];
   const valsOut: number[] = [];
   let overflow = false;
 
+  /* Сравнение ОДНОЙ позиции цепочки. sv — «своё» значение для операторов (не задано —
+     главный v: одиночный поиск работает ровно как раньше); ref — прошлое значение. */
+  const posOk = (cur: number, ref: number, p: number): boolean => {
+    const sv = seq.length > p ? seq[p] : v;
+    switch (kind) {
+      case 'exact': return sameVal(cur, sv, float);
+      case 'ne': return !sameVal(cur, sv, float);
+      case 'gt': return cur > sv;
+      case 'lt': return cur < sv;
+      case 'ge': return cur > sv || sameVal(cur, sv, float);
+      case 'le': return cur < sv || sameVal(cur, sv, float);
+      case 'changed': return !sameVal(cur, ref, float);
+      case 'unchanged': return sameVal(cur, ref, float);
+      case 'inc': return cur > ref;
+      case 'dec': return cur < ref;
+    }
+  };
+
   if (state.addrs) {
-    // Фильтрация прошлого списка — быстрый путь.
+    // Фильтрация прошлого списка — быстрый путь (каждая позиция цепочки — своё сравнение).
+    const sn = state.seqN;
     const total = state.addrs.length;
-    for (let i = 0; i < state.addrs.length; i++) {
+    for (let i = 0; i < total; i++) {
       if ((i & 0xffff) === 0) { onChunk?.(i, total); await yieldToUi(); heap = getHeap(); if (!heap) throw new Error('Эмулятор перезапустился — повторите поиск'); }
       const a = state.addrs[i];
-      const cur = readAt(heap, a, t);
-      if (cur === null) continue;
-      const ref = state.vals ? state.vals[i] : v;
-      if (matchVal(cur, kind, ref, v, float)) {
-        if (out.length < SCAN_CAP) { out.push(a); valsOut.push(cur); }
-        else overflow = true;
+      let all = true;
+      for (let p = 0; p < sn; p++) {
+        const cur = readAt(heap, a + p * sz, t);
+        if (cur === null) { all = false; break; }
+        const ref = state.vals ? state.vals[i * sn + p] : v;
+        if (!posOk(cur, ref, p)) { all = false; break; }
+      }
+      if (all) {
+        if (out.length < SCAN_CAP) {
+          out.push(a);
+          for (let p = 0; p < sn; p++) valsOut.push(readAt(heap, a + p * sz, t) ?? 0);
+        } else overflow = true;
       }
     }
     onChunk?.(total, total);
@@ -233,7 +266,7 @@ export async function runScan(
     const vals = Float64Array.from(valsOut);
     return {
       result: { addrs, vals, count: out.length, overflow, scanned: total },
-      state: { t, addrs, vals, base: state.base, baseLen: state.baseLen },
+      state: { t, seqN: sn, addrs, vals, base: state.base, baseLen: state.baseLen },
     };
   }
 
@@ -241,24 +274,38 @@ export async function runScan(
   const total = heap.length;
   const base = state.base;
   const lim = base ? Math.min(base.length, heap.length) : heap.length;
-  for (let a = 0; a + sz <= lim; a++) {
+  // цепочка должна лежать ЦЕЛИКОМ: последний байт a+seqN*sz-1 — в пределах lim
+  for (let a = 0; a + state.seqN * sz <= lim; a++) {
     if ((a & (CHUNK - 1)) === 0 && a > 0) {
       onChunk?.(a, total);
       await yieldToUi();
       heap = getHeap();
       if (!heap) throw new Error('Эмулятор перезапустился — повторите поиск');
     }
-    const cur = readAt(heap, a, t);
-    if (cur === null) continue;
-    if (kind === 'exact') {
-      if (!sameVal(cur, v, float)) continue;
-    } else if (base) {
-      const ref = readAt(base, a, t);
-      if (ref === null) continue;
-      if (!matchVal(cur, kind, ref, v, float)) continue;
+    const cur0 = readAt(heap, a, t);
+    if (cur0 === null) continue;
+    if (base) {
+      const ref0 = readAt(base, a, t);
+      if (ref0 === null || !posOk(cur0, ref0, 0)) continue;
+    } else if (kind === 'exact' && !sameVal(cur0, seq.length > 0 ? seq[0] : v, float)) continue;
+    let all = true;
+    for (let p = 1; p < state.seqN; p++) {
+      const cur = readAt(heap, a + p * sz, t);
+      if (cur === null) { all = false; break; }
+      let ref = v;
+      if (base) {
+        const r = readAt(base, a + p * sz, t);
+        if (r === null) { all = false; break; }
+        ref = r;
+      }
+      if (!posOk(cur, ref, p)) { all = false; break; }
     }
-    if (out.length < SCAN_CAP) { out.push(a); valsOut.push(cur); }
-    else overflow = true;
+    if (!all) continue;
+    if (out.length < SCAN_CAP) {
+      out.push(a);
+      valsOut.push(cur0);
+      for (let p = 1; p < state.seqN; p++) valsOut.push(readAt(heap, a + p * sz, t) ?? 0);
+    } else overflow = true;
   }
   onChunk?.(total, total);
   // Переполнение в цепочке «неизвестного значения»: список не сохраняем, но обновляем
@@ -267,13 +314,13 @@ export async function runScan(
     const newBase = heap.slice(0);
     return {
       result: { addrs: null, vals: null, count: out.length, overflow: true, scanned: total },
-      state: { t, addrs: null, vals: null, base: newBase, baseLen: newBase.length },
+      state: { t, seqN: state.seqN, addrs: null, vals: null, base: newBase, baseLen: newBase.length },
     };
   }
   const addrs = Uint32Array.from(out);
   const vals = Float64Array.from(valsOut);
   return {
     result: { addrs, vals, count: out.length, overflow, scanned: total },
-    state: { t, addrs, vals, base: state.base, baseLen: state.baseLen },
+    state: { t, seqN: state.seqN, addrs, vals, base: state.base, baseLen: state.baseLen },
   };
 }

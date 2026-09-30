@@ -5,16 +5,22 @@ import { sfx } from './sound';
 import type { SegaApi } from './SegaBox';
 import type { CodeOp, CodeType } from './types';
 import {
-  CODE_TYPE_LABEL, OP_LABEL, SCAN_CAP, formatCond, hex8, parseCond, parseHex, readAt, runScan, writeAt,
+  CODE_TYPE_LABEL, OP_LABEL, SCAN_CAP, formatCond, hex8, parseCond, parseHex, readAt, runScan, typeSize, writeAt,
   type FilterKind, type ScanState,
 } from './memcode';
 
-/* ---------- v0.68 CODESEARCH — окно поиска по памяти эмулятора ----------
+/* ---------- v0.68/v0.69 CODESEARCH — окно поиска по памяти эмулятора ----------
    Открывается кнопкой CodeSearch в «Запуске эмулятора» поверх работающей игры.
    Игра продолжает крутиться: ищете значение → меняете его в игре → фильтруете
    список — ровно как в ArtMoney. Найденный адрес можно править (проверка),
    заморозить и превратить в УСЛОВИЕ ЗАДАНИЯ (код RPC1:…), которое вставляется
-   в редакторе заданий — задание тогда зачитывается само, по памяти. */
+   в редакторе заданий — задание тогда зачитывается само, по памяти.
+   v0.69: (1) КНОПКА «СВЕРНУТЬ» — окно сворачивается в маленькую плашку в углу,
+   весь поиск (состояние, результаты, заморозка) ЖИВЁТ: играйте в игру спокойно
+   и разверните обратно — продолжите с того же места; закрытие при активном
+   поиске — двухшаговое (случайный клик крестик не сработает).
+   (2) ПОСЛЕДОВАТЕЛЬНОСТИ: 2–4 значения через пробел — ищем места, где они лежат
+   в памяти ПОДРЯД (HP и максимум рядом — как в ArtMoney у «пользовательского типа»). */
 
 const ROWS = 100;          // сколько адресов-кандидатов показываем (живые значения)
 const WALL_ROWS = 24;      // строк по 16 байт в «стене кода»
@@ -22,10 +28,23 @@ const FREEZE_MS = 250;     // период подкормки заморожен
 const VALS_MS = 800;       // период обновления значений в списке
 const WALL_MS = 650;       // период обновления стены
 
-type Row = { a: number; v: number };
+type Row = { a: number; v: number[] };
 type WallView = { cur: Uint8Array; prev: Uint8Array | null; off: number };
 
 const OPS: CodeOp[] = ['eq', 'ne', 'gt', 'lt', 'ge', 'le'];
+const MAX_SEQ = 4; // максимум значений в последовательности
+
+/** Строка ввода → список значений последовательности: «3 45» → [3, 45] («3,45; 12» тоже можно). */
+const parseVals = (s: string): number[] => {
+  const parts = s.trim().split(/[\s,;]+/).filter(Boolean);
+  const out: number[] = [];
+  for (const p of parts) {
+    const n = Number(p);
+    if (!Number.isFinite(n)) return [];
+    out.push(n);
+  }
+  return out;
+};
 
 export default function CodeSearchModal({ getApi, romName, onClose }: {
   getApi: () => SegaApi | null;
@@ -54,6 +73,11 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
   const [wallView, setWallView] = useState<WallView | null>(null);
   const [pasteIn, setPasteIn] = useState('');
   const [pasteErr, setPasteErr] = useState('');
+  /* v0.69: сворачивание — окно живёт в свёрнутом виде (состояние поиска сохраняется),
+     двухшаговое закрытие при активном поиске (случайный клик не стирает работу) */
+  const [min, setMin] = useState(false);
+  const [closeArm, setCloseArm] = useState(false);
+  const closeArmTRef = useRef<number | null>(null);
 
   const stRef = useRef<ScanState | null>(null);
   const addrsRef = useRef<Uint32Array | null>(null);
@@ -64,6 +88,32 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
   const getHeap = () => getApi()?.getHeap() ?? null;
   const heapReady = !!getHeap();
   const heapLen = getHeap()?.length ?? 0;
+
+  /* ширина текущей последовательности (1 — обычный поиск) */
+  const seqN = stRef.current?.seqN ?? 1;
+  const scanActive = !!res || !!stRef.current;
+  const tryClose = () => {
+    if (scanActive && !closeArm) {
+      setCloseArm(true);
+      if (closeArmTRef.current !== null) window.clearTimeout(closeArmTRef.current);
+      closeArmTRef.current = window.setTimeout(() => setCloseArm(false), 4000);
+      sfx.click();
+      return;
+    }
+    onClose();
+  };
+
+  /* v0.69: прочитать ЦЕПОЧКУ значений по адресу (seqN штук подряд) */
+  const readRowVals = (heap: Uint8Array, a: number): number[] | null => {
+    const n = stRef.current?.seqN ?? 1;
+    const out: number[] = [];
+    for (let p = 0; p < n; p++) {
+      const x = readAt(heap, a + p * typeSize(t), t);
+      if (x === null) return null;
+      out.push(x);
+    }
+    return out;
+  };
 
   /* ---------- СТЕНА КОДА: снимок окна памяти (живой по таймеру и по навигации) ---------- */
   useEffect(() => {
@@ -102,7 +152,7 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
     return () => clearInterval(iv);
   }, [frozen, t]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ---------- ЖИВЫЕ ЗНАЧЕНИЯ в списке результатов ---------- */
+  /* ---------- ЖИВЫЕ ЗНАЧЕНИЯ в списке результатов (для цепочек — все позиции) ---------- */
   useEffect(() => {
     if (!addrsRef.current || !addrsRef.current.length) return;
     const iv = setInterval(() => {
@@ -112,8 +162,8 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
       const n = Math.min(ROWS, addrs.length);
       const out: Row[] = [];
       for (let i = 0; i < n; i++) {
-        const v = readAt(heap, addrs[i], t);
-        if (v !== null) out.push({ a: addrs[i], v });
+        const vs = readRowVals(heap, addrs[i]);
+        if (vs) out.push({ a: addrs[i], v: vs });
       }
       setRows(out);
     }, VALS_MS);
@@ -126,8 +176,8 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
     if (!heap || !addrs) return;
     const out: Row[] = [];
     for (let i = 0; i < Math.min(ROWS, addrs.length); i++) {
-      const v = readAt(heap, addrs[i], t);
-      if (v !== null) out.push({ a: addrs[i], v });
+      const vs = readRowVals(heap, addrs[i]);
+      if (vs) out.push({ a: addrs[i], v: vs });
     }
     setRows(out);
   };
@@ -142,8 +192,8 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
     if (r.addrs && heap) {
       const out: Row[] = [];
       for (let i = 0; i < Math.min(ROWS, r.addrs.length); i++) {
-        const v = readAt(heap, r.addrs[i], t);
-        if (v !== null) out.push({ a: r.addrs[i], v });
+        const vs = readRowVals(heap, r.addrs[i]);
+        if (vs) out.push({ a: r.addrs[i], v: vs });
       }
       setRows(out);
     }
@@ -153,16 +203,25 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
     if (busy) return;
     const heap = getHeap();
     if (!heap) { toast('Ядро ещё не поднялось — дайте игре запуститься', 'err'); return; }
-    const vNum = Number(isFirst && kind === 'exact' ? val : fVal);
-    if (kind === 'exact' && !Number.isFinite(vNum)) { toast('Введите число для поиска', 'err'); return; }
+    /* v0.69: в строке можно ввести 2–4 значения через пробел — ПОСЛЕДОВАТЕЛЬНОСТЬ.
+       Первый поиск задаёт ширину цепочки; фильтры обязаны держать ту же ширину. */
+    const seq = parseVals(isFirst ? val : fVal);
+    const wantN = isFirst ? Math.min(MAX_SEQ, Math.max(1, seq.length || 1)) : (stRef.current?.seqN ?? 1);
+    if (seq.length > MAX_SEQ) { toast(`Максимум ${MAX_SEQ} значения подряд`, 'err'); return; }
+    const valueOps = !(['changed', 'unchanged', 'inc', 'dec'] as FilterKind[]).includes(kind);
+    if (kind === 'exact' && !seq.length) { toast(isFirst ? 'Введите число (или 2–4 через пробел — последовательность)' : 'Введите число', 'err'); return; }
+    if (!isFirst && valueOps && seq.length !== wantN) {
+      toast(wantN > 1 ? `Эта последовательность ищет ${wantN} значений подряд — введите ровно ${wantN} числа через пробел` : 'Введите одно число', 'err');
+      return;
+    }
     setBusy(true);
     setProg({ d: 0, n: 1 });
     try {
-      const { result, state } = await runScan(getHeap, isFirst ? null : stRef.current, t, kind, vNum, (d, n) => setProg({ d, n }));
+      const { result, state } = await runScan(getHeap, isFirst ? null : stRef.current, t, kind, seq[0] ?? 0, (d, n) => setProg({ d, n }), seq);
       stRef.current = state;
       applyResult(result);
       if (result.overflow) toast(`Совпадений больше ${SCAN_CAP.toLocaleString('ru-RU')} — сузьте поиск фильтром`, 'err');
-      else if (kind === 'exact' && isFirst) toast(`Совпадений: ${result.count.toLocaleString('ru-RU')}`, 'ok');
+      else if (kind === 'exact' && isFirst) toast(state.seqN > 1 ? `Мест, где все ${state.seqN} значения лежат подряд: ${result.count.toLocaleString('ru-RU')}` : `Совпадений: ${result.count.toLocaleString('ru-RU')}`, 'ok');
       else if (kind === 'changed' && isFirst) toast('Снимок памяти снят — меняйте значение в игре и фильтруйте', 'ok');
       else toast(`Осталось совпадений: ${result.count.toLocaleString('ru-RU')}`, 'ok');
     } catch (e) {
@@ -189,7 +248,8 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
     const heap = getHeap();
     if (!heap) return;
     if (writeAt(heap, a, t, v)) {
-      setRows((rs) => rs.map((r) => (r.a === a ? { ...r, v } : r)));
+      /* в цепочке правим только ПЕРВОЕ значение (остальные позиции не трогаем) */
+      setRows((rs) => rs.map((r) => (r.a === a ? { ...r, v: r.v.map((x, i) => (i === 0 ? v : x)) } : r)));
       setFrozen((f) => (a in f ? { ...f, [a]: v } : f));
       toast(`Записано ${v} в 0x${hex8(a)} — если адрес найден верно, игра отреагирует сразу`, 'ok');
     } else toast('Запись не удалась — адрес вне памяти', 'err');
@@ -200,7 +260,7 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
       const next = { ...f };
       if (a in next) delete next[a];
       else {
-        const cur = rows.find((r) => r.a === a)?.v;
+        const cur = rows.find((r) => r.a === a)?.v[0]; // ❄ морозит ПЕРВОЕ значение цепочки
         if (cur === undefined) { toast('Сначала перечитайте значения — адрес не в списке', 'err'); return f; }
         next[a] = cur;
       }
@@ -230,6 +290,26 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
 
   const condSel = rows.find((r) => r.a === condAddr);
 
+  /* ---------- v0.69: СВЁРНУТЫЙ ВИД — маленькая плашка в углу, поиск живёт ---------- */
+  if (min) {
+    return (
+      <div className="fixed left-2 bottom-2 sm:left-3 sm:bottom-3 z-40 pixel-panel pixel-corners border-2 border-edge bg-[#0b0e1c] px-2.5 py-1.5 flex items-center gap-2 max-w-[calc(100vw-1rem)]">
+        <span className="text-teal shrink-0">{Ic.chip(14)}</span>
+        <button
+          className="font-display text-[11px] uppercase tracking-wider text-teal cursor-pointer hover:text-gold whitespace-nowrap"
+          onClick={() => { setMin(false); sfx.click(); }}
+          title="Развернуть CodeSearch — поиск, результаты и заморозка сохранены"
+        >
+          CodeSearch{busy ? ' · поиск…' : res ? ` · ${res.count.toLocaleString('ru-RU')}${res.overflow ? '+' : ''}` : ''}
+        </button>
+        {Object.keys(frozen).length > 0 && <span className="text-sky text-[11px] shrink-0" title={`Заморожено адресов: ${Object.keys(frozen).length} — значения вписываются обратно даже в свёрнутом виде`}>❄{Object.keys(frozen).length}</span>}
+        <GhostBtn small onClick={tryClose} title={closeArm ? 'Поиск ПРОПАДЁТ — нажать ещё раз, чтобы закрыть' : 'Закрыть (поиск будет сброшен)'}>
+          {closeArm ? <span className="text-coral font-bold">✕!</span> : Ic.cross(11)}
+        </GhostBtn>
+      </div>
+    );
+  }
+
   return (
     <div className="fixed inset-0 z-50 bg-[rgba(3,4,10,0.82)] flex items-start justify-center p-3 sm:p-6 overflow-y-auto">
       <div className="w-full max-w-4xl pixel-panel pixel-corners border-[3px] border-edge bg-[#0b0e1c] my-auto">
@@ -242,7 +322,8 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
               {romName} · {heapReady ? `память ядра ${(heapLen / 1024 / 1024).toFixed(1)} МБ — игра работает, играйте и меняйте значения` : 'ядро ещё не готово — запустите ром и подождите пару секунд'}
             </div>
           </div>
-          <GhostBtn onClick={onClose} title="Закрыть (игра продолжит работать)">{Ic.cross(13)}</GhostBtn>
+          <GhostBtn onClick={() => { setMin(true); sfx.click(); }} title="Свернуть в плашку в углу — поиграйте в игру и вернитесь: поиск, результаты и заморозка сохранятся">▾</GhostBtn>
+          <GhostBtn onClick={tryClose} title={closeArm ? 'Поиск ПРОПАДЁТ — нажать ещё раз, чтобы закрыть' : 'Закрыть (игра продолжит работать)'}>{closeArm ? <span className="text-coral font-bold">✕!</span> : Ic.cross(13)}</GhostBtn>
         </div>
 
         <div className="p-4 space-y-4">
@@ -253,7 +334,7 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
               <select className="field-in px-2 py-1.5 text-[11px]" value={t} onChange={(e) => { setT(e.target.value as CodeType); resetScan(); }} title="Размер и тип значения в памяти">
                 {(Object.keys(CODE_TYPE_LABEL) as CodeType[]).map((k) => <option key={k} value={k}>{CODE_TYPE_LABEL[k]}</option>)}
               </select>
-              <input className="field-in w-28 px-2 py-1.5 text-[12px]" placeholder="значение" value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void doScan('exact', true); }} />
+              <input className="field-in w-44 px-2 py-1.5 text-[12px]" placeholder="значение или 2–4 через пробел" value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void doScan('exact', true); }} />
               <PxBtn color="teal" small disabled={busy || !heapReady} onClick={() => void doScan('exact', true)} title="Найти ВСЕ адреса памяти, где лежит это значение">
                 {stRef.current ? '↻ Поиск заново' : 'Первый поиск'}
               </PxBtn>
@@ -277,7 +358,7 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
                   <option value="dec">уменьшилось</option>
                 </select>
                 {!(['changed', 'unchanged', 'inc', 'dec'] as FilterKind[]).includes(fKind) ? (
-                  <input className="field-in w-28 px-2 py-1.5 text-[12px]" placeholder="новое значение" value={fVal} onChange={(e) => setFVal(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void doScan(fKind, false); }} />
+                  <input className="field-in w-44 px-2 py-1.5 text-[12px]" placeholder={seqN > 1 ? `${seqN} значения через пробел` : 'новое значение'} value={fVal} onChange={(e) => setFVal(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void doScan(fKind, false); }} />
                 ) : (
                   <span className="tick-label text-faint">значение не нужно — меняйте его в игре и жмите кнопку</span>
                 )}
@@ -296,6 +377,10 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
             <p className="text-[10.5px] text-dim leading-tight">
               Как в ArtMoney: ищете «5» (жизней пять) → в игре теряете жизнь → ищете «4» среди найденных → повторяете, пока не останутся 1–3 адреса.
               «Неизвестное значение» — когда число не видно: снимок памяти, потом «изменилось / выросло / уменьшилось» после каждого изменения в игре.
+              <b className="text-paper"> Последовательность:</b> введите 2–4 числа через пробел — найдутся места, где они лежат в памяти ПОДРЯД
+              (например, текущее HP и максимум рядом — так ищут HP юнитов во Front Mission 3); фильтр тоже принимает столько же чисел;
+              в результатах видна вся цепочка, ✏/❄/🎯 работают с первым значением.
+              {' '}Чтобы поменять значение в игре — <b className="text-teal">сверните окно кнопкой ▾</b> и разверните обратно: поиск сохранится.
             </p>
           </div>
 
@@ -328,14 +413,14 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
                               <input autoFocus className="field-in w-24 px-1.5 py-0.5 text-[11px]" value={editVal} onChange={(e) => setEditVal(e.target.value)}
                                 onKeyDown={(e) => { if (e.key === 'Enter') { writeRow(r.a, editVal); setEditAddr(null); } if (e.key === 'Escape') setEditAddr(null); }} />
                             ) : (
-                              <button className="cursor-pointer hover:text-gold" title="Клик — править значение" onClick={() => { setEditAddr(r.a); setEditVal(String(r.v)); }}>{r.v}</button>
+                              <button className="cursor-pointer hover:text-gold" title={r.v.length > 1 ? `Цепочка из ${r.v.length} значений подряд — клик: править первое` : 'Клик — править значение'} onClick={() => { setEditAddr(r.a); setEditVal(String(r.v[0])); }}>{r.v.join(' · ')}</button>
                             )}
                           </td>
                           <td className="px-2 py-1 text-right whitespace-nowrap">
-                            <button className={`px-1 cursor-pointer ${editAddr === r.a ? 'text-gold' : 'text-faint hover:text-paper'}`} title="Изменить значение (проверка адреса)" onClick={() => { setEditAddr(r.a); setEditVal(String(r.v)); }}>✏</button>
+                            <button className={`px-1 cursor-pointer ${editAddr === r.a ? 'text-gold' : 'text-faint hover:text-paper'}`} title={r.v.length > 1 ? 'Изменить ПЕРВОЕ значение цепочки (проверка адреса)' : 'Изменить значение (проверка адреса)'} onClick={() => { setEditAddr(r.a); setEditVal(String(r.v[0])); }}>✏</button>
                             <button className={`px-1 cursor-pointer ${r.a in frozen ? 'text-sky' : 'text-faint hover:text-sky'}`} title={r.a in frozen ? 'Разморозить' : 'Заморозить: вписывать значение обратно, игра его не изменит'} onClick={() => toggleFreeze(r.a)}>❄</button>
                             <button className="px-1 text-faint hover:text-gold cursor-pointer" title="Показать это место в стене кода" onClick={() => { setWallAddr(r.a); setWallIn(hex8(r.a)); setWallOpen(true); prevWallRef.current = null; }}>👁</button>
-                            <button className={`px-1 cursor-pointer ${condAddr === r.a ? 'text-gold' : 'text-faint hover:text-gold'}`} title="Сделать условием задания" onClick={() => { setCondAddr(r.a); setCondVal(String(r.v)); setCondOp('eq'); }}>🎯</button>
+                            <button className={`px-1 cursor-pointer ${condAddr === r.a ? 'text-gold' : 'text-faint hover:text-gold'}`} title={r.v.length > 1 ? 'Сделать условием задания (по ПЕРВОМУ значению цепочки)' : 'Сделать условием задания'} onClick={() => { setCondAddr(r.a); setCondVal(String(r.v[0])); setCondOp('eq'); }}>🎯</button>
                           </td>
                         </tr>
                       ))}
@@ -355,7 +440,7 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
               <div className="flex items-center gap-2 flex-wrap text-[12px]">
                 <span className="font-mono text-sky">0x{hex8(condAddr)}</span>
                 <span className="tick-label text-faint">{CODE_TYPE_LABEL[t]}</span>
-                {condSel !== undefined && <span className="tick-label text-faint">сейчас там: {condSel.v}</span>}
+                {condSel !== undefined && <span className="tick-label text-faint">сейчас там: {condSel.v.join(' · ')}</span>}
                 <select className="field-in px-2 py-1.5 text-[11px]" value={condOp} onChange={(e) => setCondOp(e.target.value as CodeOp)}>
                   {OPS.map((k) => <option key={k} value={k}>{OP_LABEL[k]}</option>)}
                 </select>
