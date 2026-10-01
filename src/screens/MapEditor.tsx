@@ -237,8 +237,13 @@ export default function MapEditor() {
      layers (Слои), walls (Стены), plates (Плитки и порталы), cuts (Кат-сцены), tiles (Карты-плитки) */
   const PANEL_DEFS: Record<string, boolean> = { tok: true, anim: false, boss: false, npc: false, end: false, modeDesc: false, layers: true, walls: true, plates: false, cuts: false, tiles: false };
   const [panelState, setPanelState] = useState<Record<string, boolean>>(() => loadSpoilerRec('mapPanels'));
-  const panelOpen = (key: string) => effSpoilerOpen(spoilerMode, panelState[key], PANEL_DEFS[key] ?? false);
+  /* v0.71: режим спойлеров задаёт старт при входе в редактор, дальше панели свободно переключаются:
+     ручные переключения живут в panelOvr и показываются поверх стартового режима. */
+  const [panelOvr, setPanelOvr] = useState<Record<string, boolean>>({});
+  const [groupOvr, setGroupOvr] = useState<Record<string, boolean>>({}); // v0.71: ручные переключения групп тайлов поверх режима
+  const panelOpen = (key: string) => panelOvr[key] ?? effSpoilerOpen(spoilerMode, panelState[key], PANEL_DEFS[key] ?? false);
   const setPanelOpen = (key: string, v: boolean) => {
+    setPanelOvr((s) => ({ ...s, [key]: v }));
     setPanelState((s) => { const next = { ...s, [key]: v }; if (spoilerMode === 'remember') saveSpoilerRec('mapPanels', next); return next; });
   };
   const [activeLayer, setActiveLayer] = useState(0); // слой, на который ставятся НОВЫЕ тайлы (0 — нижний)
@@ -1032,8 +1037,14 @@ export default function MapEditor() {
 
   /* спойлеры палитры: свернуть/развернуть (v0.70: БАГФИКС — состояние теперь реально сохраняется
      в карту: раньше dirtyRef не ставился, и сворачивание терялось, если не тронуть канвас) */
+  /* v0.71: сворачивание группы тайлов — от ПОКАЗАННОГО состояния (ручное поверх
+     стартового режима спойлеров), в «запоминать» новое состояние пишется в карту */
   const toggleGroup = (gid: string) => {
-    updMap({ tileGroups: (map?.tileGroups ?? []).map((g) => (g.id === gid ? { ...g, collapsed: !g.collapsed } : g)) });
+    const g = (map?.tileGroups ?? []).find((x) => x.id === gid);
+    const shown = groupOvr[gid] ?? effSpoilerCollapsed(spoilerMode, g?.collapsed, false);
+    const next = !shown;
+    setGroupOvr((s) => ({ ...s, [gid]: next }));
+    updMap({ tileGroups: (map?.tileGroups ?? []).map((x) => (x.id === gid ? { ...x, collapsed: next } : x)) });
     dirtyRef.current = true;
   };
 
@@ -2966,7 +2977,7 @@ export default function MapEditor() {
                 {(map.tileGroups ?? []).map((g) => {
                   const inG = g.tids.map((tid) => tileImgById.get(tid)).filter(Boolean) as TileImg[];
                   const tag = g.kind === 'extract' ? '✂' : g.kind === 'folder' ? '›' : '+';
-                  const gCollapsed = effSpoilerCollapsed(spoilerMode, g.collapsed, false); // v0.70: режим спойлеров из Опций
+                  const gCollapsed = groupOvr[g.id] ?? effSpoilerCollapsed(spoilerMode, g.collapsed, false); // v0.71: ручное поверх стартового режима
                   return (
                     <div key={g.id} className="mb-2">
                       <div className="flex items-center gap-1 mb-1">

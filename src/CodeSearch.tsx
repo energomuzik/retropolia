@@ -6,6 +6,7 @@ import type { SegaApi } from './SegaBox';
 import type { CodeOp, CodeType } from './types';
 import {
   CODE_TYPE_LABEL, OP_LABEL, SCAN_CAP, formatCond, hex8, parseCond, parseHex, readAt, runScan, typeSize, writeAt,
+  byteDecodes, digitCandidates,
   type FilterKind, type ScanState,
 } from './memcode';
 
@@ -76,6 +77,12 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
   const [wallEdit, setWallEdit] = useState<{ off: number; raw: string } | null>(null);
   const [pasteIn, setPasteIn] = useState('');
   const [pasteErr, setPasteErr] = useState('');
+  /* v0.71 ПЕРЕВОДЧИК ЦИФР: «3» на экране может лежать в памяти как 4 (счёт от 1),
+     51 (ASCII), 115 (тайл 0x70+3 — Darkwing Duck) и т.д. Переводим число в
+     кандидатов и ищем каждого кнопкой — вместо слепого перебора руками. */
+  const [trOpen, setTrOpen] = useState(true);
+  const [trIn, setTrIn] = useState('3');
+  const [trFound, setTrFound] = useState('');
   /* v0.69: сворачивание — окно живёт в свёрнутом виде (состояние поиска сохраняется),
      двухшаговое закрытие при активном поиске (случайный клик не стирает работу) */
   const [min, setMin] = useState(false);
@@ -107,11 +114,11 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
   };
 
   /* v0.69: прочитать ЦЕПОЧКУ значений по адресу (seqN штук подряд) */
-  const readRowVals = (heap: Uint8Array, a: number): number[] | null => {
+  const readRowVals = (heap: Uint8Array, a: number, ty: CodeType = t): number[] | null => {
     const n = stRef.current?.seqN ?? 1;
     const out: number[] = [];
     for (let p = 0; p < n; p++) {
-      const x = readAt(heap, a + p * typeSize(t), t);
+      const x = readAt(heap, a + p * typeSize(ty), ty);
       if (x === null) return null;
       out.push(x);
     }
@@ -205,7 +212,7 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
     setRows(out);
   };
 
-  const applyResult = (r: { addrs: Uint32Array | null; count: number; overflow: boolean }) => {
+  const applyResult = (r: { addrs: Uint32Array | null; count: number; overflow: boolean }, ty: CodeType = t) => {
     addrsRef.current = r.addrs;
     setRes({ count: r.count, overflow: r.overflow, unknown: r.addrs === null });
     setRows([]);
@@ -215,17 +222,18 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
     if (r.addrs && heap) {
       const out: Row[] = [];
       for (let i = 0; i < Math.min(ROWS, r.addrs.length); i++) {
-        const vs = readRowVals(heap, r.addrs[i]);
+        const vs = readRowVals(heap, r.addrs[i], ty);
         if (vs) out.push({ a: r.addrs[i], v: vs });
       }
       setRows(out);
     }
   };
 
-  const doScan = async (kind: FilterKind, isFirst: boolean) => {
+  const doScan = async (kind: FilterKind, isFirst: boolean, tOverride?: CodeType) => {
     if (busy) return;
     const heap = getHeap();
     if (!heap) { toast('Ядро ещё не поднялось — дайте игре запуститься', 'err'); return; }
+    const ty = tOverride ?? t; // v0.71: переводчик цифр ищет гарантированно «1 байт», не дожидаясь ререндера
     /* v0.69: в строке можно ввести 2–4 значения через пробел — ПОСЛЕДОВАТЕЛЬНОСТЬ.
        Первый поиск задаёт ширину цепочки; фильтры обязаны держать ту же ширину. */
     const seq = parseVals(isFirst ? val : fVal);
@@ -240,9 +248,9 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
     setBusy(true);
     setProg({ d: 0, n: 1 });
     try {
-      const { result, state } = await runScan(getHeap, isFirst ? null : stRef.current, t, kind, seq[0] ?? 0, (d, n) => setProg({ d, n }), seq);
+      const { result, state } = await runScan(getHeap, isFirst ? null : stRef.current, ty, kind, seq[0] ?? 0, (d, n) => setProg({ d, n }), seq);
       stRef.current = state;
-      applyResult(result);
+      applyResult(result, ty);
       if (result.overflow) toast(`Совпадений больше ${SCAN_CAP.toLocaleString('ru-RU')} — сузьте поиск фильтром`, 'err');
       else if (kind === 'exact' && isFirst) toast(state.seqN > 1 ? `Мест, где все ${state.seqN} значения лежат подряд: ${result.count.toLocaleString('ru-RU')}` : `Совпадений: ${result.count.toLocaleString('ru-RU')}`, 'ok');
       else if (kind === 'changed' && isFirst) toast('Снимок памяти снят — меняйте значение в игре и фильтруйте', 'ok');
@@ -264,6 +272,18 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
     setCondAddr(null);
     setEditAddr(null);
   };
+
+  /* v0.71: искать кандидата переводчика — обычный первый поиск, но гарантированно «1 байт» (u8) */
+  const runTranslated = (v: number) => {
+    if (busy) return;
+    setT('u8');
+    setVal(String(v));
+    void doScan('exact', true, 'u8');
+  };
+
+  const trCands = digitCandidates(Number(trIn));
+  const trNum = Number(trFound);
+  const trHints = byteDecodes(trNum);
 
   const writeRow = (a: number, raw: string) => {
     const v = Number(raw);
@@ -403,6 +423,8 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
               <b className="text-paper"> Последовательность:</b> введите 2–4 числа через пробел — найдутся места, где они лежат в памяти ПОДРЯД
               (например, текущее HP и максимум рядом — так ищут HP юнитов во Front Mission 3); фильтр тоже принимает столько же чисел;
               в результатах видна вся цепочка, ✏/❄/🎯 работают с первым значением.
+              <b className="text-paper"> Число не находится совсем?</b> Переведите его в «переводчике цифр» ниже — некоторые игры хранят
+              номер тайла цифры (3 жизни в Darkwing Duck = 115) — или ищите через «Неизвестное значение».
               {' '}Чтобы поменять значение в игре — <b className="text-teal">сверните окно кнопкой ▾</b> и разверните обратно: поиск сохранится.
             </p>
           </div>
@@ -495,6 +517,58 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
               }}>Проверить</GhostBtn>
             </div>
             {pasteErr && <p className="text-[10.5px] text-coral">{pasteErr}</p>}
+          </div>
+
+          {/* ---------- v0.71 ПЕРЕВОДЧИК ЦИФР ---------- */}
+          <div className="border-2 border-edge px-3 py-3 space-y-2">
+            <button className="flex items-center gap-1.5 cursor-pointer" onClick={() => { setTrOpen((v) => !v); sfx.click(); }}>
+              <span className={`text-[10px] ${trOpen ? 'text-gold' : 'text-faint'}`}>{trOpen ? '▾' : '▸'}</span>
+              <span className="font-pixel text-[8px] text-gold uppercase">переводчик цифр — когда число прямым поиском не находится</span>
+            </button>
+            {trOpen && (
+              <>
+                <p className="text-[10.5px] text-dim leading-tight">
+                  Игра не всегда хранит число «как есть»: Darkwing Duck держит в памяти НОМЕР ТАЙЛА цифры на экране —
+                  тайлы цифр 0–9 в NES-чри начинаются с 0x70, поэтому 3 жизни = 0x70+3 = 0x73 = <b className="text-paper">115</b>:
+                  поиск «3» пуст, а «115» находит. Введите число с экрана — переводчик предложит кандидатов, ищите каждого
+                  кнопкой (тип «1 байт», поиск заново). Не нашёлся ни один кандидат — число спрятано хитрее: берите
+                  «Неизвестное значение» (снимок → меняйте в игре → «изменилось/уменьшилось») — оно находит величину при ЛЮБОМ кодировании.
+                </p>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="tick-label text-faint shrink-0">на экране число</span>
+                  <input className="field-in w-20 px-2 py-1.5 text-[12px]" value={trIn} placeholder="3" onChange={(e) => setTrIn(e.target.value)} />
+                  <span className="tick-label text-faint">в памяти может лежать так:</span>
+                </div>
+                {trCands.length > 0 ? (
+                  <div className="space-y-1">
+                    {trCands.map((c) => (
+                      <div key={c.v} className="flex items-center gap-2 flex-wrap">
+                        <PxBtn color="teal" small disabled={busy || !heapReady} onClick={() => runTranslated(c.v)}
+                          title={`Первый поиск заново: тип «1 байт» (u8), значение ${c.v} (0x${c.v.toString(16).toUpperCase().padStart(2, '0')})`}>
+                          искать {c.v}
+                        </PxBtn>
+                        <span className="text-[10.5px] text-dim">{c.why}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[10.5px] text-coral">Введите целое число 0…255 — переводчик предложит варианты</p>
+                )}
+                <div className="flex items-center gap-2 flex-wrap pt-1.5 border-t border-edge/60">
+                  <span className="tick-label text-faint shrink-0">наоборот: нашлось значение</span>
+                  <input className="field-in w-20 px-2 py-1.5 text-[12px]" value={trFound} placeholder="115" onChange={(e) => setTrFound(e.target.value)} />
+                  <span className="text-[10.5px] text-teal">
+                    {trFound.trim() === ''
+                      ? 'впишите байт из стены или результатов — скажу, на что он похож'
+                      : !Number.isInteger(trNum) || trNum < 0 || trNum > 255
+                        ? 'введите целое число 0…255'
+                        : trHints.length
+                          ? trHints.join(' · ')
+                          : 'похоже на произвольный байт без известного кодирования — проверяйте изменением в игре'}
+                  </span>
+                </div>
+              </>
+            )}
           </div>
 
           {/* ---------- СТЕНА КОДА ---------- */}

@@ -63,9 +63,13 @@ export default function EmulatorLauncher() {
   const [newFolderOpen, setNewFolderOpen] = useState(false); // строка создания новой папки
   const [newFolderName, setNewFolderName] = useState('');
   const [emptyFolders, setEmptyFolders] = useState<string[]>(loadEmptyRomFolders);
-  /* v0.70: свёрнутость папок — в localStorage (переживает перезаход), показ по режиму спойлеров */
+  /* v0.70: свёрнутость папок — в localStorage (переживает перезаход), старт по режиму спойлеров.
+     v0.71: режим действует только при ВХОДЕ — дальше папки свободно сворачиваются/разворачиваются:
+     ручные переключения живут в folderOvr и показываются поверх стартового режима. */
   const [collapsedFoldersRaw, setCollapsedFoldersRaw] = useState<Record<string, boolean>>(() => loadSpoilerRec('emuFolders'));
+  const [folderOvr, setFolderOvr] = useState<Record<string, boolean>>({}); // v0.71: ручные переключения поверх режима
   const toggleFolderCollapsed = (f: string, v: boolean) => {
+    setFolderOvr((s) => ({ ...s, [f]: v }));
     setCollapsedFoldersRaw((s) => { const next = { ...s, [f]: v }; if (spoilerMode === 'remember') saveSpoilerRec('emuFolders', next); return next; });
   };
   /* v0.61: режим показа ромов в папке (по умолчанию СПИСОК) + размер плиток + развёрнутое окно картинок
@@ -569,7 +573,7 @@ export default function EmulatorLauncher() {
               {/* папки-спойлеры с ромами */}
               {folderNames.map((f) => {
                 const inF = romsIn(f);
-                const collapsed = effSpoilerCollapsed(spoilerMode, collapsedFoldersRaw[f], false);
+                const collapsed = folderOvr[f] ?? effSpoilerCollapsed(spoilerMode, collapsedFoldersRaw[f], false); // v0.71: ручное поверх стартового режима
                 const pics = (folderViews[f] ?? 'list') === 'pics'; // v0.61: режим показа папки (дефолт — СПИСОК)
                 return (
                   <div key={`f-${f}`}>

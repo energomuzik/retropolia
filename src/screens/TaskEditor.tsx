@@ -99,6 +99,11 @@ export default function TaskEditor() {
   const [codeFailErr, setCodeFailErr] = useState('');
   /* v0.70 ТОЛЬКО ПО КОДУ: ручные кнопки для этого задания отключены — всё решают коды */
   const [fCodeOnly, setFCodeOnly] = useState(false);
+  /* v0.71: ОДИНАКОВЫЕ УСЛОВИЯ на победу и поражение — противоречие: одно и то же состояние
+     памяти не может быть одновременно зачётом и провалом (поражение проверяется первым —
+     зачёт по коду тогда недостижим вообще). Предупреждаем и запрещаем сохранение. */
+  const codeConflict = !!fCond && !!fCondFail
+    && fCond.a === fCondFail.a && fCond.t === fCondFail.t && fCond.op === fCondFail.op && fCond.v === fCondFail.v;
 
   const tiles = useApp((st) => st.tiles);
   const tileById = useMemo(() => new Map(tiles.map((t) => [t.id, t])), [tiles]);
@@ -215,7 +220,7 @@ export default function TaskEditor() {
   /* ---------- ЛЕВАЯ ПАНЕЛЬ РОМОВ (как в «Запуске эмулятора») ----------
    Показывается, когда редактируется ячейка-задание: папки-спойлеры,
    клик по рому выбирает его для задания. Никаких списков на сотни строк. */
-  const [romFoldersOpenRaw, setRomFoldersOpenRaw] = useState<Record<string, boolean>>(() => loadSpoilerRec('taskFolders')); // v0.70: состояние в localStorage, показ по режиму спойлеров
+  const [romFoldersOpenRaw, setRomFoldersOpenRaw] = useState<Record<string, boolean>>(() => loadSpoilerRec('taskFolders')); // v0.70: состояние в localStorage, старт по режиму спойлеров
   const [romSavesOpenRaw, setRomSavesOpenRaw] = useState<boolean>(() => loadSpoilerFlag('taskSaves') ?? true); // v0.70: спойлер сохранений — тоже запоминается
   // v0.61: режим показа ромов в папке (дефолт СПИСОК) + размер плиток + развёрнутое окно картинок + обложки
   const [romFolderViews, setRomFolderViews] = useState<Record<string, 'list' | 'pics'>>({});
@@ -223,15 +228,24 @@ export default function TaskEditor() {
   const [expandRomFolder, setExpandRomFolder] = useState<string | null>(null);
   /* v0.62: cropJob — ром и картинка, из которой вырезается картридж ножницами ✂ */
   const [romCropJob, setRomCropJob] = useState<{ rom: RomDef; file: File } | null>(null);
-  /* v0.70: ОТКРЫТОСТЬ папок и спойлера сохранений — по режиму спойлеров из Опций;
-     в режиме «запоминать» каждое переключение пишется в localStorage (переживает перезаход) */
-  const romFolderOpen = (f: string) => effSpoilerOpen(spoilerMode, romFoldersOpenRaw[f], false);
+  /* v0.70: стартовая ОТКРЫТОСТЬ папок и спойлера сохранений — по режиму спойлеров из Опций;
+     в режиме «запоминать» каждое переключение пишется в localStorage (переживает перезаход).
+     v0.71: режим работает только при ВХОДЕ в редактор — дальше папки/сохранения свободно
+     сворачиваются и разворачиваются руками: ручные переключения (folderOvr/savesOvr)
+     показываются поверх стартового режима, а в «запоминать» ещё и сохраняются. */
+  const [romFolderOvr, setRomFolderOvr] = useState<Record<string, boolean>>({}); // v0.71: ручные переключения папок
+  const [romSavesOvr, setRomSavesOvr] = useState<boolean | null>(null); // v0.71: ручное переключение спойлера сохранений
+  const romFolderOpen = (f: string) => romFolderOvr[f] ?? effSpoilerOpen(spoilerMode, romFoldersOpenRaw[f], false);
   const toggleRomFolder = (f: string, open: boolean) => {
+    setRomFolderOvr((s) => ({ ...s, [f]: open }));
     setRomFoldersOpenRaw((s) => { const next = { ...s, [f]: open }; if (spoilerMode === 'remember') saveSpoilerRec('taskFolders', next); return next; });
   };
-  const romSavesOpen = effSpoilerOpen(spoilerMode, romSavesOpenRaw, true);
+  const romSavesOpen = romSavesOvr ?? effSpoilerOpen(spoilerMode, romSavesOpenRaw, true);
   const toggleRomSaves = () => {
-    setRomSavesOpenRaw((v) => { const next = !v; if (spoilerMode === 'remember') saveSpoilerFlag('taskSaves', next); return next; });
+    const next = !romSavesOpen;
+    setRomSavesOvr(next);
+    setRomSavesOpenRaw(next);
+    if (spoilerMode === 'remember') saveSpoilerFlag('taskSaves', next);
   };
   /* v0.62: applyRomCover — общая запись для 📷 (готовая картинка) и ✂ (вырезание):
      обложка сохраняется КАК ЕСТЬ — пропорции честные, показывается целиком
@@ -348,6 +362,12 @@ export default function TaskEditor() {
     if (!fRom || (romIsNes && !fSave)) {
       sfx.fail();
       toast(romIsNes ? 'Выберите ром и сохранение' : 'Выберите ром', 'err');
+      return;
+    }
+    /* v0.71: одинаковое условие на победу и поражение — противоречие, сохранять нельзя */
+    if (codeConflict) {
+      sfx.fail();
+      toast('Зачёт и поражение — ОДНО И ТО ЖЕ условие: измените или уберите одно из них', 'err');
       return;
     }
     let imageId: string | undefined = fImg || undefined;
@@ -991,6 +1011,14 @@ export default function TaskEditor() {
                         )}
                       </div>
                     </Field>
+                    {/* v0.71: предупреждение — одно и то же условие записано и в зачёт, и в поражение */}
+                    {codeConflict && fCond && (
+                      <p className="text-[10.5px] text-coral leading-tight border-2 border-[rgba(255,93,115,0.5)] px-2 py-1.5">
+                        ⚠ Зачёт и поражение — ОДНО И ТО ЖЕ условие ({formatCond(fCond)}): совпадение памяти всегда
+                        засчитается поражением (оно проверяется первым), а зачёт по коду не наступит никогда.
+                        Измените или уберите одно из двух условий — пока они совпадают, задание сохранить нельзя.
+                      </p>
+                    )}
                     {/* v0.70: ТОЛЬКО ПО КОДУ — ручные кнопки и голосование отключаются */}
                     <Field label="Только по коду (необязательно)">
                       <div className="space-y-1.5 border-2 border-[rgba(255,207,63,0.4)] px-2 py-2">
@@ -1013,7 +1041,7 @@ export default function TaskEditor() {
                         )}
                       </div>
                     </Field>
-                    <PxBtn className="w-full" onClick={() => void saveTask()}>{Ic.check(14)} Сохранить задание</PxBtn>
+                    <PxBtn className="w-full" disabled={codeConflict} title={codeConflict ? 'Сначала исправьте: зачёт и поражение — одинаковое условие' : undefined} onClick={() => void saveTask()}>{Ic.check(14)} Сохранить задание</PxBtn>
                     {cell.task && (
                       <div className="text-[11px] text-teal">Сейчас: «{cell.task.title}» · {romName(cell.task.romId)}{cell.task.code ? ' · зачёт по коду ✓' : ''}{cell.task.codeFail ? ' · поражение по коду ✓' : ''}{cell.task.codeOnly ? ' · только по коду ✓' : ''}</div>
                     )}

@@ -324,3 +324,56 @@ export async function runScan(
     state: { t, seqN: state.seqN, addrs, vals, base: state.base, baseLen: state.baseLen },
   };
 }
+
+/* ---------- v0.71 ПЕРЕВОДЧИК ЦИФР ----------
+   Не все игры хранят число «как есть». Классика NES: в памяти лежит НЕ количество
+   жизней, а НОМЕР ТАЙЛА цифры, которой жизни рисуются на экране. Тайлы цифр 0–9
+   в чри Darkwing Duck начинаются с 0x70, поэтому 3 жизни = 0x70+3 = 0x73 = 115 —
+   прямой поиск «3» пуст, а «115» находит. У других игр база другая (0x60, 0x50…),
+   кто-то пишет ASCII-символ цифры (48+3=51), кто-то счёт от единицы, кто-то BCD.
+   Универсального правила нет — поэтому переводчик выдаёт СПИСОК КАНДИДАТОВ,
+   каждого можно скормить поиску. Если не сработал ни один кандидат — число
+   спрятано хитрее (счётчик тиков, инвертированные биты): тогда «Неизвестное
+   значение» (снимок → изменилось/выросло/уменьшилось) находит его при ЛЮБОМ
+   кодировании, потому что ищет не значение, а его ИЗМЕНЕНИЯ. */
+
+/** Частые базы тайлов цифр в NES/SNES-чри (0x30 совпадает с ASCII — уже есть). */
+export const DIGIT_TILE_BASES = [0x70, 0x60, 0x50, 0xa0, 0xb0];
+
+export type DigitCand = { v: number; why: string };
+
+/** Число на экране → кандидаты, которыми оно может лежать в памяти (без дублей по значению). */
+export const digitCandidates = (n: number): DigitCand[] => {
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0 || n > 255) return [];
+  const out: DigitCand[] = [];
+  const push = (v: number, why: string) => {
+    if (v >= 0 && v <= 255 && !out.some((c) => c.v === v)) out.push({ v, why });
+  };
+  push(n, 'как есть — игра хранит само число');
+  push(n + 1, 'со счётом от единицы: на экране «3» — в памяти 4');
+  if (n <= 9) {
+    push(n + 0x70, `тайл цифры: 0x70+${n} — как в Darkwing Duck (3 жизни = 0x73 = 115)`);
+    push(n + 48, `ASCII-символ «${n}» (${(n + 48).toString(16).toUpperCase()})`);
+    for (const b of DIGIT_TILE_BASES) if (b !== 0x70) push(n + b, `тайл цифры: 0x${b.toString(16)}+${n} — другая база чри`);
+  }
+  if (n <= 99) {
+    const bcd = Math.floor(n / 10) * 16 + (n % 10);
+    push(bcd, `BCD: десятки в старшем полубайте (${n} → 0x${bcd.toString(16).toUpperCase().padStart(2, '0')})`);
+  }
+  return out;
+};
+
+/** Найденный в памяти байт → человекочитательные расшифровки (обратный перевод). */
+export const byteDecodes = (v: number): string[] => {
+  if (!Number.isFinite(v) || !Number.isInteger(v) || v < 0 || v > 255) return [];
+  const out: string[] = [`само число ${v}`];
+  if (v >= 1) out.push(`счёт от единицы → на экране ${v - 1}`);
+  if (v >= 48 && v <= 57) out.push(`ASCII-цифра «${v - 48}»`);
+  for (const b of DIGIT_TILE_BASES) {
+    const d = v - b;
+    if (d >= 0 && d <= 9) out.push(`тайл цифры ${d} (база 0x${b.toString(16)}${b === 0x70 ? ' — как в Darkwing Duck' : ''})`);
+  }
+  const bcd = ((v >> 4) & 0xf) * 10 + (v & 0xf);
+  if ((v >> 4) <= 9 && (v & 0xf) <= 9 && bcd !== v && bcd > 0) out.push(`BCD → на экране ${bcd}`);
+  return out;
+};
