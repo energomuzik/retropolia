@@ -2097,9 +2097,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       rg.jobs = rg.jobs ?? {};
       const job = p ? rg.jobs[p.id] : undefined;
       if (!p || !job || job.cellIdx !== a.cellIdx) break;
+      /* v0.70 ТОЛЬКО ПО КОДУ: ручной зачёт/провал запрещён — только срабатывание условия из CodeSearch */
+      if (cellTaskOf(s, map, a.cellIdx)?.codeOnly && !a.byCode) break;
       delete rg.jobs[p.id];
       if (a.win) {
-        /* v0.55: кастомная цена задания (winHp) важнее стандарта карты */
         const stake = taskStakeOf(a.cellIdx);
         p.hp = Math.min(RUBG_HP_MAX, (p.hp ?? RUBG_HP_MAX) + stake.winH);
         const kind = rubgRandomKind();
@@ -2132,6 +2133,8 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       if (!p || !p.alive || p.spect) break;
       const job = s.qJobs?.[p.id];
       if (!job || job.cellIdx !== a.cellIdx) break;
+      /* v0.70 ТОЛЬКО ПО КОДУ: ручной зачёт/провал запрещён — только срабатывание условия из CodeSearch */
+      if (cellTaskOf(s, map, a.cellIdx)?.codeOnly && !a.byCode) break;
       delete s.qJobs![p.id];
       /* ресурс партии: время списывается по факту (минуты за задание); монеты/HP — платёж по итогам; попытка — 1 за вход */
       const resM = (map.coinsOnly && map.startCoins !== undefined) ? 'coins' : normResMode(map.resMode); // время+попытки — один ресурс
@@ -2815,7 +2818,11 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const ch = s.challenge;
       const p = current();
       if (!ch || ch.status !== 'playing' || p.id !== a.id) break;
-      if (othersCount() === 0) {
+      /* v0.70 ТОЛЬКО ПО КОДУ: ручной зачёт запрещён; зачёт ПО КОДУ при галочке — МГНОВЕННЫЙ,
+         без голосования «Согласен/Нарушил» (карты для тех, кто не доверяет соперникам) */
+      const codeOnlyNow = !!cellTaskOf(s, map, ch.cellIdx)?.codeOnly;
+      if (codeOnlyNow && !a.byCode) break;
+      if (othersCount() === 0 || (codeOnlyNow && a.byCode)) {
         challengeSuccess();
         break;
       }

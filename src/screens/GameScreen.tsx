@@ -275,6 +275,10 @@ export default function GameScreen() {
   const coinsRes = !hpRes && coinsOnly;
   const skipCoinsNeed = Math.max(0, Math.floor(map?.skipCoins ?? SKIP_COINS_DEFAULT)); // цена пропуска в бронзе
   const task = s && map && ch ? cellTaskOf(s, map, ch.cellIdx) : null;
+  /* v0.70 ТОЛЬКО ПО КОДУ: у задания ручные кнопки отключены — победа/поражение решают только коды CodeSearch */
+  const chCodeOnly = !!task?.codeOnly;
+  const qCodeOnly = !!myQTask?.codeOnly;
+  const rCodeOnly = !!myRubgTask?.codeOnly;
   const activeChaos = task?.chaos ? [task.chaos] : [];
   // «Реверс крестовины»: смена кнопок запрещена, пока задание с этой пакостью идёт
   const controlsLocked = task?.chaos === 'invertPad';
@@ -3731,7 +3735,14 @@ export default function GameScreen() {
                               {Ic.gear(13)} Сменить управление
                             </GhostBtn>
                           )}
-                          <PxBtn color="teal" className="w-full" onClick={() => dispatch({ t: 'declareDone', id: me })}>{Ic.check(14)} Прошёл задание</PxBtn>
+                          {chCodeOnly ? (
+                            <p className="font-pixel text-[8px] text-teal text-center py-2 leading-relaxed">
+                              🤖 ЗАДАНИЕ ТОЛЬКО ПО КОДУ — ручного зачёта нет.
+                              Выполнится условие из CodeSearch — задание засчитается само.
+                            </p>
+                          ) : (
+                            <PxBtn color="teal" className="w-full" onClick={() => dispatch({ t: 'declareDone', id: me })}>{Ic.check(14)} Прошёл задание</PxBtn>
+                          )}
                           {ch.mode === 'coins' ? (
                             <GhostBtn
                               className="w-full"
@@ -4097,14 +4108,21 @@ export default function GameScreen() {
                         </>
                       ) : (
                         <>
-                          <div className="grid grid-cols-2 gap-2">
-                            <PxBtn color="teal" onClick={() => { sfx.success(); dispatch({ t: 'qJobDone', id: me, cellIdx: myQJob.cellIdx, win: true }); }}>
-                              🏆 ПОБЕДА
-                            </PxBtn>
-                            <PxBtn color="coral" onClick={() => { sfx.fail(); dispatch({ t: 'qJobDone', id: me, cellIdx: myQJob.cellIdx, win: false }); }}>
-                              💀 ПОРАЖЕНИЕ
-                            </PxBtn>
-                          </div>
+                          {qCodeOnly ? (
+                            <p className="font-pixel text-[8px] text-teal text-center py-2 leading-relaxed border-2 border-[rgba(46,230,168,0.4)] px-2 py-2">
+                              🤖 ЗАДАНИЕ ТОЛЬКО ПО КОДУ — ручных кнопок «ПОБЕДА»/«ПОРАЖЕНИЕ» нет.
+                              Код зачёта выполнится — победа зачтётся сама; код поражения — провал сам.
+                            </p>
+                          ) : (
+                            <div className="grid grid-cols-2 gap-2">
+                              <PxBtn color="teal" onClick={() => { sfx.success(); dispatch({ t: 'qJobDone', id: me, cellIdx: myQJob.cellIdx, win: true }); }}>
+                                🏆 ПОБЕДА
+                              </PxBtn>
+                              <PxBtn color="coral" onClick={() => { sfx.fail(); dispatch({ t: 'qJobDone', id: me, cellIdx: myQJob.cellIdx, win: false }); }}>
+                                💀 ПОРАЖЕНИЕ
+                              </PxBtn>
+                            </div>
+                          )}
                           <div className="grid grid-cols-3 gap-2 mt-2">
                             <GhostBtn onClick={() => setQPaused((x) => !x)} title="Пауза эмулятора без сброса прогресса">
                               {qPaused ? Ic.play(13) : Ic.pause(13)} {qPaused ? 'Продолжить' : 'Пауза'}
@@ -4211,17 +4229,24 @@ export default function GameScreen() {
                       </>
                     ) : (
                       <>
-                        <div className="grid grid-cols-3 gap-2">
-                          <PxBtn color="teal" onClick={() => { sfx.success(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: true }); }}>
-                            🏆 ПОБЕДА +{RUBG_WIN_HP}%
-                          </PxBtn>
-                          <PxBtn color="coral" onClick={() => { sfx.fail(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: false }); }}>
-                            💀 ПОРАЖЕНИЕ −{RUBG_LOSE_HP}%
-                          </PxBtn>
-                          <GhostBtn onClick={() => setRubgPaused((x) => !x)} title="Пауза эмулятора без сброса прогресса">
-                            {rubgPaused ? Ic.play(13) : Ic.pause(13)} {rubgPaused ? 'Продолжить' : 'Пауза'}
-                          </GhostBtn>
-                        </div>
+                        {rCodeOnly ? (
+                          <p className="font-pixel text-[8px] text-teal text-center leading-relaxed border-2 border-[rgba(46,230,168,0.4)] px-2 py-2 mb-2">
+                            🤖 ЗАДАНИЕ ТОЛЬКО ПО КОДУ — ручных кнопок «ПОБЕДА»/«ПОРАЖЕНИЕ» нет.
+                            Код зачёта выполнится — победа зачтётся сама; код поражения — провал сам.
+                          </p>
+                        ) : (
+                          <div className="grid grid-cols-3 gap-2">
+                            <PxBtn color="teal" onClick={() => { sfx.success(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: true }); }}>
+                              🏆 ПОБЕДА +{RUBG_WIN_HP}%
+                            </PxBtn>
+                            <PxBtn color="coral" onClick={() => { sfx.fail(); dispatch({ t: 'rubgJobDone', id: me, cellIdx: myJob.cellIdx, win: false }); }}>
+                              💀 ПОРАЖЕНИЕ −{RUBG_LOSE_HP}%
+                            </PxBtn>
+                            <GhostBtn onClick={() => setRubgPaused((x) => !x)} title="Пауза эмулятора без сброса прогресса">
+                              {rubgPaused ? Ic.play(13) : Ic.pause(13)} {rubgPaused ? 'Продолжить' : 'Пауза'}
+                            </GhostBtn>
+                          </div>
+                        )}
                         <GhostBtn
                           className="w-full mt-2"
                           title="Перезапустить игру с сохранения (или с начала, если сохранения нет) — как «Перезапуск задания» в других режимах"

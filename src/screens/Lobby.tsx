@@ -46,6 +46,24 @@ const freshMapWithTokens = async (mapId: string): Promise<GameMap | null> => {
   } catch { return null; }
 };
 
+/* v0.70: ТИП ЗАДАНИЙ КАРТЫ — какие способы подтверждения заданий есть у ячеек:
+   вручную (на доверии), голосование соперников (челлендж), по коду (CodeSearch),
+   ТОЛЬКО по коду (без ручных кнопок). null — заданий на карте нет.
+   Функция на уровне модуля — видна и CreateScreen (плитки карт), и LobbyScreen (комната). */
+const taskModeLabel = (m: GameMap): string | null => {
+  const tasks = m.cells.filter((c) => c.task).map((c) => c.task!);
+  if (!tasks.length) return null;
+  const only = tasks.filter((t) => t.codeOnly).length;
+  const coded = tasks.filter((t) => !t.codeOnly && (t.code || t.codeFail)).length;
+  const manual = tasks.length - only - coded;
+  const parts: string[] = [];
+  if (manual > 0) parts.push('✋ вручную');
+  if (m.mode === 'classic' && only < tasks.length) parts.push('🗳 голосование');
+  if (coded > 0) parts.push('🤖 по коду');
+  if (only > 0) parts.push('🤖 ТОЛЬКО по коду');
+  return parts.join(' · ');
+};
+
 export function CreateScreen() {
   const { maps, roms, setScreen, toast, refresh } = useApp();
   /* Безкартовые карты (старые челленджи v0.36.0) в списке НЕ показываются —
@@ -265,6 +283,11 @@ export function CreateScreen() {
                 </span>
               </div>
               <div className="tick-label text-faint mt-2">{(() => { const f = mapFacts(m); return `${f.cells} ячеек на маршруте`; })()}{m.tileGrid ? ` · плиточный режим (${m.tileGrid.tiles.length} карт-локаций)` : ''}</div>
+              {taskModeLabel(m) && (
+                <div className={`text-[11px] mt-1 ${taskModeLabel(m)!.includes('🤖') ? 'text-teal' : 'text-dim'}`}>
+                  задания: {taskModeLabel(m)}
+                </div>
+              )}
               <div className="mt-2.5 grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-1">
                 {(() => {
                   const f = mapFacts(m);
@@ -871,6 +894,11 @@ export function LobbyScreen() {
               {(sessionMap.mode === 'skill' || sessionMap.mode === 'journey1p') && <span className="tick-label text-magma ml-auto">играет только хост · остальные — зрители</span>}
               {sessionMap.mode !== 'skill' && sessionMap.mode !== 'journey1p' && <span className="tick-label text-faint ml-auto">карту раздаёт хост — у всех игроков она одинаковая</span>}
             </div>
+            {taskModeLabel(sessionMap) && (
+              <div className={`text-[11px] mb-2 ${taskModeLabel(sessionMap)!.includes('🤖') ? 'text-teal' : 'text-dim'}`}>
+                задания: {taskModeLabel(sessionMap)} — так засчитываются задания этой карты
+              </div>
+            )}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1">
               {(() => {
                 const romExt = (id?: string) => roms.find((r) => r.id === id)?.ext;

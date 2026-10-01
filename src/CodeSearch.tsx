@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApp } from './store';
 import { GhostBtn, Ic, PxBtn } from './ui';
 import { sfx } from './sound';
@@ -71,6 +71,9 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
   const [wallIn, setWallIn] = useState('');
   const [wallLive, setWallLive] = useState(true);
   const [wallView, setWallView] = useState<WallView | null>(null);
+  /* v0.70 ПРАВКА БАЙТА ПРЯМО В СТЕНЕ: клик по hex-байту → поле ввода → запись в память.
+     Рядом с жизнями так же правятся соседние счётчики — ручной поиск изменений. */
+  const [wallEdit, setWallEdit] = useState<{ off: number; raw: string } | null>(null);
   const [pasteIn, setPasteIn] = useState('');
   const [pasteErr, setPasteErr] = useState('');
   /* v0.69: сворачивание — окно живёт в свёрнутом виде (состояние поиска сохраняется),
@@ -116,24 +119,44 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
   };
 
   /* ---------- СТЕНА КОДА: снимок окна памяти (живой по таймеру и по навигации) ---------- */
+  const refreshWall = useCallback(() => {
+    const heap = getHeap();
+    if (!heap) return;
+    const len = WALL_ROWS * 16;
+    const a = Math.max(0, Math.min(wallAddr, Math.max(0, heap.length - len)));
+    const cur = heap.slice(a, a + len);
+    const prev = prevWallRef.current && prevWallRef.current.length === cur.length ? prevWallRef.current : null;
+    setWallView({ cur, prev, off: a });
+    prevWallRef.current = cur;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wallAddr]);
+
   useEffect(() => {
     if (!wallOpen) return;
-    const fetchWall = () => {
-      const heap = getHeap();
-      if (!heap) return;
-      const len = WALL_ROWS * 16;
-      const a = Math.max(0, Math.min(wallAddr, Math.max(0, heap.length - len)));
-      const cur = heap.slice(a, a + len);
-      const prev = prevWallRef.current && prevWallRef.current.length === cur.length ? prevWallRef.current : null;
-      setWallView({ cur, prev, off: a });
-      prevWallRef.current = cur;
-    };
-    fetchWall();
+    refreshWall();
     if (!wallLive) return;
-    const iv = setInterval(fetchWall, WALL_MS);
+    const iv = setInterval(refreshWall, WALL_MS);
     return () => clearInterval(iv);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wallOpen, wallLive, wallAddr]);
+  }, [wallOpen, wallLive, refreshWall]);
+
+  /* v0.70: правка байта из стены — ввод в ДЕСЯТИЧНОМ виде (0–255) или 0x-hex (0x00–0xFF);
+     после записи снимок перечитывается сразу — записанный байт подсветится красным */
+  const writeWallByte = (off: number, raw: string) => {
+    const sIn = raw.trim();
+    if (!sIn) { setWallEdit(null); return; }
+    const v = sIn.toLowerCase().startsWith('0x') ? parseHex(sIn) : Number(sIn);
+    if (v === null || !Number.isFinite(v) || !Number.isInteger(v) || v < 0 || v > 255) {
+      toast('Значение байта — число 0…255 (или 0x00…0xFF)', 'err');
+      return;
+    }
+    const heap = getHeap();
+    if (!heap) return;
+    if (writeAt(heap, off, 'u8', v)) {
+      setWallEdit(null);
+      refreshWall();
+      toast(`В 0x${hex8(off)} записано ${v} (0x${v.toString(16).toUpperCase().padStart(2, '0')}) — если это жизни, они изменятся сразу`, 'ok');
+    } else toast('Запись не удалась — адрес вне памяти', 'err');
+  };
 
   /* ---------- ЗАМОРОЗКА: периодически вписываем запомненное значение обратно ---------- */
   useEffect(() => {
@@ -506,12 +529,38 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
                           <div key={row} className="whitespace-pre">
                             <span className="text-sky">{hex8(off)}</span>
                             {'  '}
-                            {bytes.map((b, i) => (
-                              <span key={i} className={wallView.prev && wallView.prev[row * 16 + i] !== b ? 'text-coral' : 'text-paper/85'}>
-                                {b.toString(16).padStart(2, '0').toUpperCase()}
-                                {i < 15 ? ' ' : ''}
-                              </span>
-                            ))}
+                            {bytes.map((b, i) => {
+                              const boff = wallView.off + row * 16 + i;
+                              if (wallEdit?.off === boff) {
+                                return (
+                                  <input
+                                    key={i}
+                                    autoFocus
+                                    className="field-in inline-block w-[38px] px-0.5 py-0 text-[10px] font-mono text-center align-baseline"
+                                    value={wallEdit.raw}
+                                    placeholder={String(b)}
+                                    title={`0x${hex8(boff)} — число 0–255 или 0x00–0xFF (Enter — записать, Esc — отмена)`}
+                                    onChange={(e) => setWallEdit({ off: boff, raw: e.target.value })}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') writeWallByte(boff, wallEdit.raw);
+                                      else if (e.key === 'Escape') setWallEdit(null);
+                                    }}
+                                    onBlur={() => setWallEdit(null)}
+                                  />
+                                );
+                              }
+                              return (
+                                <button
+                                  key={i}
+                                  onClick={() => setWallEdit({ off: boff, raw: String(b) })}
+                                  title={`0x${hex8(boff)} · DEC ${b} · 0x${b.toString(16).padStart(2, '0').toUpperCase()} — клик, чтобы вписать своё значение`}
+                                  className={`cursor-pointer hover:text-gold ${wallView.prev && wallView.prev[row * 16 + i] !== b ? 'text-coral' : 'text-paper/85'}`}
+                                >
+                                  {b.toString(16).padStart(2, '0').toUpperCase()}
+                                  {i < 15 ? ' ' : ''}
+                                </button>
+                              );
+                            })}
                             {'  '}
                             <span className="text-faint">{bytes.map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '·')).join('')}</span>
                           </div>
@@ -525,6 +574,7 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
                 <p className="text-[10.5px] text-dim leading-tight">
                   Каждый байт памяти: адрес строки, 16 байт в hex и те же байты как символы. Красным подсвечиваются байты, изменившиеся с прошлого обновления —
                   рядом с адресом жизней обычно лежат соседние счётчики игры. Стена живёт вместе с игрой (галка «живой»).
+                  <b className="text-teal"> Клик по байту — правка на месте:</b> введите число 0…255 (или 0x00…0xFF) и нажмите Enter — значение запишется в память игры сразу.
                 </p>
               </>
             )}

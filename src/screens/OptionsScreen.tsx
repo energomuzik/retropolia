@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useApp } from '../store';
 import { Field, GhostBtn, Ic, Modal, Panel, PxBtn, Toggle } from '../ui';
+import type { SpoilerMode } from '../types';
 import { idbDel, idbAll, exportLibrary, importLibrary } from '../db';
 import { STORES } from '../db';
 import { sfx } from '../sound';
@@ -10,6 +11,14 @@ const DEL_MODES: { key: 'instant' | 'confirm' | 'hold'; label: string; hint: str
   { key: 'instant', label: 'Сразу', hint: 'клик по крестику удаляет сразу, как раньше' },
   { key: 'confirm', label: 'С окошком', hint: 'сначала окно-предупреждение (по умолчанию)' },
   { key: 'hold', label: 'Долгое нажатие', hint: 'удалит, только если держать крестик ~1 секунду' },
+];
+
+/* v0.70: режим спойлеров — папки ромов в «Запуске эмулятора» и в редакторе заданий,
+   спойлер сохранений, панели и группы тайлов в редакторе карт */
+const SPOILER_MODES: { key: SpoilerMode; label: string; hint: string }[] = [
+  { key: 'remember', label: 'Запоминать', hint: 'что свернули — то закрыто и после перезахода (по умолчанию)' },
+  { key: 'collapsed', label: 'Всегда свёрнуты', hint: 'все спойлеры открываются закрытыми' },
+  { key: 'expanded', label: 'Всегда развёрнуты', hint: 'все спойлеры открываются открытыми' },
 ];
 
 export default function OptionsScreen() {
@@ -173,6 +182,27 @@ export default function OptionsScreen() {
                   даже если её стёрли ластиком или удалили клавишей Delete. Режим действует и на клавишу Delete, и на кнопки
                   «Удалить» в панелях тайла/анимации: при «окошке» или «удержании» клавиша Delete не удаляет мгновенно.
                   Ластики (в редакторе карт и в пиксель-редакторе) работают как раньше — всегда сразу, на них настройка не влияет.
+                </p>
+              </div>
+              <div>
+                <span className="font-display text-[12px] uppercase text-paper">Спойлеры (сворачиваемые панели)</span>
+                <div className="text-[10px] text-faint mt-0.5 mb-2">Папки ромов в «Запуске эмулятора» и в редакторе заданий, спойлер сохранений, панели и группы тайлов в редакторе карт</div>
+                <div className="grid sm:grid-cols-3 gap-2">
+                  {SPOILER_MODES.map((m) => (
+                    <button
+                      key={m.key}
+                      onClick={() => { setOptions({ spoilerMode: m.key }); sfx.hover(); }}
+                      className={`text-left px-3 py-2 border-2 transition-colors cursor-pointer ${options.spoilerMode === m.key ? 'border-gold bg-gold/10' : 'border-edge hover:border-edge2'}`}
+                    >
+                      <div className={`font-display text-[11px] uppercase ${options.spoilerMode === m.key ? 'text-gold' : 'text-paper'}`}>{m.label}</div>
+                      <div className="text-[10px] text-dim mt-0.5 leading-snug">{m.hint}</div>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-faint mt-2 leading-relaxed">
+                  «Запоминать» — каждое сворачивание/разворачивание сохраняется: зайдёте заново — увидите всё, как оставили.
+                  «Всегда свёрнуты»/«Всегда развёрнуты» — режим главнее запомненного (выбор пользователя при этом не стирается —
+                  вернулись в «Запоминать» — восстановилось то, что было). Группы тайлов в редакторе карт хранят свёрнутость прямо в карте.
                 </p>
               </div>
             </div>

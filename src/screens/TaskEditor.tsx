@@ -9,6 +9,7 @@ import { CHAOS_LIST, chaosLabel, mkChaosCard, JOY_LIST, SAVE_KIND_CLS, SAVE_KIND
 import { CODE_TYPE_LABEL, OP_LABEL, formatCond, hex8, memCondText, parseCond, parseHex } from '../memcode';
 import { renumberByPath, fixLinksAfterDelete } from '../render';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
+import { effSpoilerOpen, loadSpoilerFlag, loadSpoilerRec, saveSpoilerFlag, saveSpoilerRec } from '../spoilers';
 import { CartridgeBadge, CartCutModal, CoverCropBtn, CoverPickBtn, CoverRemoveBtn, PlatName, RomPicsModal, RomTile, cartLabelOf, fileToCover, storeRomCover } from '../cartridge';
 import { sfx } from '../sound';
 
@@ -52,6 +53,7 @@ export const effectLabel = (e: CardEffect): string => {
 
 export default function TaskEditor() {
   const { maps, roms, saves, setScreen, refresh, toast } = useApp();
+  const spoilerMode = useApp((st) => st.options.spoilerMode); // v0.70: режим спойлеров (запоминать / всегда свёрнуты / развёрнуты)
   const [map, setMap] = useState<GameMap | null>(null);
   const [selCell, setSelCell] = useState<number | null>(null);
   const [view, setView] = useState({ x: 0, y: 0, zoom: 1 });
@@ -95,6 +97,8 @@ export default function TaskEditor() {
   const [fCondFail, setFCondFail] = useState<MemCond | null>(null);
   const [codeFailIn, setCodeFailIn] = useState('');
   const [codeFailErr, setCodeFailErr] = useState('');
+  /* v0.70 ТОЛЬКО ПО КОДУ: ручные кнопки для этого задания отключены — всё решают коды */
+  const [fCodeOnly, setFCodeOnly] = useState(false);
 
   const tiles = useApp((st) => st.tiles);
   const tileById = useMemo(() => new Map(tiles.map((t) => [t.id, t])), [tiles]);
@@ -132,6 +136,7 @@ export default function TaskEditor() {
     setFCondFail(cell.task?.codeFail ?? null);
     setCodeFailIn(cell.task?.codeFail ? formatCond(cell.task.codeFail) : '');
     setCodeFailErr('');
+    setFCodeOnly(cell.task?.codeOnly ?? false);
   }, [selCell, map?.id]);
 
   const CELL_COLORS = ['#ffcf3f', '#ff5d73', '#5aa9ff', '#2ee6a8', '#ff8b3f', '#9be84d', '#c07aff', '#e9ecff'];
@@ -210,14 +215,24 @@ export default function TaskEditor() {
   /* ---------- ЛЕВАЯ ПАНЕЛЬ РОМОВ (как в «Запуске эмулятора») ----------
    Показывается, когда редактируется ячейка-задание: папки-спойлеры,
    клик по рому выбирает его для задания. Никаких списков на сотни строк. */
-  const [romFoldersOpen, setRomFoldersOpen] = useState<Record<string, boolean>>({});
-  const [romSavesOpen, setRomSavesOpen] = useState(true); // спойлер сохранений под выбранным ромом
+  const [romFoldersOpenRaw, setRomFoldersOpenRaw] = useState<Record<string, boolean>>(() => loadSpoilerRec('taskFolders')); // v0.70: состояние в localStorage, показ по режиму спойлеров
+  const [romSavesOpenRaw, setRomSavesOpenRaw] = useState<boolean>(() => loadSpoilerFlag('taskSaves') ?? true); // v0.70: спойлер сохранений — тоже запоминается
   // v0.61: режим показа ромов в папке (дефолт СПИСОК) + размер плиток + развёрнутое окно картинок + обложки
   const [romFolderViews, setRomFolderViews] = useState<Record<string, 'list' | 'pics'>>({});
   const [romPicsTileSize, setRomPicsTileSize] = useState(56);
   const [expandRomFolder, setExpandRomFolder] = useState<string | null>(null);
   /* v0.62: cropJob — ром и картинка, из которой вырезается картридж ножницами ✂ */
   const [romCropJob, setRomCropJob] = useState<{ rom: RomDef; file: File } | null>(null);
+  /* v0.70: ОТКРЫТОСТЬ папок и спойлера сохранений — по режиму спойлеров из Опций;
+     в режиме «запоминать» каждое переключение пишется в localStorage (переживает перезаход) */
+  const romFolderOpen = (f: string) => effSpoilerOpen(spoilerMode, romFoldersOpenRaw[f], false);
+  const toggleRomFolder = (f: string, open: boolean) => {
+    setRomFoldersOpenRaw((s) => { const next = { ...s, [f]: open }; if (spoilerMode === 'remember') saveSpoilerRec('taskFolders', next); return next; });
+  };
+  const romSavesOpen = effSpoilerOpen(spoilerMode, romSavesOpenRaw, true);
+  const toggleRomSaves = () => {
+    setRomSavesOpenRaw((v) => { const next = !v; if (spoilerMode === 'remember') saveSpoilerFlag('taskSaves', next); return next; });
+  };
   /* v0.62: applyRomCover — общая запись для 📷 (готовая картинка) и ✂ (вырезание):
      обложка сохраняется КАК ЕСТЬ — пропорции честные, показывается целиком
      v0.63: «убрать обложку» — по тем же правилам, что удаление тайлов в редакторе
@@ -291,7 +306,7 @@ export default function TaskEditor() {
         {sel && svCount > 0 && (
           <div className="mt-1 border-2 border-edge bg-[rgba(11,14,28,0.6)] px-2 py-1.5">
             <button
-              onClick={() => setRomSavesOpen((v) => !v)}
+              onClick={toggleRomSaves}
               className="w-full flex items-center gap-1 text-left cursor-pointer hover:bg-[rgba(255,207,63,0.08)] px-0.5 py-0.5"
               title={romSavesOpen ? 'Свернуть' : 'Развернуть'}
             >
@@ -353,6 +368,8 @@ export default function TaskEditor() {
       ...(fCond ? { code: fCond } : {}),
       /* v0.68: поражение по коду — условие провала задания (CodeSearch) */
       ...(fCondFail ? { codeFail: fCondFail } : {}),
+      /* v0.70: только по коду — ручные кнопки и голосование для ячейки отключены */
+      ...(fCodeOnly ? { codeOnly: true } : {}),
     };
     nextMap.cells[selCell].task = task;
     setMap(nextMap);
@@ -576,13 +593,13 @@ export default function TaskEditor() {
             </div>
             {romFolders.map((f) => {
               const inF = romsIn(f);
-              const open = romFoldersOpen[f] ?? false;
+              const open = romFolderOpen(f);
               const pics = (romFolderViews[f] ?? 'list') === 'pics'; // v0.61: дефолт — СПИСОК
               return (
                 <div key={`rf-${f}`} className="mb-2">
                   <div className="flex items-center gap-0.5">
                     <button
-                      onClick={() => setRomFoldersOpen((s) => ({ ...s, [f]: !open }))}
+                      onClick={() => toggleRomFolder(f, !open)}
                       className="flex-1 min-w-0 flex items-center gap-1 text-left cursor-pointer hover:bg-[rgba(255,93,115,0.08)] px-1 py-0.5"
                       title={open ? 'Свернуть' : 'Развернуть'}
                     >
@@ -974,9 +991,31 @@ export default function TaskEditor() {
                         )}
                       </div>
                     </Field>
+                    {/* v0.70: ТОЛЬКО ПО КОДУ — ручные кнопки и голосование отключаются */}
+                    <Field label="Только по коду (необязательно)">
+                      <div className="space-y-1.5 border-2 border-[rgba(255,207,63,0.4)] px-2 py-2">
+                        <label className="flex items-start gap-2 cursor-pointer select-none">
+                          <input type="checkbox" checked={fCodeOnly} onChange={(e) => { setFCodeOnly(e.target.checked); sfx.hover(); }} className="mt-0.5" />
+                          <span className="text-[11px] text-paper leading-tight">
+                            Победа и поражение — <b className="text-gold">ТОЛЬКО по коду</b>, без ручного подтверждения
+                          </span>
+                        </label>
+                        <p className="text-[10px] text-dim leading-tight">
+                          Галочка выключает для этой ячейки ручные кнопки и голосование: в челлендже — «Прошёл задание» и «Согласен/Нарушил»,
+                          в RUBG/QUEST — «ПОБЕДА» и «ПОРАЖЕНИЕ». Останутся только кодовые условия выше — выполнится код зачёта, задание
+                          засчитается само, выполнится код поражения — провалится само. Честно для карт, где игроки не доверяют друг другу.
+                          Без галочки (по умолчанию) работают И код, И ручное подтверждение.
+                        </p>
+                        {fCodeOnly && !fCond && !fCondFail && (
+                          <p className="text-[10.5px] text-magma leading-tight">
+                            ⚠ Коды не заданы: задание нельзя будет ни выполнить, ни провалить. Вставьте хотя бы один код из CodeSearch — или снимите галочку.
+                          </p>
+                        )}
+                      </div>
+                    </Field>
                     <PxBtn className="w-full" onClick={() => void saveTask()}>{Ic.check(14)} Сохранить задание</PxBtn>
                     {cell.task && (
-                      <div className="text-[11px] text-teal">Сейчас: «{cell.task.title}» · {romName(cell.task.romId)}{cell.task.code ? ' · зачёт по коду ✓' : ''}{cell.task.codeFail ? ' · поражение по коду ✓' : ''}</div>
+                      <div className="text-[11px] text-teal">Сейчас: «{cell.task.title}» · {romName(cell.task.romId)}{cell.task.code ? ' · зачёт по коду ✓' : ''}{cell.task.codeFail ? ' · поражение по коду ✓' : ''}{cell.task.codeOnly ? ' · только по коду ✓' : ''}</div>
                     )}
                   </div>
                 </Panel>

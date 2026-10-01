@@ -9,6 +9,7 @@ import { CartridgeBadge, CartCutModal, CoverCropBtn, CoverPickBtn, CoverRemoveBt
 import type { RomDef, SaveDef, SaveKind } from '../types';
 import { SAVE_KIND_CLS, SAVE_KIND_SHORT, saveKindOf, saveKindNum } from '../types';
 import { HoldDeleteButton, rememberDeleted } from '../delGuard';
+import { effSpoilerCollapsed, loadSpoilerRec, saveSpoilerRec } from '../spoilers';
 import {
   keyLabel, loadEmuPrefs, PREFS_EVENT, listGamepads,
   PAD_ACTIONS, NES_TO_RETRO, codeToEjsKey,
@@ -39,6 +40,7 @@ const saveEmptyRomFolders = (arr: string[]) => {
 
 export default function EmulatorLauncher() {
   const { roms, saves, setScreen, refresh, toast } = useApp();
+  const spoilerMode = useApp((st) => st.options.spoilerMode); // v0.70: режим спойлеров из Опций
   const [romId, setRomId] = useState<string | null>(null);
   const [romBuf, setRomBuf] = useState<ArrayBuffer | null>(null);
   const [runKey, setRunKey] = useState(0);
@@ -61,7 +63,11 @@ export default function EmulatorLauncher() {
   const [newFolderOpen, setNewFolderOpen] = useState(false); // строка создания новой папки
   const [newFolderName, setNewFolderName] = useState('');
   const [emptyFolders, setEmptyFolders] = useState<string[]>(loadEmptyRomFolders);
-  const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({});
+  /* v0.70: свёрнутость папок — в localStorage (переживает перезаход), показ по режиму спойлеров */
+  const [collapsedFoldersRaw, setCollapsedFoldersRaw] = useState<Record<string, boolean>>(() => loadSpoilerRec('emuFolders'));
+  const toggleFolderCollapsed = (f: string, v: boolean) => {
+    setCollapsedFoldersRaw((s) => { const next = { ...s, [f]: v }; if (spoilerMode === 'remember') saveSpoilerRec('emuFolders', next); return next; });
+  };
   /* v0.61: режим показа ромов в папке (по умолчанию СПИСОК) + размер плиток + развёрнутое окно картинок
      v0.62: cropJob — ром и картинка, из которой пользователь вырезает картридж ножницами ✂ */
   const [folderViews, setFolderViews] = useState<Record<string, 'list' | 'pics'>>({});
@@ -563,13 +569,13 @@ export default function EmulatorLauncher() {
               {/* папки-спойлеры с ромами */}
               {folderNames.map((f) => {
                 const inF = romsIn(f);
-                const collapsed = collapsedFolders[f] ?? false;
+                const collapsed = effSpoilerCollapsed(spoilerMode, collapsedFoldersRaw[f], false);
                 const pics = (folderViews[f] ?? 'list') === 'pics'; // v0.61: режим показа папки (дефолт — СПИСОК)
                 return (
                   <div key={`f-${f}`}>
                     <div className="flex items-center gap-1 mb-1">
                       <button
-                        onClick={() => setCollapsedFolders((s) => ({ ...s, [f]: !collapsed }))}
+                        onClick={() => toggleFolderCollapsed(f, !collapsed)}
                         className="flex-1 min-w-0 flex items-center gap-1 text-left cursor-pointer hover:bg-[rgba(255,93,115,0.08)] px-1 py-0.5"
                         title={collapsed ? 'Развернуть' : 'Свернуть'}
                       >

@@ -71,10 +71,17 @@ export default function App() {
     setVolume(volume);
   }, [volume]);
 
-  /* ПКМ больше НЕ открывает контекстное меню браузера — нигде в игре.
-     Правая кнопка остаётся свободной для своих нужд (панорамирование карты и т.п.) */
+  /* ПКМ НЕ открывает контекстное меню браузера — нигде в игре, правая кнопка
+     свободна для своих нужд (панорамирование карты и т.п.).
+     v0.70 ИСКЛЮЧЕНИЕ — ПОЛЯ ВВОДА (INPUT/TEXTAREA/contentEditable): там ПКМ снова
+     открывает меню браузера с «Вставить»/«Копировать» — вставлять скопированный код
+     условия RPC1, адрес хаба/реле/TURN и любой текст руками удобнее, чем Ctrl+V. */
   useEffect(() => {
-    const off = (e: MouseEvent) => e.preventDefault();
+    const off = (e: MouseEvent) => {
+      const tgt = e.target as HTMLElement | null;
+      if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+      e.preventDefault();
+    };
     document.addEventListener('contextmenu', off);
     return () => document.removeEventListener('contextmenu', off);
   }, []);

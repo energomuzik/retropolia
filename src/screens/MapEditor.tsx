@@ -16,6 +16,7 @@ import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, Cutscene
 import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, doorKeyHex, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, normResMode, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileRectOf, DOOR_KEYS, RUBG_ITEMS, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
 import type { MapMode } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
+import { effSpoilerCollapsed, effSpoilerOpen, loadSpoilerRec, saveSpoilerRec } from '../spoilers';
 import { sfx } from '../sound';
 
 /* ---------- импорт картинок: сжимаем до разумного размера, чтобы карта не весила десятки МБ ---------- */
@@ -217,6 +218,7 @@ const LOOT_CELL_TYPE: { key: CellType; label: string; cls: string } = { key: 'lo
 
 export default function MapEditor() {
   const { maps, tiles, tokens, anims, bossAnims, npcAnims, challenges, setScreen, refresh, toast } = useApp();
+  const spoilerMode = useApp((st) => st.options.spoilerMode); // v0.70: режим спойлеров из Опций
   const [map, setMap] = useState<GameMap | null>(null);
   const [tool, setTool] = useState<Tool>('select');
   const [tileId, setTileId] = useState('');
@@ -229,13 +231,16 @@ export default function MapEditor() {
   const [linkFrom, setLinkFrom] = useState<number | null>(null);
   const [showGrid, setShowGrid] = useState(true);
   const [snap, setSnap] = useState(false);
-  const [tokOpen, setTokOpen] = useState(true); // спойлер «Фишки партии» в левой панели
-  const [animOpen, setAnimOpen] = useState(false); // спойлер «Анимации» в левой панели
-  const [bossOpen, setBossOpen] = useState(false); // спойлер «Боссы» в левой панели
-  const [npcOpen, setNpcOpen] = useState(false); // спойлер «🧑 NPC» в левой панели
-  const [endOpen, setEndOpen] = useState(false); // спойлер «🎬 Концовки» в левой панели
-  const [modeDescOpen, setModeDescOpen] = useState(false); // спойлер «Описания режимов» в панели «Режим игры»
-  const [layersOpen, setLayersOpen] = useState(true); // спойлер «Слои» в левой панели
+  /* v0.70 СПОЙЛЕРЫ ЛЕВОЙ ПАНЕЛИ: состояние в localStorage (переживает перезаход) + режим
+     из Опций (запоминать / всегда свёрнуты / всегда развёрнуты). Ключи: tok (Фишки),
+     anim (Анимации), boss (Боссы), npc (🧑 NPC), end (Концовки), modeDesc (Описания режимов),
+     layers (Слои), walls (Стены), plates (Плитки и порталы), cuts (Кат-сцены), tiles (Карты-плитки) */
+  const PANEL_DEFS: Record<string, boolean> = { tok: true, anim: false, boss: false, npc: false, end: false, modeDesc: false, layers: true, walls: true, plates: false, cuts: false, tiles: false };
+  const [panelState, setPanelState] = useState<Record<string, boolean>>(() => loadSpoilerRec('mapPanels'));
+  const panelOpen = (key: string) => effSpoilerOpen(spoilerMode, panelState[key], PANEL_DEFS[key] ?? false);
+  const setPanelOpen = (key: string, v: boolean) => {
+    setPanelState((s) => { const next = { ...s, [key]: v }; if (spoilerMode === 'remember') saveSpoilerRec('mapPanels', next); return next; });
+  };
   const [activeLayer, setActiveLayer] = useState(0); // слой, на который ставятся НОВЫЕ тайлы (0 — нижний)
   const [placeAnimId, setPlaceAnimId] = useState(''); // вшитая анимация, выбранная для размещения
   const [selAnim, setSelAnim] = useState<string | null>(null); // выбранная размещённая анимация
@@ -246,12 +251,9 @@ export default function MapEditor() {
   const [placeBossId, setPlaceBossId] = useState(''); // вшитый босс, выбранный для размещения
   const [selBoss, setSelBoss] = useState<string | null>(null); // выбранный размещённый босс
   const [selWall, setSelWall] = useState<number | null>(null); // выбранная стена (индекс)
-  const [wallsOpen, setWallsOpen] = useState(true); // спойлер «Стены» в левой панели
   const [selPortal, setSelPortal] = useState<number | null>(null); // выбранный портал (индекс)
   const [pickTargetFor, setPickTargetFor] = useState<number | null>(null); // портал, для которого указываем точку перехода (следующий клик по канве = точка)
-  const [platesOpen, setPlatesOpen] = useState(false); // спойлер «Плитки и порталы» в левой панели
   /* v0.56: КАТ-СЦЕНЫ — спойлер, выбранная кат-сцена и рисование ЗОНЫ-триггера */
-  const [cutsOpen, setCutsOpen] = useState(false);
   const [selCutIdx, setSelCutIdx] = useState<number | null>(null);
   const [cutZoneArm, setCutZoneArm] = useState(false); // «рисовать зону» — следующий протягивающий клик ставит зону
   const cutZoneDragRef = useRef<{ sx: number; sy: number; ex: number; ey: number } | null>(null);
@@ -259,7 +261,6 @@ export default function MapEditor() {
      в конец маршрута выбранной кат-сцены прямо там, куда ткнули (больше не нужно
      добавлять точку кнопкой и тащить её из центра карты) */
   const [cutPtArm, setCutPtArm] = useState(false);
-  const [tilesOpen, setTilesOpen] = useState(false); // спойлер «Карты-плитки» (плиточный режим) в левой панели
   const [selTileId, setSelTileId] = useState<string | null>(null); // активная карта-плитка (схема + её фон)
   const [bgScope, setBgScope] = useState<'plate' | 'all'>('plate'); // куда ложится НОВЫЙ фон: «на эту плитку» (своя локация) или «на всю карту»
   const [extract, setExtract] = useState<{ file: File; src: string; name: string; busy: boolean; bgMode: 'auto' | 'custom'; bg: string; foundBg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; oneSize: boolean; tiles: TileImg[] } | null>(null);
@@ -734,7 +735,7 @@ export default function MapEditor() {
     const nx = Math.max(1, Math.ceil(sz.w / ps));
     const ny = Math.max(1, Math.ceil(sz.h / ps));
     applyPlates(ps, nx, ny);
-    setPlatesOpen(true);
+    setPanelOpen('plates', true);
     sfx.coin();
     toast(`Поле разбито на плитки ${ps} px (${nx}×${ny}). Соседние плитки стыкуются краями, любые связывайте порталами`, 'ok');
   };
@@ -780,7 +781,7 @@ export default function MapEditor() {
     const tg: TileGrid = { w: sz.w, h: sz.h, tiles: [{ id: uid('mt'), col: 0, row: 0 }] };
     updTileGrid(tg);
     setSelTileId(tg.tiles[0].id);
-    setTilesOpen(true);
+    setPanelOpen('tiles', true);
     sfx.coin();
     toast(`Плиточный режим включён: всё поле стало КАРТОЙ №1 (${sz.w}×${sz.h}). Добавляйте новые карты-плитки кнопкой ниже — между ними ставьте порталы`, 'ok');
   };
@@ -1029,9 +1030,12 @@ export default function MapEditor() {
     toast(`Добавлено тайлов: ${count}`, 'ok');
   };
 
-  /* спойлеры палитры: свернуть/развернуть */
-  const toggleGroup = (gid: string) =>
+  /* спойлеры палитры: свернуть/развернуть (v0.70: БАГФИКС — состояние теперь реально сохраняется
+     в карту: раньше dirtyRef не ставился, и сворачивание терялось, если не тронуть канвас) */
+  const toggleGroup = (gid: string) => {
     updMap({ tileGroups: (map?.tileGroups ?? []).map((g) => (g.id === gid ? { ...g, collapsed: !g.collapsed } : g)) });
+    dirtyRef.current = true;
+  };
 
   /* убрать спойлер из панели (папку на компьютере не трогаем) */
   const delGroup = (g: TileGroup) => {
@@ -2883,11 +2887,11 @@ export default function MapEditor() {
               {/* СЛОИ: фон — самый низ, тайловые слои (выбор + добавление), ячейки и стрелки — всегда самый верх */}
               {map && (
                 <div>
-                  <button onClick={() => setLayersOpen((o) => !o)} className="w-full flex items-center gap-1.5 mb-2 cursor-pointer group" title={layersOpen ? 'Свернуть' : 'Развернуть'}>
-                    <span className={`text-[10px] ${layersOpen ? 'text-gold' : 'text-faint'}`}>{layersOpen ? '▾' : '▸'}</span>
+                  <button onClick={() => setPanelOpen('layers', !panelOpen('layers'))} className="w-full flex items-center gap-1.5 mb-2 cursor-pointer group" title={panelOpen('layers') ? 'Свернуть' : 'Развернуть'}>
+                    <span className={`text-[10px] ${panelOpen('layers') ? 'text-gold' : 'text-faint'}`}>{panelOpen('layers') ? '▾' : '▸'}</span>
                     <span className="tick-label group-hover:text-paper">🗂 Слои карты</span>
                   </button>
-                  {layersOpen && (
+                  {panelOpen('layers') && (
                     <div className="space-y-1">
                       {/* фон — самый нижний слой */}
                       <div className="flex items-center gap-1.5 border-2 border-edge bg-panel px-2 py-1.5">
@@ -2962,15 +2966,16 @@ export default function MapEditor() {
                 {(map.tileGroups ?? []).map((g) => {
                   const inG = g.tids.map((tid) => tileImgById.get(tid)).filter(Boolean) as TileImg[];
                   const tag = g.kind === 'extract' ? '✂' : g.kind === 'folder' ? '›' : '+';
+                  const gCollapsed = effSpoilerCollapsed(spoilerMode, g.collapsed, false); // v0.70: режим спойлеров из Опций
                   return (
                     <div key={g.id} className="mb-2">
                       <div className="flex items-center gap-1 mb-1">
                         <button
                           onClick={() => toggleGroup(g.id)}
                           className="flex-1 min-w-0 flex items-center gap-1 text-left cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
-                          title={g.collapsed ? 'Развернуть' : 'Свернуть'}
+                          title={gCollapsed ? 'Развернуть' : 'Свернуть'}
                         >
-                          <span className={`text-[10px] shrink-0 ${g.collapsed ? 'text-faint' : 'text-gold'}`}>{g.collapsed ? '▸' : '▾'}</span>
+                          <span className={`text-[10px] shrink-0 ${gCollapsed ? 'text-faint' : 'text-gold'}`}>{gCollapsed ? '▸' : '▾'}</span>
                           <span className="text-[10px] text-faint shrink-0">{tag}</span>
                           <span className="font-display text-[10px] uppercase text-dim truncate">{g.name}</span>
                           <span className="tick-label text-faint shrink-0">· {inG.length}</span>
@@ -2983,7 +2988,7 @@ export default function MapEditor() {
                           className="text-faint hover:text-coral cursor-pointer shrink-0 px-0.5"
                         >{Ic.cross(10)}</HoldDeleteButton>
                       </div>
-                      {!g.collapsed && (
+                      {!gCollapsed && (
                         <div className="grid grid-cols-4 gap-1.5">
                           {inG.map((t) => (
                             <button
@@ -3243,14 +3248,14 @@ export default function MapEditor() {
                 )}
                 {/* описания челленджей — под спойлером, чтобы не занимали панель всегда */}
                 <button
-                  onClick={() => setModeDescOpen((v) => !v)}
+                  onClick={() => setPanelOpen('modeDesc', !panelOpen('modeDesc'))}
                   className="flex items-center gap-1 w-full text-left mt-2 px-1 py-0.5 cursor-pointer hover:bg-[rgba(90,169,255,0.08)]"
-                  title={modeDescOpen ? 'Свернуть' : 'Развернуть'}
+                  title={panelOpen('modeDesc') ? 'Свернуть' : 'Развернуть'}
                 >
-                  <span className={`text-[10px] shrink-0 ${modeDescOpen ? 'text-gold' : 'text-faint'}`}>{modeDescOpen ? '▾' : '▸'}</span>
+                  <span className={`text-[10px] shrink-0 ${panelOpen('modeDesc') ? 'text-gold' : 'text-faint'}`}>{panelOpen('modeDesc') ? '▾' : '▸'}</span>
                   <span className="tick-label text-faint">Описания режимов</span>
                 </button>
-                {modeDescOpen && (
+                {panelOpen('modeDesc') && (
                   <div className="space-y-1.5 mt-1.5 border-2 border-edge px-2 py-2">
                     {MAP_MODES.map((md) => (
                       <p key={md.id} className="text-[10px] text-faint leading-tight"><span className="text-dim font-display uppercase">{md.name}</span> — {md.hint}</p>
@@ -3293,14 +3298,14 @@ export default function MapEditor() {
 
               <div>
                 <button
-                  onClick={() => setWallsOpen((v) => !v)}
+                  onClick={() => setPanelOpen('walls', !panelOpen('walls'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
-                  title={wallsOpen ? 'Свернуть' : 'Развернуть'}
+                  title={panelOpen('walls') ? 'Свернуть' : 'Развернуть'}
                 >
-                  <span className={`text-[10px] shrink-0 ${wallsOpen ? 'text-gold' : 'text-faint'}`}>{wallsOpen ? '▾' : '▸'}</span>
+                  <span className={`text-[10px] shrink-0 ${panelOpen('walls') ? 'text-gold' : 'text-faint'}`}>{panelOpen('walls') ? '▾' : '▸'}</span>
                   <span className="tick-label">Невидимые стены · {(map.walls ?? []).length}</span>
                 </button>
-                {wallsOpen && (
+                {panelOpen('walls') && (
                   <div className="space-y-1.5">
                     <p className="text-[10px] text-faint leading-tight">Зоны, куда фишка НЕ может зайти («невидимые стены» в играх). Ходить изначально можно ВЕЗДЕ — стены только исключения. Инструмент «Стена»: протяните прямоугольник по полю. Обычные стены в игре НЕ рисуются; стена с ЗАМКОМ (дверь) — видна цветной зоной и открывается ключом того же цвета.</p>
                     <p className={`text-[10px] leading-tight border-2 px-2 py-1.5 ${isJourneyLike(map.mode) ? 'text-teal border-teal/40' : 'text-magma border-magma/40'}`}>
@@ -3349,14 +3354,14 @@ export default function MapEditor() {
               {/* ПЛИТОЧНЫЙ РЕЖИМ КАРТ: схема плиток-локаций, добавление/выбор/удаление */}
               <div>
                 <button
-                  onClick={() => setTilesOpen((v) => !v)}
+                  onClick={() => setPanelOpen('tiles', !panelOpen('tiles'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
-                  title={tilesOpen ? 'Свернуть' : 'Развернуть'}
+                  title={panelOpen('tiles') ? 'Свернуть' : 'Развернуть'}
                 >
-                  <span className={`text-[10px] shrink-0 ${tilesOpen ? 'text-gold' : 'text-faint'}`}>{tilesOpen ? '▾' : '▸'}</span>
+                  <span className={`text-[10px] shrink-0 ${panelOpen('tiles') ? 'text-gold' : 'text-faint'}`}>{panelOpen('tiles') ? '▾' : '▸'}</span>
                   <span className="tick-label">Карты-плитки{map.tileGrid ? ` · ${map.tileGrid.tiles.length}` : ''}{tileBgCount > 0 ? ` · фонов: ${tileBgCount}` : ''}</span>
                 </button>
-                {tilesOpen && (
+                {panelOpen('tiles') && (
                   <div className="space-y-2">
                     {!map.tileGrid ? (
                       <>
@@ -3419,14 +3424,14 @@ export default function MapEditor() {
               <div>
                 {/* v0.56: КАТ-СЦЕНЫ — маршруты камеры, зоны-триггеры, выдача NPC */}
                 <button
-                  onClick={() => setCutsOpen((v) => !v)}
+                  onClick={() => setPanelOpen('cuts', !panelOpen('cuts'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(255,139,63,0.08)] px-1 py-0.5"
-                  title={cutsOpen ? 'Свернуть' : 'Развернуть'}
+                  title={panelOpen('cuts') ? 'Свернуть' : 'Развернуть'}
                 >
-                  <span className={`text-[10px] shrink-0 ${cutsOpen ? 'text-gold' : 'text-faint'}`}>{cutsOpen ? '▾' : '▸'}</span>
+                  <span className={`text-[10px] shrink-0 ${panelOpen('cuts') ? 'text-gold' : 'text-faint'}`}>{panelOpen('cuts') ? '▾' : '▸'}</span>
                   <span className="tick-label">🎬 Кат-сцены · {(map.cutscenes ?? []).length}{(map.cutscenes ?? []).some((c) => c.trigger === 'start') ? ' · ▶ на старте' : ''}{(map.cutscenes ?? []).some((c) => c.trigger === 'zone') ? ' · 🟪 зоны' : ''}</span>
                 </button>
-                {cutsOpen && (
+                {panelOpen('cuts') && (
                   <div className="space-y-1.5">
                     <p className="text-[10px] text-faint leading-tight">Кинематографичный пролёт КАМЕРЫ по точкам карты: камера летит из точки в точку (скорость в настройках), в каждой точке стоит заданное время и приближает/отдаляет (зум-множитель). Во время показа ВСЕ фишки, NPC и боссы СТОЯТ. Запуск: «старт карты» — при начале партии; «зона» — первый за сессию вход фишки в зону-триггер; «NPC» — вариант в диалоге NPC играет её.</p>
                     {(map.cutscenes ?? []).length === 0 && <p className="text-[10px] text-faint">Кат-сцен пока нет — создайте первую кнопкой ниже.</p>}
@@ -3560,14 +3565,14 @@ export default function MapEditor() {
                   </div>
                 )}
                 <button
-                  onClick={() => setPlatesOpen((v) => !v)}
+                  onClick={() => setPanelOpen('plates', !panelOpen('plates'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
-                  title={platesOpen ? 'Свернуть' : 'Развернуть'}
+                  title={panelOpen('plates') ? 'Свернуть' : 'Развернуть'}
                 >
-                  <span className={`text-[10px] shrink-0 ${platesOpen ? 'text-gold' : 'text-faint'}`}>{platesOpen ? '▾' : '▸'}</span>
+                  <span className={`text-[10px] shrink-0 ${panelOpen('plates') ? 'text-gold' : 'text-faint'}`}>{panelOpen('plates') ? '▾' : '▸'}</span>
                   <span className="tick-label">Плитки и порталы · {(map.portals ?? []).length}{map.plateSize ? ` · ${platesX}×${platesY}` : ''}{map.roomMode ? ' · 🔒 комнаты' : ''}</span>
                 </button>
-                {platesOpen && (
+                {panelOpen('plates') && (
                   <div className="space-y-1.5">
                     <p className="text-[10px] text-faint leading-tight">Два способа сделать карту БОЛЬШОЙ: 1) просто увеличьте «Размер поля» выше; 2) ПЛИТКИ — страницы поля одинакового размера: СОСЕДНИЕ плитки стыкуются краями (фишка переходит ходьбой в любом месте стыка), ЛЮБЫЕ плитки связываются порталами-телепортами. У каждой плитки — СВОЙ ФОН («другая локация»): навигатором прыгните на плитку и загрузите фон в панели «Фон» выше (переключатель «На эту плитку / На всю карту»).</p>
                     {!map.plateSize ? (
@@ -3648,14 +3653,14 @@ export default function MapEditor() {
 
               <div>
                 <button
-                  onClick={() => setTokOpen((v) => !v)}
+                  onClick={() => setPanelOpen('tok', !panelOpen('tok'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
-                  title={tokOpen ? 'Свернуть' : 'Развернуть'}
+                  title={panelOpen('tok') ? 'Свернуть' : 'Развернуть'}
                 >
-                  <span className={`text-[10px] shrink-0 ${tokOpen ? 'text-gold' : 'text-faint'}`}>{tokOpen ? '▾' : '▸'}</span>
+                  <span className={`text-[10px] shrink-0 ${panelOpen('tok') ? 'text-gold' : 'text-faint'}`}>{panelOpen('tok') ? '▾' : '▸'}</span>
                   <span className="tick-label">Фишки партии · {(map.mapTokens ?? []).length}/12</span>
                 </button>
-                {tokOpen && (
+                {panelOpen('tok') && (
                   <div>
                     {tokens.length > 0 ? (
                       <div className="grid grid-cols-4 gap-1.5">
@@ -3705,14 +3710,14 @@ export default function MapEditor() {
 
               <div>
                 <button
-                  onClick={() => setAnimOpen((v) => !v)}
+                  onClick={() => setPanelOpen('anim', !panelOpen('anim'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
-                  title={animOpen ? 'Свернуть' : 'Развернуть'}
+                  title={panelOpen('anim') ? 'Свернуть' : 'Развернуть'}
                 >
-                  <span className={`text-[10px] shrink-0 ${animOpen ? 'text-gold' : 'text-faint'}`}>{animOpen ? '▾' : '▸'}</span>
+                  <span className={`text-[10px] shrink-0 ${panelOpen('anim') ? 'text-gold' : 'text-faint'}`}>{panelOpen('anim') ? '▾' : '▸'}</span>
                   <span className="tick-label">Анимации · вшито {(map.animLib ?? []).length}</span>
                 </button>
-                {animOpen && (
+                {panelOpen('anim') && (
                   <div>
                     {anims.length > 0 ? (
                       <div className="space-y-1 mb-2">
@@ -3761,14 +3766,14 @@ export default function MapEditor() {
 
               <div>
                 <button
-                  onClick={() => setBossOpen((v) => !v)}
+                  onClick={() => setPanelOpen('boss', !panelOpen('boss'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(192,122,255,0.08)] px-1 py-0.5"
-                  title={bossOpen ? 'Свернуть' : 'Развернуть'}
+                  title={panelOpen('boss') ? 'Свернуть' : 'Развернуть'}
                 >
-                  <span className={`text-[10px] shrink-0 ${bossOpen ? 'text-gold' : 'text-faint'}`}>{bossOpen ? '▾' : '▸'}</span>
+                  <span className={`text-[10px] shrink-0 ${panelOpen('boss') ? 'text-gold' : 'text-faint'}`}>{panelOpen('boss') ? '▾' : '▸'}</span>
                   <span className="tick-label">👹 Боссы · вшито {(map.bossLib ?? []).length}</span>
                 </button>
-                {bossOpen && (
+                {panelOpen('boss') && (
                   <div>
                     {bossAnims.length > 0 ? (
                       <div className="space-y-1 mb-2">
@@ -3817,14 +3822,14 @@ export default function MapEditor() {
 
               <div>
                 <button
-                  onClick={() => setNpcOpen((v) => !v)}
+                  onClick={() => setPanelOpen('npc', !panelOpen('npc'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(46,230,168,0.08)] px-1 py-0.5"
-                  title={npcOpen ? 'Свернуть' : 'Развернуть'}
+                  title={panelOpen('npc') ? 'Свернуть' : 'Развернуть'}
                 >
-                  <span className={`text-[10px] shrink-0 ${npcOpen ? 'text-gold' : 'text-faint'}`}>{npcOpen ? '▾' : '▸'}</span>
+                  <span className={`text-[10px] shrink-0 ${panelOpen('npc') ? 'text-gold' : 'text-faint'}`}>{panelOpen('npc') ? '▾' : '▸'}</span>
                   <span className="tick-label">🧑 NPC · вшито {(map.npcLib ?? []).length}</span>
                 </button>
-                {npcOpen && (
+                {panelOpen('npc') && (
                   <div>
                     {npcAnims.length > 0 ? (
                       <div className="space-y-1 mb-2">
@@ -3874,14 +3879,14 @@ export default function MapEditor() {
               {isQuestMode(map.mode) && (
               <div>
                 <button
-                  onClick={() => setEndOpen((v) => !v)}
+                  onClick={() => setPanelOpen('end', !panelOpen('end'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(255,207,63,0.08)] px-1 py-0.5"
-                  title={endOpen ? 'Свернуть' : 'Развернуть'}
+                  title={panelOpen('end') ? 'Свернуть' : 'Развернуть'}
                 >
-                  <span className={`text-[10px] shrink-0 ${endOpen ? 'text-gold' : 'text-faint'}`}>{endOpen ? '▾' : '▸'}</span>
+                  <span className={`text-[10px] shrink-0 ${panelOpen('end') ? 'text-gold' : 'text-faint'}`}>{panelOpen('end') ? '▾' : '▸'}</span>
                   <span className="tick-label">🎬 Концовки · {(map.endings ?? []).length}</span>
                 </button>
-                {endOpen && (
+                {panelOpen('end') && (
                   <div className="space-y-2">
                     <p className="text-[10px] text-faint leading-tight">Финальные условия победы в QUEST: кто ПЕРВЫЙ выполнит условие любой концовки — тот победил (его концовка и показывается). Концовка БЕЗ условия достигается только ВЫБОРОМ игрока в диалоге NPC. Условие поражения по умолчанию — истощение ресурсов; можно добавить лимит провалов.</p>
                     {(map.endings ?? []).map((e, ei) => (
