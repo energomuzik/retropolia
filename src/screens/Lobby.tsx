@@ -64,6 +64,57 @@ const taskModeLabel = (m: GameMap): string | null => {
   return parts.join(' · ');
 };
 
+/* ---------- v0.73: LCD-ИНДИКАЦИЯ ИНФОРМАЦИИ ИГРЫ (экран «Создание игры») ----------
+   «Кнопковидный текст» в стиле дисплея музыкального центра / VHS-плеера:
+   ВСЕ индикации видны ВСЕГДА — тусклые, как незажжённые сегменты (если присмотреться);
+   те, что есть на карте, ЗАГОРАЮТСЯ ярко — своим цветом, со свечением. */
+
+type LcdPlatKey = 'nes' | 'md' | 'sms' | 'gg' | 'sega32' | 'snes' | 'gb' | 'gba' | 'a26' | 'pce';
+
+/* «зажжённый» цвет каждой платформы — в цвет её картриджа/этикетки (как на бейджах v0.65) */
+const LCD_PLATS: { key: LcdPlatKey; label: string; hex: string; title: string }[] = [
+  { key: 'nes', label: 'NES', hex: '#8f97c9', title: 'Задания на NES / Dendy' },
+  { key: 'md', label: 'MEGA DRIVE', hex: '#5aa9ff', title: 'Задания на SEGA Mega Drive / Genesis' },
+  { key: 'sms', label: 'MASTER SYSTEM', hex: '#7ec3ff', title: 'Задания на SEGA Master System' },
+  { key: 'gg', label: 'GAME GEAR', hex: '#c048b8', title: 'Задания на SEGA Game Gear' },
+  { key: 'sega32', label: '32X', hex: '#ff5d73', title: 'Задания на SEGA 32X' },
+  { key: 'snes', label: 'SNES', hex: '#e9ecff', title: 'Задания на Super Nintendo' },
+  { key: 'gb', label: 'GAME BOY/COLOR', hex: '#9be84d', title: 'Задания на Game Boy / Game Boy Color' },
+  { key: 'gba', label: 'GBA', hex: '#8f7bff', title: 'Задания на Game Boy Advance' },
+  { key: 'a26', label: 'ATARI 2600', hex: '#ff8b3f', title: 'Задания на Atari 2600' },
+  { key: 'pce', label: 'PC ENGINE', hex: '#ffcf3f', title: 'Задания на PC Engine (HuCARD)' },
+];
+
+/* незажжённый сегмент: тускло, но разглядеть можно (на тёмной панели) */
+const LCD_OFF = { text: '#454f80', border: '#252d55', dot: '#39406b' };
+
+function LcdChip({ on, label, count, hex, title }: { on: boolean; label: string; count?: number; hex: string; title?: string }) {
+  return (
+    <span
+      title={title}
+      className="inline-flex items-center gap-1.5 px-2 py-[3px] border-2 font-display uppercase text-[10px] leading-none tracking-wide select-none"
+      style={{
+        borderColor: on ? hex : LCD_OFF.border,
+        color: on ? hex : LCD_OFF.text,
+        background: on ? 'rgba(255,255,255,0.045)' : 'transparent',
+        textShadow: on ? `0 0 9px ${hex}55` : 'none',
+        boxShadow: on ? `0 0 10px ${hex}2e, inset 0 0 7px ${hex}1c` : 'none',
+      }}
+    >
+      <span
+        className="inline-block w-1.5 h-1.5 shrink-0"
+        style={{ background: on ? hex : LCD_OFF.dot, boxShadow: on ? `0 0 6px ${hex}` : 'none' }}
+      />
+      {label}
+      {on && count !== undefined && <span className="font-pixel text-[8px] opacity-80">· {count}</span>}
+    </span>
+  );
+}
+
+/* ПЛАТФОРМА РОМА по расширению (старые ромы с ext='sega' — добираем из имени файла) */
+const lcdRomExt = (rom?: { ext: string; fileName: string }): string | undefined =>
+  rom ? (rom.ext === 'sega' ? (rom.fileName.split('.').pop() ?? '').toLowerCase() : rom.ext) : undefined;
+
 export function CreateScreen() {
   const { maps, roms, setScreen, toast, refresh } = useApp();
   /* Безкартовые карты (старые челленджи v0.36.0) в списке НЕ показываются —
@@ -74,23 +125,40 @@ export function CreateScreen() {
   const [expBusy, setExpBusy] = useState<string | null>(null);
   /* фильтры/сортировка списка карт: режим, консоль заданий, квизы/бонусы/ловушки */
   const [fMode, setFMode] = useState<'all' | MapMode>('all');
-  const [fCons, setFCons] = useState<'all' | 'nes' | 'sega'>('all');
+  /* v0.73: фильтр консоли — по всем СЕМЕЙСТВАМ платформ (не только NES/SEGA) */
+  const [fCons, setFCons] = useState<'all' | 'nes' | 'sega' | 'snes' | 'gb' | 'gba' | 'a26' | 'pce'>('all');
   const [fExtra, setFExtra] = useState<'all' | 'quiz' | 'bonus' | 'trap'>('all');
   const [sortBy, setSortBy] = useState<'new' | 'name' | 'mode'>('new');
 
-  // сводка по карте: что на ней есть (для списка с галочками)
+  // сводка по карте: что на ней есть — LCD-индикация ВСЕХ платформ ромов заданий (v0.73)
   const mapFacts = (m: GameMap) => {
-    const romExt = (id?: string) => roms.find((r) => r.id === id)?.ext;
     const taskCells = m.cells.filter((c) => c.type === 'task' && c.task);
     const bonusCells = m.cells.filter((c) => c.type === 'bonus').length;
     const trapCells = m.cells.filter((c) => c.type === 'trap').length;
+    const plat: Record<LcdPlatKey, number> = { nes: 0, md: 0, sms: 0, gg: 0, sega32: 0, snes: 0, gb: 0, gba: 0, a26: 0, pce: 0 };
+    for (const c of taskCells) {
+      const e = lcdRomExt(roms.find((r) => r.id === c.task!.romId));
+      if (!e) continue;
+      const p: LcdPlatKey = e === 'nes' ? 'nes'
+        : e === 'sms' ? 'sms'
+        : e === 'gg' ? 'gg'
+        : e === '32x' ? 'sega32'
+        : e === 'sfc' || e === 'smc' || e === 'fig' ? 'snes'
+        : e === 'gb' || e === 'gbc' ? 'gb'
+        : e === 'gba' ? 'gba'
+        : e === 'a26' ? 'a26'
+        : e === 'pce' ? 'pce'
+        : 'md'; // .md/.gen/.bin и прочее — семейство SEGA
+      plat[p]++;
+    }
     return {
       cells: m.cells.length,
       bonus: bonusCells,
       trap: trapCells,
       quiz: m.quizzes?.length ?? 0,
-      nes: taskCells.filter((c) => romExt(c.task!.romId) === 'nes').length,
-      sega: taskCells.filter((c) => romExt(c.task!.romId) && romExt(c.task!.romId) !== 'nes').length,
+      plat,
+      nes: plat.nes,
+      sega: plat.md + plat.sms + plat.gg + plat.sega32, // семейство SEGA целиком (для фильтра)
       empty: m.cells.filter((c) => c.type === 'task' && !c.task).length,
       mode: (m.mode ?? 'classic') as MapMode,
     };
@@ -113,6 +181,11 @@ export function CreateScreen() {
       if (fMode !== 'all' && f.mode !== fMode) return false;
       if (fCons === 'nes' && f.nes === 0) return false;
       if (fCons === 'sega' && f.sega === 0) return false;
+      if (fCons === 'snes' && f.plat.snes === 0) return false;
+      if (fCons === 'gb' && f.plat.gb === 0) return false;
+      if (fCons === 'gba' && f.plat.gba === 0) return false;
+      if (fCons === 'a26' && f.plat.a26 === 0) return false;
+      if (fCons === 'pce' && f.plat.pce === 0) return false;
       if (fExtra === 'quiz' && f.quiz === 0) return false;
       if (fExtra === 'bonus' && f.bonus === 0) return false;
       if (fExtra === 'trap' && f.trap === 0) return false;
@@ -241,6 +314,11 @@ export function CreateScreen() {
               {chip(fCons === 'all', 'Любая', () => setFCons('all'))}
               {chip(fCons === 'nes', 'Есть NES', () => setFCons('nes'), 'sky')}
               {chip(fCons === 'sega', 'Есть SEGA', () => setFCons('sega'), 'magma')}
+              {chip(fCons === 'snes', 'Есть SNES', () => setFCons('snes'), 'sky')}
+              {chip(fCons === 'gb', 'Есть GB/GBC', () => setFCons('gb'), 'teal')}
+              {chip(fCons === 'gba', 'Есть GBA', () => setFCons('gba'), 'sky')}
+              {chip(fCons === 'a26', 'Есть Atari', () => setFCons('a26'), 'magma')}
+              {chip(fCons === 'pce', 'Есть PC Engine', () => setFCons('pce'))}
               <span className="tick-label text-faint mr-1 ml-3 shrink-0">На карте:</span>
               {chip(fExtra === 'all', 'Всё', () => setFExtra('all'))}
               {chip(fExtra === 'quiz', 'Квизы', () => setFExtra('quiz'), 'sky')}
@@ -288,38 +366,48 @@ export function CreateScreen() {
                   задания: {taskModeLabel(m)}
                 </div>
               )}
-              <div className="mt-2.5 grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-1">
+              {/* v0.73: LCD-ИНДИКАЦИЯ — платформы ромов заданий + что есть на карте.
+                  Все сегменты видны всегда (тускло), наличные загораются своим цветом */}
+              <div className="mt-2.5 flex flex-wrap gap-1.5">
                 {(() => {
                   const f = mapFacts(m);
-                  const rows: { on: boolean; label: string; color: string }[] = [
-                    { on: f.nes > 0, label: `NES-задания · ${f.nes}`, color: 'text-sky' },
-                    { on: f.sega > 0, label: `SEGA-задания · ${f.sega}`, color: 'text-magma' },
-                    { on: f.quiz > 0, label: `Квизы · ${f.quiz}`, color: 'text-sky' },
-                    { on: f.bonus > 0, label: `Бонусы · ${f.bonus}`, color: 'text-teal' },
-                    { on: f.trap > 0, label: `Ловушки · ${f.trap}`, color: 'text-coral' },
-                    { on: f.empty > 0, label: `Ячейки без заданий · ${f.empty}`, color: 'text-magma' },
-                  ];
-                  return rows.map((r) => (
-                    <span key={r.label} className={`flex items-center gap-1.5 text-[11px] ${r.on ? r.color : 'text-faint'}`}>
-                      <span className="font-pixel text-[8px]">{r.on ? '✓' : '·'}</span>
-                      {r.label}
-                    </span>
-                  ));
+                  return (
+                    <>
+                      {LCD_PLATS.map((p) => (
+                        <LcdChip
+                          key={p.key}
+                          on={f.plat[p.key] > 0}
+                          count={f.plat[p.key]}
+                          hex={p.hex}
+                          label={p.label}
+                          title={f.plat[p.key] > 0 ? `${p.title}: ${f.plat[p.key]} шт.` : `${p.title} — на карте нет`}
+                        />
+                      ))}
+                      <LcdChip on={f.quiz > 0} count={f.quiz} hex="#5aa9ff" label="Квизы" title={f.quiz > 0 ? `Квизы на карте: ${f.quiz}` : 'Квизов на карте нет'} />
+                      <LcdChip on={f.bonus > 0} count={f.bonus} hex="#2ee6a8" label="Бонусы" title={f.bonus > 0 ? `Бонусные ячейки: ${f.bonus}` : 'Бонусных ячеек нет'} />
+                      <LcdChip on={f.trap > 0} count={f.trap} hex="#ff5d73" label="Ловушки" title={f.trap > 0 ? `Ловушки-штрафы: ${f.trap}` : 'Ловушек на карте нет'} />
+                      <LcdChip on={f.empty > 0} count={f.empty} hex="#ff8b3f" label="Без заданий" title={f.empty > 0 ? `Ячейки заданий без назначенного рома: ${f.empty}` : 'Пустых ячеек заданий нет'} />
+                    </>
+                  );
                 })()}
               </div>
-              <div className="mt-2.5 pt-2 border-t-2 border-edge flex items-center gap-2 flex-wrap">
-                {(normResMode(m.resMode) === 'hp' || m.mode === 'rubg') ? (
-                  <span className="font-display text-[11px] uppercase text-coral">ресурс: полоска HP</span>
-                ) : m.coinsOnly && m.startCoins !== undefined ? (
-                  <span className="font-display text-[11px] uppercase text-teal">ресурс: монеты ({coinsStr(m.startCoins)})</span>
-                ) : (
-                  <>
-                    <span className="font-display text-[11px] uppercase text-gold">{m.startMin ?? 60} мин</span>
-                    <span className="font-pixel text-[8px] text-faint">·</span>
-                    <span className="font-display text-[11px] uppercase text-sky">{m.startTries ?? 60} попыток</span>
-                    {m.startCoins !== undefined && <span className="font-display text-[11px] uppercase text-teal">· 🪙 {coinsStr(m.startCoins)}</span>}
-                  </>
-                )}
+              {/* ресурс партии — тоже индикация: активный ресурс горит, прочие тусклые */}
+              <div className="mt-2.5 pt-2 border-t-2 border-edge flex items-center gap-1.5 flex-wrap">
+                {(() => {
+                  const resHpOn = normResMode(m.resMode) === 'hp' || m.mode === 'rubg';
+                  const resCoinsOn = !resHpOn && !!m.coinsOnly && m.startCoins !== undefined;
+                  const stdOn = !resHpOn && !resCoinsOn;
+                  const coinsAny = !resHpOn && m.startCoins !== undefined;
+                  return (
+                    <>
+                      <LcdChip on={stdOn} count={m.startMin ?? 60} hex="#ffcf3f" label="мин" title={stdOn ? `Минут у каждого игрока: ${m.startMin ?? 60}` : 'Минут нет — другой ресурс'} />
+                      <LcdChip on={stdOn} count={m.startTries ?? 60} hex="#5aa9ff" label="попыток" title={stdOn ? `Попыток у каждого игрока: ${m.startTries ?? 60}` : 'Попыток нет — другой ресурс'} />
+                      <LcdChip on={coinsAny} hex="#2ee6a8" label="монеты" title={coinsAny ? `Монеты: ${m.startCoins !== undefined ? coinsStr(m.startCoins) : '—'}${resCoinsOn ? ' (единственный ресурс)' : ''}` : 'Монет нет'} />
+                      <LcdChip on={resHpOn} hex="#ff5d73" label="ресурс HP" title={resHpOn ? 'Полоска HP — единственный ресурс: +10% за победу, −5% за поражение/пропуск' : 'Полоски HP нет'} />
+                      {coinsAny && <span className="text-[10px] text-teal">{m.startCoins !== undefined ? coinsStr(m.startCoins) : ''}</span>}
+                    </>
+                  );
+                })()}
                 <span className="text-[10px] text-faint">у каждого игрока</span>
                 <span
                   role="button"

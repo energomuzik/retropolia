@@ -12,7 +12,7 @@ import {
 import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, CutsceneDef, GameMap, MapEnding, NpcAnimDef, NpcLibEntry, NpcQuest, NpcShopOffer, PatrolDef, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, RubgItemKind, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
+import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, CutsceneDef, GameMap, MapEnding, MapTileInfo, NpcAnimDef, NpcLibEntry, NpcQuest, NpcShopOffer, PatrolDef, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, RubgItemKind, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
 import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, doorKeyHex, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, normResMode, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileRectOf, DOOR_KEYS, RUBG_ITEMS, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
 import type { MapMode } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
@@ -216,6 +216,217 @@ const CELL_TYPES: { key: CellType; label: string; cls: string }[] = [
 ];
 const LOOT_CELL_TYPE: { key: CellType; label: string; cls: string } = { key: 'loot', label: 'Ящ.', cls: 'border-[#ff8b3f] text-[#ff8b3f] bg-[#ff8b3f]/10' }; // ЯЩИК с лутом — только в режиме RUBG
 
+/* ---------- v0.73: ПОЛНОЭКРАННАЯ КАРТА ПЛИТОК ----------
+   Вся схема плиток разворачивается на весь экран — видно и удобно располагать весь мир:
+   · ПКМ (зажать и вести) — двигать карту (панорама); колесо мыши — масштаб
+   · ЛКМ (клик) — выбрать плитку (камера редактора перейдёт на неё)
+   · ЛКМ (зажать и тащить) — переставить плитку: на свободный слот или обмен с другой
+   · Esc / ✕ — закрыть. Свой фон плитки виден картинкой прямо в слоте. */
+function TileMapFullscreen({ tg, tileBgs, activeId, onSelect, onMove, onClose }: {
+  tg: TileGrid;
+  tileBgs?: Record<string, PlateBg>;
+  activeId: string | null;
+  onSelect: (t: MapTileInfo) => void;
+  onMove: (id: string, col: number, row: number) => void;
+  onClose: () => void;
+}) {
+  const cols = Math.max(1, ...tg.tiles.map((t) => t.col)) + 1;
+  const rows = Math.max(1, ...tg.tiles.map((t) => t.row)) + 1;
+  const vpRef = useRef<HTMLDivElement>(null);
+  const [cell, setCell] = useState(160); // размер слота на экране, px
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const panRef = useRef<{ sx: number; sy: number; px: number; py: number } | null>(null);
+  const [panning, setPanning] = useState(false);
+  const dragRef = useRef<{ id: string; col: number; row: number; moved: boolean; sx: number; sy: number; n: number } | null>(null);
+  const dropRef = useRef<{ col: number; row: number } | null>(null);
+  const guardRef = useRef(0); // ms-метка конца перетаскивания: click сразу после него — хвост жеста, не выбор
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropSlot, setDropSlot] = useState<{ col: number; row: number } | null>(null);
+  const [ghost, setGhost] = useState<{ x: number; y: number; n: number } | null>(null);
+
+  /* вписать всю схему в экран при открытии */
+  useEffect(() => {
+    const vp = vpRef.current;
+    if (!vp) return;
+    const fit = Math.min((vp.clientWidth - 56) / cols, (vp.clientHeight - 110) / rows, 240);
+    setCell(Math.max(56, Math.floor(fit)));
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, [cols, rows]);
+
+  /* Esc — закрыть */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  /* ПКМ — панорама (окна-обработчики, пока зажата правая кнопка) */
+  useEffect(() => {
+    if (!panning) return;
+    const onMove = (e: PointerEvent) => {
+      const p = panRef.current;
+      if (!p) return;
+      setPan({ x: p.px + (e.clientX - p.sx), y: p.py + (e.clientY - p.sy) });
+    };
+    const onUp = () => { panRef.current = null; setPanning(false); };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }, [panning]);
+
+  /* ЛКМ с зажатием — перетаскивание плитки (окна-обработчики, пока тащим) */
+  useEffect(() => {
+    if (!dragId) return;
+    const onPtrMove = (e: PointerEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 6) d.moved = true;
+      if (!d.moved) return;
+      setGhost({ x: e.clientX, y: e.clientY, n: d.n });
+      const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      const slot = el?.closest('[data-fsslot]') as HTMLElement | null;
+      const sc = slot ? Number(slot.dataset.col) : NaN;
+      const sr = slot ? Number(slot.dataset.row) : NaN;
+      if (Number.isFinite(sc) && Number.isFinite(sr) && !(sc === d.col && sr === d.row)) {
+        const same = dropRef.current?.col === sc && dropRef.current?.row === sr;
+        if (!same) { dropRef.current = { col: sc, row: sr }; setDropSlot({ col: sc, row: sr }); }
+      } else if (dropRef.current) {
+        dropRef.current = null;
+        setDropSlot(null);
+      }
+    };
+    const onPtrUp = () => {
+      const d = dragRef.current;
+      const drop = dropRef.current;
+      dragRef.current = null;
+      dropRef.current = null;
+      setDragId(null);
+      setDropSlot(null);
+      setGhost(null);
+      if (d?.moved) {
+        guardRef.current = Date.now(); // click сразу после жеста — не выбор плитки
+        if (drop) onMove(d.id, drop.col, drop.row);
+      }
+    };
+    window.addEventListener('pointermove', onPtrMove);
+    window.addEventListener('pointerup', onPtrUp);
+    window.addEventListener('pointercancel', onPtrUp);
+    return () => {
+      window.removeEventListener('pointermove', onPtrMove);
+      window.removeEventListener('pointerup', onPtrUp);
+      window.removeEventListener('pointercancel', onPtrUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragId]);
+
+  return (
+    <div className="fixed inset-0 z-[90] bg-[rgba(4,6,14,0.97)]" onContextMenu={(e) => e.preventDefault()}>
+      {/* шапка */}
+      <div className="absolute top-0 left-0 right-0 z-10 flex items-center gap-3 px-4 py-2.5 bg-[rgba(7,9,18,0.92)] border-b-2 border-edge">
+        <span className="font-display uppercase tracking-wider text-teal text-sm">🗺 Карта плиток — {tg.tiles.length} шт. ({tg.w}×{tg.h} px каждая)</span>
+        <span className="tick-label text-faint hidden md:inline">ПКМ (зажать) — двигать · колесо — масштаб · ЛКМ — выбрать · ЛКМ с зажатием — перетащить</span>
+        <button onClick={onClose} title="Закрыть (Esc)" className="ml-auto shrink-0 font-pixel text-[10px] px-2 py-1 border-2 border-edge text-faint hover:text-coral hover:border-coral cursor-pointer">✕ Закрыть</button>
+      </div>
+      {/* полотно */}
+      <div
+        ref={vpRef}
+        className={`absolute inset-0 overflow-hidden ${panning ? 'cursor-grabbing' : 'cursor-default'}`}
+        style={{ touchAction: 'none' }}
+        onWheel={(e) => { setZoom((z) => Math.min(2.6, Math.max(0.4, z * (e.deltaY < 0 ? 1.12 : 1 / 1.12)))); }}
+        onPointerDown={(e) => {
+          if (e.button !== 2) return;
+          panRef.current = { sx: e.clientX, sy: e.clientY, px: pan.x, py: pan.y };
+          setPanning(true);
+        }}
+      >
+        <div
+          className="absolute left-1/2 top-1/2"
+          style={{
+            width: cols * (cell + 6),
+            height: rows * (cell + 6),
+            transform: `translate(-50%,-50%) translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+          }}
+        >
+          {Array.from({ length: cols * rows }, (_, i) => {
+            const col = i % cols, row = Math.floor(i / cols);
+            const t = tg.tiles.find((x) => x.col === col && x.row === row);
+            const idx = t ? tg.tiles.indexOf(t) : -1;
+            const isDrop = !!dragId && dropSlot?.col === col && dropSlot?.row === row;
+            const bg = t ? (tileBgs ?? {})[t.id] : undefined;
+            if (!t) return (
+              <div
+                key={i}
+                data-fsslot
+                data-col={col}
+                data-row={row}
+                title="Свободный слот — перетащите сюда карту-плитку"
+                className={`absolute flex items-center justify-center border-2 border-dashed ${isDrop ? 'border-teal bg-teal/15' : 'border-edge/40'}`}
+                style={{ left: col * (cell + 6), top: row * (cell + 6), width: cell, height: cell }}
+              >
+                <span className="font-pixel text-[8px] text-faint">{col + 1},{row + 1}</span>
+              </div>
+            );
+            const isActive = activeId === t.id;
+            return (
+              <div
+                key={i}
+                data-fsslot
+                data-col={col}
+                data-row={row}
+                className="absolute"
+                style={{ left: col * (cell + 6), top: row * (cell + 6), width: cell, height: cell }}
+              >
+                <button
+                  onPointerDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.stopPropagation();
+                    dragRef.current = { id: t.id, col: t.col, row: t.row, moved: false, sx: e.clientX, sy: e.clientY, n: idx + 1 };
+                    setDragId(t.id);
+                  }}
+                  onClick={() => { if (Date.now() - guardRef.current < 350) return; onSelect(t); }}
+                  title={`КАРТА ${idx + 1}: клик — выбрать (камера редактора перейдёт сюда) · зажать и тащить — переставить`}
+                  style={{ touchAction: 'none' }}
+                  className={`relative w-full h-full border-2 cursor-pointer overflow-hidden ${isActive ? 'border-gold' : isDrop ? 'border-teal' : 'border-edge2 hover:border-sky'} ${dragId === t.id ? 'opacity-35' : ''}`}
+                >
+                  {bg?.bg && <img src={bg.bg} alt="" draggable={false} className="absolute inset-0 w-full h-full object-cover opacity-70 pointer-events-none" />}
+                  <span
+                    className={`absolute inset-0 flex flex-col items-center justify-center pointer-events-none ${isActive ? 'text-gold' : isDrop ? 'text-teal' : 'text-paper'}`}
+                    style={{ textShadow: '0 2px 4px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.9)' }}
+                  >
+                    <span className="font-display uppercase text-sm tracking-wider">КАРТА {idx + 1}</span>
+                    <span className="font-pixel text-[8px] opacity-70">клик — выбрать · тянуть — переставить</span>
+                  </span>
+                  {isActive && <span className="absolute inset-0 bg-gold/10 pointer-events-none" />}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {/* призрак перетаскиваемой плитки */}
+      {ghost && (
+        <div
+          className="fixed z-[95] pointer-events-none px-2 py-1 border-2 border-gold bg-[rgba(7,9,18,0.9)] font-pixel text-[9px] text-gold"
+          style={{ left: ghost.x + 14, top: ghost.y + 14 }}
+        >
+          КАРТА {ghost.n} → сюда
+        </div>
+      )}
+      {/* подсказка снизу */}
+      <div className="absolute bottom-0 left-0 right-0 z-10 px-4 py-2 bg-[rgba(7,9,18,0.92)] border-t-2 border-edge text-center">
+        <span className="text-[10px] text-faint">ЛКМ — выбрать плитку (камера редактора перейдёт на неё) · ЛКМ с зажатием — перетащить на свободный слот или на другую плитку (обмен) · ПКМ — двигать карту · колесо — масштаб · Esc — закрыть</span>
+      </div>
+    </div>
+  );
+}
+
 export default function MapEditor() {
   const { maps, tiles, tokens, anims, bossAnims, npcAnims, challenges, setScreen, refresh, toast } = useApp();
   const spoilerMode = useApp((st) => st.options.spoilerMode); // v0.70: режим спойлеров из Опций
@@ -267,6 +478,14 @@ export default function MapEditor() {
      добавлять точку кнопкой и тащить её из центра карты) */
   const [cutPtArm, setCutPtArm] = useState(false);
   const [selTileId, setSelTileId] = useState<string | null>(null); // активная карта-плитка (схема + её фон)
+  const [tileFsOpen, setTileFsOpen] = useState(false); // v0.73: полноэкранная карта плиток (ПКМ — двигать, ЛКМ — выбрать/тащить)
+  /* v0.73: DRAG-ПЕРЕСТАНОВКА плиток в схеме панели: ЛКМ-зажатие на плитке + перетаскивание
+     на другой слот — плитка переезжает на свободный слот или МЕНЯЕТСЯ местами с занявшей его */
+  const [tileDragId, setTileDragId] = useState<string | null>(null);
+  const [tileDropSlot, setTileDropSlot] = useState<{ col: number; row: number } | null>(null);
+  const tileDragRef = useRef<{ id: string; col: number; row: number; moved: boolean; sx: number; sy: number } | null>(null);
+  const tileDropRef = useRef<{ col: number; row: number } | null>(null);
+  const tileClickGuard = useRef(0); // ms-метка конца перетаскивания: click сразу после него — хвост жеста, не выбор
   const [bgScope, setBgScope] = useState<'plate' | 'all'>('plate'); // куда ложится НОВЫЙ фон: «на эту плитку» (своя локация) или «на всю карту»
   const [extract, setExtract] = useState<{ file: File; src: string; name: string; busy: boolean; bgMode: 'auto' | 'custom'; bg: string; foundBg: string; thr: number; minSize: number; mergeGap: number; keepText: boolean; oneSize: boolean; tiles: TileImg[] } | null>(null);
 
@@ -813,7 +1032,12 @@ export default function MapEditor() {
     updTileGrid(g, { mw: (maxCol + 1) * g.w, mh: (maxRow + 1) * g.h });
   };
 
-  /** Новая карта-плитка: свободный слот схемы рядом с активной (право → лево → низ → верх). */
+  /** Новая карта-плитка: свободный слот схемы рядом с активной.
+      v0.73: слот ищется ТОЛЬКО в неотрицательных столбцах/строках (col ≥ 0, row ≥ 0) —
+      раньше при занятых правых слотах плитка вставала СЛЕВА от плитки №1 (col = −1)
+      или ВЫШЕ верхнего ряда (row = −1): поле и схема плиток туда не растут, и карта
+      оказывалась ВНЕ интерфейса (невидима в схеме, фишкам не досталась).
+      Порядок примерки: право → низ → лево → верх → диагонали — схема растёт вправо/вниз. */
   const addMapTile = () => {
     const m = mapRef.current;
     if (!m?.tileGrid) return;
@@ -822,19 +1046,24 @@ export default function MapEditor() {
     const anchor = activeTile ?? tg.tiles[0];
     const taken = new Set(tg.tiles.map((t) => `${t.col},${t.row}`));
     let spot: { col: number; row: number } | null = null;
-    const around = anchor
-      ? [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]
-      : [[0, 0]];
+    const ac = anchor?.col ?? 0, ar = anchor?.row ?? 0;
+    const around = [[1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
     for (const [dc, dr] of around) {
-      const c = (anchor?.col ?? 0) + dc, r = (anchor?.row ?? 0) + dr;
+      const c = ac + dc, r = ar + dr;
+      if (c < 0 || r < 0) continue; // вне схемы не предлагаем — там её не видно
       if (!taken.has(`${c},${r}`)) { spot = { col: c, row: r }; break; }
     }
     if (!spot) {
-      // вокруг всё занято — ищем любой свободный слот в границах схемы
-      const maxCol = Math.max(0, ...tg.tiles.map((t) => t.col)) + 1;
-      const maxRow = Math.max(0, ...tg.tiles.map((t) => t.row)) + 1;
-      outer: for (let r = 0; r <= maxRow; r++) for (let c = 0; c <= maxCol; c++) {
-        if (!taken.has(`${c},${r}`)) { spot = { col: c, row: r }; break outer; }
+      // вокруг активной всё занято — ближайший СВОБОДНЫЙ слот схемы (кольца по расстоянию)
+      const maxCol = Math.max(0, ...tg.tiles.map((t) => t.col));
+      const maxRow = Math.max(0, ...tg.tiles.map((t) => t.row));
+      outer: for (let rad = 1; rad <= maxCol + maxRow + 2; rad++) {
+        for (let r = Math.max(0, ar - rad); r <= ar + rad; r++) {
+          for (let c = Math.max(0, ac - rad); c <= ac + rad; c++) {
+            if (Math.max(Math.abs(c - ac), Math.abs(r - ar)) !== rad) continue;
+            if (!taken.has(`${c},${r}`)) { spot = { col: c, row: r }; break outer; }
+          }
+        }
       }
     }
     if (!spot) return;
@@ -900,6 +1129,118 @@ export default function MapEditor() {
     const lost = m.cells.length - cleaned.length;
     toast(`Карта-плитка удалена вместе с содержимым (ячеек: ${lost}) — вернуть можно кнопкой «Вернуть»`, 'err');
   };
+
+  /** v0.73: ПЕРЕСТАНОВКА карт-плиток (перетаскивание в схеме и на весь экран).
+      Переместить плитку в слот (col,row) — СЛОТ СВОБОДЕН: содержимое плитки
+      (ячейки маршрута, штампы, стены, порталы, анимации, боссы) переезжает ВМЕСТЕ
+      с ней; СЛОТ ЗАНЯТ другой плиткой — плитки ОБМЕНИВАЮТСЯ содержимым и местами.
+      Свой фон (tileBgs по id) и номер следуют за плиткой сами. Ctrl+Z вернёт. */
+  const moveTileTo = (id: string, col: number, row: number) => {
+    const m = mapRef.current;
+    if (!m?.tileGrid) return;
+    const tg = m.tileGrid;
+    const t = tg.tiles.find((x) => x.id === id);
+    if (!t || (t.col === col && t.row === row) || col < 0 || row < 0) return;
+    const other = tg.tiles.find((x) => x.col === col && x.row === row && x.id !== id) ?? null;
+    // снапшот для Ctrl+Z
+    const snap = JSON.parse(JSON.stringify(m)) as GameMap;
+    rememberDeleted({
+      label: `перестановку карты-плитки №${tg.tiles.findIndex((x) => x.id === id) + 1}`,
+      restore: async () => {
+        setMap(snap);
+        const cur = await idbGet<GameMap>('maps', snap.id);
+        if (cur) { await idbPut('maps', snap.id, snap); await useApp.getState().refresh(); }
+      },
+    });
+    const w = tg.w, h = tg.h;
+    const dxT = (col - t.col) * w, dyT = (row - t.row) * h; // сдвиг содержимого переносимой плитки
+    const dxO = other ? (t.col - other.col) * w : 0;        // сдвиг содержимого второй плитки (обмен)
+    const dyO = other ? (t.row - other.row) * h : 0;
+    const inSrc = (x: number, y: number) => x >= t.col * w && x < (t.col + 1) * w && y >= t.row * h && y < (t.row + 1) * h;
+    const inOth = other ? (x: number, y: number) => x >= other.col * w && x < (other.col + 1) * w && y >= other.row * h && y < (other.row + 1) * h : () => false;
+    const deltaFor = (x: number, y: number): [number, number] => {
+      if (inSrc(x, y)) return [dxT, dyT];
+      if (other && inOth(x, y)) return [dxO, dyO];
+      return [0, 0];
+    };
+    const moved = (x: number, y: number) => { const [dx, dy] = deltaFor(x, y); return dx !== 0 || dy !== 0; };
+    // ячейки маршрута: принадлежность по центру, порядок в массиве (и стрелки-индексы) не меняется
+    const cells = m.cells.map((c, ci) => {
+      const cc = cellCenter(m, ci);
+      const [dx, dy] = deltaFor(cc.x, cc.y);
+      if (dx === 0 && dy === 0) return c;
+      return c.cx !== undefined && c.cy !== undefined
+        ? { ...c, cx: c.cx + dx, cy: c.cy + dy }
+        : { ...c, x: c.x + dx / CELL, y: c.y + dy / CELL };
+    });
+    const stamps = (m.stamps ?? []).map((s) => (moved(s.x, s.y) ? { ...s, x: s.x + deltaFor(s.x, s.y)[0], y: s.y + deltaFor(s.x, s.y)[1] } : s));
+    const walls = (m.walls ?? []).map((wl) => (moved(wl.x + wl.w / 2, wl.y + wl.h / 2) ? { ...wl, x: wl.x + deltaFor(wl.x + wl.w / 2, wl.y + wl.h / 2)[0], y: wl.y + deltaFor(wl.x + wl.w / 2, wl.y + wl.h / 2)[1] } : wl));
+    // порталы: зона переезжает по своему центру, точка перехода — по своей позиции (независимо)
+    const portals = (m.portals ?? []).map((p) => {
+      const zc = moved(p.x + p.w / 2, p.y + p.h / 2);
+      const tc = p.tx !== undefined && p.ty !== undefined && moved(p.tx, p.ty);
+      if (!zc && !tc) return p;
+      const [zx, zy] = zc ? deltaFor(p.x + p.w / 2, p.y + p.h / 2) : [0, 0];
+      const [tx, ty] = tc ? deltaFor(p.tx!, p.ty!) : [0, 0];
+      return { ...p, x: p.x + zx, y: p.y + zy, tx: p.tx !== undefined && tc ? p.tx + tx : p.tx, ty: p.ty !== undefined && tc ? p.ty + ty : p.ty };
+    });
+    const anims = (m.anims ?? []).map((a) => (moved(a.x, a.y) ? { ...a, x: a.x + deltaFor(a.x, a.y)[0], y: a.y + deltaFor(a.x, a.y)[1] } : a));
+    const bosses = (m.bosses ?? []).map((b) => (moved(b.x, b.y) ? { ...b, x: b.x + deltaFor(b.x, b.y)[0], y: b.y + deltaFor(b.x, b.y)[1] } : b));
+    const tiles = tg.tiles.map((x) => (x.id === id ? { ...x, col, row } : other && x.id === other.id ? { ...x, col: t.col, row: t.row } : x));
+    const maxCol = Math.max(0, ...tiles.map((x) => x.col));
+    const maxRow = Math.max(0, ...tiles.map((x) => x.row));
+    updTileGrid({ ...tg, tiles }, { cells, stamps, walls, portals, anims, bosses, mw: (maxCol + 1) * w, mh: (maxRow + 1) * h });
+    if (selTileId === id || (other && selTileId === other.id)) jumpToTile(tiles.find((x) => x.id === selTileId)!);
+    sfx.hover();
+    toast(other
+      ? `Карты-плитки №${tg.tiles.indexOf(t) + 1} и №${tg.tiles.indexOf(other) + 1} обменялись местами вместе с содержимым — вернуть: Ctrl+Z`
+      : `Карта-плитка №${tg.tiles.indexOf(t) + 1} переехала на свободный слот вместе с содержимым — вернуть: Ctrl+Z`, 'ok');
+  };
+
+  /* v0.73: оконные обработчики перетаскивания плитки в схеме (вешаются только пока тащим):
+     порог 6 px отделяет перетаскивание от клика; слот под курсором ищется через
+     elementFromPoint → [data-tslot]; отпускание — переезд/обмен через moveTileTo */
+  useEffect(() => {
+    if (!tileDragId) return;
+    const onMove = (e: PointerEvent) => {
+      const d = tileDragRef.current;
+      if (!d) return;
+      if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 6) { d.moved = true; setTileDragId(d.id); }
+      if (!d.moved) return;
+      const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      const slot = el?.closest('[data-tslot]') as HTMLElement | null;
+      const sc = slot ? Number(slot.dataset.col) : NaN;
+      const sr = slot ? Number(slot.dataset.row) : NaN;
+      if (Number.isFinite(sc) && Number.isFinite(sr) && !(sc === d.col && sr === d.row)) {
+        const same = tileDropRef.current?.col === sc && tileDropRef.current?.row === sr;
+        if (!same) { tileDropRef.current = { col: sc, row: sr }; setTileDropSlot({ col: sc, row: sr }); }
+      } else if (tileDropRef.current) {
+        tileDropRef.current = null;
+        setTileDropSlot(null);
+      }
+    };
+    const onUp = () => {
+      const d = tileDragRef.current;
+      const drop = tileDropRef.current;
+      tileDragRef.current = null;
+      tileDropRef.current = null;
+      setTileDragId(null);
+      setTileDropSlot(null);
+      if (d?.moved) {
+        tileClickGuard.current = Date.now(); // click сразу после жеста — его хвост, а не выбор плитки
+        if (drop) moveTileTo(d.id, drop.col, drop.row);
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tileDragId]);
 
   /** Камера — на эту карту-плитку (вся в кадре), как «переход между картами». */
   const jumpToTile = (t: { id: string; col: number; row: number }) => {
@@ -3388,9 +3729,16 @@ export default function MapEditor() {
                     ) : (
                       <>
                         <p className="text-[10px] text-teal leading-tight border-2 border-teal/40 px-2 py-1.5">Плиточный режим ВКЛЮЧЁН: каждая плитка — отдельная карта-локация {map.tileGrid.w}×{map.tileGrid.h} px. В ИГРЕ фишка зажата в своей карте, на другие — только через порталы.</p>
-                        {/* СХЕМА ПЛИТОК: клик — перейти на карту (камера + её фон), крестик — удалить */}
+                        {/* СХЕМА ПЛИТОК: клик — перейти на карту, ЛКМ-зажатие — перетащить (обмен/свободный слот), крестик — удалить */}
                         <div>
-                          <div className="tick-label mb-1">Схема плиток (клик — перейти на карту)</div>
+                          <div className="flex items-center justify-between gap-2 mb-1">
+                            <div className="tick-label">Схема плиток (клик — перейти, зажать — тащить)</div>
+                            <button
+                              onClick={() => { setTileFsOpen(true); sfx.hover(); }}
+                              title="Развернуть карту плиток НА ВЕСЬ ЭКРАН: ПКМ (зажать) — двигать карту, ЛКМ — выбрать плитку, ЛКМ с зажатием — перетаскивать плитки местами"
+                              className="shrink-0 font-pixel text-[9px] px-1.5 py-0.5 border-2 border-edge text-faint hover:text-sky hover:border-sky cursor-pointer"
+                            >⛶ Весь экран</button>
+                          </div>
                           <div
                             className="grid gap-1"
                             style={{ gridTemplateColumns: `repeat(${Math.min(tgCols, 8)}, minmax(0, 1fr))` }}
@@ -3399,15 +3747,31 @@ export default function MapEditor() {
                               const col = i % tgCols, row = Math.floor(i / tgCols);
                               const t = map.tileGrid!.tiles.find((x) => x.col === col && x.row === row);
                               const idx = t ? map.tileGrid!.tiles.indexOf(t) : -1;
-                              if (!t) return <div key={i} className="aspect-square border-2 border-dashed border-edge/50" title="Свободный слот схемы" />;
+                              const isDrop = !!tileDragId && tileDropSlot?.col === col && tileDropSlot?.row === row;
+                              if (!t) return (
+                                <div
+                                  key={i}
+                                  data-tslot
+                                  data-col={col}
+                                  data-row={row}
+                                  title="Свободный слот схемы — перетащите сюда карту-плитку"
+                                  className={`aspect-square border-2 border-dashed ${isDrop ? 'border-teal bg-teal/15' : 'border-edge/50'}`}
+                                />
+                              );
                               const isActive = activeTile?.id === t.id;
                               const hasBg = !!(map.tileBgs ?? {})[t.id];
                               return (
-                                <div key={i} className="relative">
+                                <div key={i} data-tslot data-col={col} data-row={row} className="relative">
                                   <button
-                                    onClick={() => selectTile(t)}
-                                    title={`КАРТА ${idx + 1}: клик — редактировать эту локацию${hasBg ? ' · свой фон есть' : ''}`}
-                                    className={`relative w-full aspect-square border-2 cursor-pointer font-pixel text-[9px] ${isActive ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim hover:border-edge2'}`}
+                                    onPointerDown={(e) => {
+                                      if (e.button !== 0) return;
+                                      tileDragRef.current = { id: t.id, col: t.col, row: t.row, moved: false, sx: e.clientX, sy: e.clientY };
+                                      setTileDragId(t.id);
+                                    }}
+                                    onClick={() => { if (Date.now() - tileClickGuard.current < 350) return; selectTile(t); }}
+                                    title={`КАРТА ${idx + 1}: клик — редактировать эту локацию · зажать и тащить — переставить местами${hasBg ? ' · свой фон есть' : ''}`}
+                                    style={{ touchAction: 'none' }}
+                                    className={`relative w-full aspect-square border-2 cursor-pointer font-pixel text-[9px] ${isActive ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim hover:border-edge2'} ${tileDragId === t.id ? 'opacity-40' : ''} ${isDrop ? 'border-teal text-teal bg-teal/10' : ''}`}
                                   >
                                     {idx + 1}
                                     {hasBg && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-teal pointer-events-none" title="У этой карты свой фон" />}
@@ -3429,7 +3793,7 @@ export default function MapEditor() {
                           {tileBgCount > 0 && <p className="text-[9px] text-teal mt-1 leading-tight"><span className="inline-block w-1.5 h-1.5 bg-teal align-middle mr-0.5" /> — у карты свой фон ({tileBgCount} шт., загрузка в панели «Фон» выше)</p>}
                         </div>
                         <PxBtn color="teal" small className="w-full" onClick={addMapTile}>{Ic.plus(12)} Добавить карту-плитку</PxBtn>
-                        <p className="text-[10px] text-faint leading-tight">Новая плитка встаёт рядом с выбранной. Порталы (инструмент «Портал») связывают ЛЮБЫЕ плитки — соседние и далёкие: протяните зону входа на одной плитке, переключитесь на другую и кликните — точка перехода.</p>
+                        <p className="text-[10px] text-faint leading-tight">Новая плитка встаёт на свободный слот РЯДОМ с выбранной (вправо/вниз — внутри схемы, за её края не выйдет). Плитки можно ПЕРЕТАСКИВАТЬ: зажмите ЛКМ и тяните — на свободный слот или на другую плитку (обменяются местами вместе с содержимым). Кнопка «⛶ Весь экран» — вся схема на мониторе. Порталы (инструмент «Портал») связывают ЛЮБЫЕ плитки.</p>
                         <PxBtn color="coral" small className="w-full" onClick={disableTileMode}>Выключить плиточный режим</PxBtn>
                       </>
                     )}
@@ -4868,6 +5232,18 @@ export default function MapEditor() {
           npc={selNpcDef}
           onChange={(patch) => { updNpc(selNpcIdx, patch); dirtyRef.current = true; }}
           onClose={() => setTradeWinOpen(false)}
+        />
+      )}
+
+      {/* ---------- v0.73: ПОЛНОЭКРАННАЯ КАРТА ПЛИТОК (ПКМ — двигать, ЛКМ — выбрать/перетащить) ---------- */}
+      {tileFsOpen && TG && (
+        <TileMapFullscreen
+          tg={TG}
+          tileBgs={map?.tileBgs}
+          activeId={selTileId}
+          onSelect={(t) => { selectTile(t); sfx.hover(); }}
+          onMove={moveTileTo}
+          onClose={() => setTileFsOpen(false)}
         />
       )}
     </div>
