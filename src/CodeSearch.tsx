@@ -21,7 +21,14 @@ import {
    и разверните обратно — продолжите с того же места; закрытие при активном
    поиске — двухшаговое (случайный клик крестик не сработает).
    (2) ПОСЛЕДОВАТЕЛЬНОСТИ: 2–4 значения через пробел — ищем места, где они лежат
-   в памяти ПОДРЯД (HP и максимум рядом — как в ArtMoney у «пользовательского типа»). */
+   в памяти ПОДРЯД (HP и максимум рядом — как в ArtMoney у «пользовательского типа»).
+   v0.72: (1) ПЕРЕВОДЧИК ЦИФР ПОЧИНЕН — раньше клик по кандидату всегда запускал
+   «первый поиск заново» и вдобавок искал СТАРОЕ содержимое строки значения
+   (setVal не меняет val в текущем замыкании) — теперь значение передаётся явно,
+   а при идущем поиске кандидат фильтрует СРЕДИ НАЙДЕННЫХ, не сбрасывая сессию.
+   (2) СТЕНА КОДА — «📌 ЗАКРЕПИТЬ ПОД ИГРОЙ»: дамп уезжает в панель ВНИЗУ экрана
+   и живёт поверх страницы эмулятора, пока окно свёрнуто, — изменения байт видно
+   прямо во время игры; «⇱ Вернуть в окно» возвращает дамп в CodeSearch. */
 
 const ROWS = 100;          // сколько адресов-кандидатов показываем (живые значения)
 const WALL_ROWS = 24;      // строк по 16 байт в «стене кода»
@@ -72,6 +79,9 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
   const [wallIn, setWallIn] = useState('');
   const [wallLive, setWallLive] = useState(true);
   const [wallView, setWallView] = useState<WallView | null>(null);
+  /* v0.72: стена, ЗАКРЕПЛЁННАЯ ПОД ИГРОЙ — живёт отдельной панелью снизу экрана,
+     пока окно CodeSearch свёрнуто; «Вернуть в окно» возвращает дамп в окно */
+  const [wallPinned, setWallPinned] = useState(false);
   /* v0.70 ПРАВКА БАЙТА ПРЯМО В СТЕНЕ: клик по hex-байту → поле ввода → запись в память.
      Рядом с жизнями так же правятся соседние счётчики — ручной поиск изменений. */
   const [wallEdit, setWallEdit] = useState<{ off: number; raw: string } | null>(null);
@@ -229,14 +239,16 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
     }
   };
 
-  const doScan = async (kind: FilterKind, isFirst: boolean, tOverride?: CodeType) => {
+  const doScan = async (kind: FilterKind, isFirst: boolean, tOverride?: CodeType, vOverride?: string) => {
     if (busy) return;
     const heap = getHeap();
     if (!heap) { toast('Ядро ещё не поднялось — дайте игре запуститься', 'err'); return; }
     const ty = tOverride ?? t; // v0.71: переводчик цифр ищет гарантированно «1 байт», не дожидаясь ререндера
     /* v0.69: в строке можно ввести 2–4 значения через пробел — ПОСЛЕДОВАТЕЛЬНОСТЬ.
-       Первый поиск задаёт ширину цепочки; фильтры обязаны держать ту же ширину. */
-    const seq = parseVals(isFirst ? val : fVal);
+       Первый поиск задаёт ширину цепочки; фильтры обязаны держать ту же ширину.
+       v0.72: vOverride — ЯВНОЕ значение из переводчика цифр: клик по кандидату ищет
+       именно его, а не старое содержимое строки (стейтовое замыкание это ломало). */
+    const seq = parseVals(vOverride ?? (isFirst ? val : fVal));
     const wantN = isFirst ? Math.min(MAX_SEQ, Math.max(1, seq.length || 1)) : (stRef.current?.seqN ?? 1);
     if (seq.length > MAX_SEQ) { toast(`Максимум ${MAX_SEQ} значения подряд`, 'err'); return; }
     const valueOps = !(['changed', 'unchanged', 'inc', 'dec'] as FilterKind[]).includes(kind);
@@ -273,17 +285,35 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
     setEditAddr(null);
   };
 
-  /* v0.71: искать кандидата переводчика — обычный первый поиск, но гарантированно «1 байт» (u8) */
+  /* v0.72 БАГФИКС ПЕРЕВОДЧИКА: раньше клик по кандидату (1) ВСЕГДА запускал первый
+     поиск заново, ломая идущую сессию, и (2) искал не переведённое значение, а
+     СТАРОЕ содержимое строки значения — setVal не меняет val в текущем замыкании,
+     поэтому «искать 115» на деле искал прежний ввод (например «3»), и фильтр
+     среди найденных потом давал 0. Теперь значение передаётся в поиск ЯВНО:
+     сессии нет — первый поиск (тип «1 байт»); сессия идёт — ФИЛЬТР «среди
+     найденных» с этим значением (тип поиска сохраняется), ничего не сбрасывается. */
   const runTranslated = (v: number) => {
     if (busy) return;
-    setT('u8');
-    setVal(String(v));
-    void doScan('exact', true, 'u8');
+    const vStr = String(v);
+    const s = stRef.current;
+    if (!s && !res) {
+      setT('u8');
+      setVal(vStr);
+      void doScan('exact', true, 'u8', vStr);
+    } else {
+      const ty: CodeType = s?.t ?? 'u8';
+      setT(ty);
+      setFKind('exact');
+      setFVal(vStr);
+      void doScan('exact', false, ty, vStr);
+    }
   };
 
   const trCands = digitCandidates(Number(trIn));
   const trNum = Number(trFound);
   const trHints = byteDecodes(trNum);
+  /* v0.72: идёт ли уже поиск — в этом случае кандидаты переводчика фильтруют среди найденных */
+  const trSessionActive = !!stRef.current || !!res;
 
   const writeRow = (a: number, raw: string) => {
     const v = Number(raw);
@@ -331,12 +361,82 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
     setWallAddr(n);
   };
 
+  /* v0.72: ЗАКРЕПИТЬ СТЕНУ ПОД ИГРОЙ — окно сворачивается, стена живёт отдельной
+     панелью снизу экрана: идёте по игре и сразу видите, какие байты меняются
+     (красным). «Вернуть в окно» — обратно в CodeSearch. */
+  const pinWall = () => {
+    setWallPinned(true);
+    setMin(true);
+    sfx.click();
+    toast('Стена закреплена под игрой — изменения байт подсвечиваются красным; «Вернуть в окно» — кнопка на панели', 'ok');
+  };
+  const unpinWall = () => {
+    setWallPinned(false);
+    setMin(false);
+    sfx.click();
+    toast('Стена возвращена в окно CodeSearch', 'ok');
+  };
+
   const condSel = rows.find((r) => r.a === condAddr);
 
-  /* ---------- v0.69: СВЁРНУТЫЙ ВИД — маленькая плашка в углу, поиск живёт ---------- */
-  if (min) {
-    return (
-      <div className="fixed left-2 bottom-2 sm:left-3 sm:bottom-3 z-40 pixel-panel pixel-corners border-2 border-edge bg-[#0b0e1c] px-2.5 py-1.5 flex items-center gap-2 max-w-[calc(100vw-1rem)]">
+  /* ---------- v0.72: дамп стены — общий для окна и закреплённой панели ---------- */
+  const wallDump = wallView ? (
+    <div className="font-mono text-[10px] leading-[1.5]">
+      {Array.from({ length: Math.min(WALL_ROWS, Math.ceil(wallView.cur.length / 16)) }).map((_, row) => {
+        const off = wallView.off + row * 16;
+        const bytes = Array.from(wallView.cur.subarray(row * 16, row * 16 + 16));
+        return (
+          <div key={row} className="whitespace-pre">
+            <span className="text-sky">{hex8(off)}</span>
+            {'  '}
+            {bytes.map((b, i) => {
+              const boff = wallView.off + row * 16 + i;
+              if (wallEdit?.off === boff) {
+                return (
+                  <input
+                    key={i}
+                    autoFocus
+                    className="field-in inline-block w-[38px] px-0.5 py-0 text-[10px] font-mono text-center align-baseline"
+                    value={wallEdit.raw}
+                    placeholder={String(b)}
+                    title={`0x${hex8(boff)} — число 0–255 или 0x00–0xFF (Enter — записать, Esc — отмена)`}
+                    onChange={(e) => setWallEdit({ off: boff, raw: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') writeWallByte(boff, wallEdit.raw);
+                      else if (e.key === 'Escape') setWallEdit(null);
+                    }}
+                    onBlur={() => setWallEdit(null)}
+                  />
+                );
+              }
+              return (
+                <button
+                  key={i}
+                  onClick={() => setWallEdit({ off: boff, raw: String(b) })}
+                  title={`0x${hex8(boff)} · DEC ${b} · 0x${b.toString(16).padStart(2, '0').toUpperCase()} — клик, чтобы вписать своё значение`}
+                  className={`cursor-pointer hover:text-gold ${wallView.prev && wallView.prev[row * 16 + i] !== b ? 'text-coral' : 'text-paper/85'}`}
+                >
+                  {b.toString(16).padStart(2, '0').toUpperCase()}
+                  {i < 15 ? ' ' : ''}
+                </button>
+              );
+            })}
+            {'  '}
+            <span className="text-faint">{bytes.map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '·')).join('')}</span>
+          </div>
+        );
+      })}
+    </div>
+  ) : (
+    <div className="tick-label text-faint py-4 text-center">ждём память ядра…</div>
+  );
+
+  /* ---------- v0.72: ЗАКРЕПЛЁННАЯ СТЕНА — панель снизу экрана поверх страницы эмулятора.
+     Видна, когда стена закреплена И окно свёрнуто: игра целиком видна сверху,
+     дамп живёт снизу и подсвечивает изменения байт прямо во время игры. ---------- */
+  const wallDock = wallPinned && min && wallOpen ? (
+    <div className="fixed left-0 right-0 bottom-0 z-40 border-t-[3px] border-edge bg-[#0b0e1c] max-h-[46vh] flex flex-col shadow-[0_-10px_36px_rgba(0,0,0,0.65)]">
+      <div className="flex items-center gap-1.5 flex-wrap px-2 py-1.5 border-b-2 border-edge/60">
         <span className="text-teal shrink-0">{Ic.chip(14)}</span>
         <button
           className="font-display text-[11px] uppercase tracking-wider text-teal cursor-pointer hover:text-gold whitespace-nowrap"
@@ -345,11 +445,50 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
         >
           CodeSearch{busy ? ' · поиск…' : res ? ` · ${res.count.toLocaleString('ru-RU')}${res.overflow ? '+' : ''}` : ''}
         </button>
-        {Object.keys(frozen).length > 0 && <span className="text-sky text-[11px] shrink-0" title={`Заморожено адресов: ${Object.keys(frozen).length} — значения вписываются обратно даже в свёрнутом виде`}>❄{Object.keys(frozen).length}</span>}
-        <GhostBtn small onClick={tryClose} title={closeArm ? 'Поиск ПРОПАДЁТ — нажать ещё раз, чтобы закрыть' : 'Закрыть (поиск будет сброшен)'}>
-          {closeArm ? <span className="text-coral font-bold">✕!</span> : Ic.cross(11)}
-        </GhostBtn>
+        {Object.keys(frozen).length > 0 && <span className="text-sky text-[11px] shrink-0" title={`Заморожено адресов: ${Object.keys(frozen).length} — значения вписываются обратно даже в закреплённой стене`}>❄{Object.keys(frozen).length}</span>}
+        <span className="font-pixel text-[8px] text-gold uppercase shrink-0">стена кода · закреплена под игрой</span>
+        <input className="field-in w-28 px-2 py-1 text-[11px] font-mono" placeholder="001AB2C8" value={wallIn}
+          onChange={(e) => setWallIn(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') wallGo(wallIn); }} />
+        <GhostBtn small onClick={() => wallGo(wallIn)}>Перейти</GhostBtn>
+        <GhostBtn small onClick={() => { prevWallRef.current = null; setWallAddr(Math.max(0, wallAddr - 0x1000)); }} title="−4 КБ">▲▲</GhostBtn>
+        <GhostBtn small onClick={() => { prevWallRef.current = null; setWallAddr(Math.max(0, wallAddr - 16)); }} title="−строка">▲</GhostBtn>
+        <GhostBtn small onClick={() => { prevWallRef.current = null; setWallAddr(wallAddr + 16); }} title="+строка">▼</GhostBtn>
+        <GhostBtn small onClick={() => { prevWallRef.current = null; setWallAddr(wallAddr + 0x1000); }} title="+4 КБ">▼▼</GhostBtn>
+        <label className="flex items-center gap-1 tick-label text-faint cursor-pointer">
+          <input type="checkbox" checked={wallLive} onChange={(e) => setWallLive(e.target.checked)} /> живой
+        </label>
+        <GhostBtn small onClick={unpinWall} title="Убрать стену из нижней панели обратно в окно CodeSearch">⇱ Вернуть в окно</GhostBtn>
+        <GhostBtn small onClick={tryClose} title={closeArm ? 'CodeSearch и стена ЗАКРОЮТСЯ — нажать ещё раз' : 'Закрыть CodeSearch вместе со стеной (двухшаговое)'}>{closeArm ? <span className="text-coral font-bold">✕!</span> : Ic.cross(11)}</GhostBtn>
       </div>
+      <div className="overflow-y-auto px-2 pb-2">
+        <div className="overflow-x-auto border border-edge bg-[#05070f] p-2">{wallDump}</div>
+      </div>
+    </div>
+  ) : null;
+
+  /* ---------- v0.69: СВЁРНУТЫЙ ВИД — маленькая плашка в углу, поиск живёт ---------- */
+  if (min) {
+    return (
+      <>
+        {(!wallPinned || !wallOpen) && (
+          <div className="fixed left-2 bottom-2 sm:left-3 sm:bottom-3 z-40 pixel-panel pixel-corners border-2 border-edge bg-[#0b0e1c] px-2.5 py-1.5 flex items-center gap-2 max-w-[calc(100vw-1rem)]">
+            <span className="text-teal shrink-0">{Ic.chip(14)}</span>
+            <button
+              className="font-display text-[11px] uppercase tracking-wider text-teal cursor-pointer hover:text-gold whitespace-nowrap"
+              onClick={() => { setMin(false); sfx.click(); }}
+              title="Развернуть CodeSearch — поиск, результаты и заморозка сохранены"
+            >
+              CodeSearch{busy ? ' · поиск…' : res ? ` · ${res.count.toLocaleString('ru-RU')}${res.overflow ? '+' : ''}` : ''}
+            </button>
+            {Object.keys(frozen).length > 0 && <span className="text-sky text-[11px] shrink-0" title={`Заморожено адресов: ${Object.keys(frozen).length} — значения вписываются обратно даже в свёрнутом виде`}>❄{Object.keys(frozen).length}</span>}
+            <GhostBtn small onClick={tryClose} title={closeArm ? 'Поиск ПРОПАДЁТ — нажать ещё раз, чтобы закрыть' : 'Закрыть (поиск будет сброшен)'}>
+              {closeArm ? <span className="text-coral font-bold">✕!</span> : Ic.cross(11)}
+            </GhostBtn>
+          </div>
+        )}
+        {wallDock}
+      </>
     );
   }
 
@@ -530,8 +669,10 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
                 <p className="text-[10.5px] text-dim leading-tight">
                   Игра не всегда хранит число «как есть»: Darkwing Duck держит в памяти НОМЕР ТАЙЛА цифры на экране —
                   тайлы цифр 0–9 в NES-чри начинаются с 0x70, поэтому 3 жизни = 0x70+3 = 0x73 = <b className="text-paper">115</b>:
-                  поиск «3» пуст, а «115» находит. Введите число с экрана — переводчик предложит кандидатов, ищите каждого
-                  кнопкой (тип «1 байт», поиск заново). Не нашёлся ни один кандидат — число спрятано хитрее: берите
+                  поиск «3» пуст, а «115» находит. Введите число с экрана — переводчик предложит кандидатов.
+                  <b className="text-paper"> Поиска ещё нет</b> — кнопка кандидата запустит первый поиск (тип «1 байт»);
+                  <b className="text-paper"> поиск уже идёт</b> — значение будет искаться СРЕДИ НАЙДЕННЫХ, как в «шаге 2»
+                  (сессия не сбрасывается). Не нашёлся ни один кандидат — число спрятано хитрее: берите
                   «Неизвестное значение» (снимок → меняйте в игре → «изменилось/уменьшилось») — оно находит величину при ЛЮБОМ кодировании.
                 </p>
                 <div className="flex items-center gap-1.5 flex-wrap">
@@ -544,8 +685,10 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
                     {trCands.map((c) => (
                       <div key={c.v} className="flex items-center gap-2 flex-wrap">
                         <PxBtn color="teal" small disabled={busy || !heapReady} onClick={() => runTranslated(c.v)}
-                          title={`Первый поиск заново: тип «1 байт» (u8), значение ${c.v} (0x${c.v.toString(16).toUpperCase().padStart(2, '0')})`}>
-                          искать {c.v}
+                          title={trSessionActive
+                            ? `Искать ${c.v} (0x${c.v.toString(16).toUpperCase().padStart(2, '0')}) СРЕДИ НАЙДЕННЫХ — сессия продолжится, тип «${CODE_TYPE_LABEL[stRef.current?.t ?? 'u8']}»`
+                            : `Первый поиск заново: тип «1 байт» (u8), значение ${c.v} (0x${c.v.toString(16).toUpperCase().padStart(2, '0')})`}>
+                          {trSessionActive ? `среди найденных: ${c.v}` : `искать ${c.v}`}
                         </PxBtn>
                         <span className="text-[10.5px] text-dim">{c.why}</span>
                       </div>
@@ -592,59 +735,20 @@ export default function CodeSearchModal({ getApi, romName, onClose }: {
                   <label className="flex items-center gap-1 tick-label text-faint cursor-pointer">
                     <input type="checkbox" checked={wallLive} onChange={(e) => setWallLive(e.target.checked)} /> живой
                   </label>
-                </div>
-                <div className="overflow-x-auto border border-edge bg-[#05070f] p-2">
-                  {wallView ? (
-                    <div className="font-mono text-[10px] leading-[1.5]">
-                      {Array.from({ length: Math.min(WALL_ROWS, Math.ceil(wallView.cur.length / 16)) }).map((_, row) => {
-                        const off = wallView.off + row * 16;
-                        const bytes = Array.from(wallView.cur.subarray(row * 16, row * 16 + 16));
-                        return (
-                          <div key={row} className="whitespace-pre">
-                            <span className="text-sky">{hex8(off)}</span>
-                            {'  '}
-                            {bytes.map((b, i) => {
-                              const boff = wallView.off + row * 16 + i;
-                              if (wallEdit?.off === boff) {
-                                return (
-                                  <input
-                                    key={i}
-                                    autoFocus
-                                    className="field-in inline-block w-[38px] px-0.5 py-0 text-[10px] font-mono text-center align-baseline"
-                                    value={wallEdit.raw}
-                                    placeholder={String(b)}
-                                    title={`0x${hex8(boff)} — число 0–255 или 0x00–0xFF (Enter — записать, Esc — отмена)`}
-                                    onChange={(e) => setWallEdit({ off: boff, raw: e.target.value })}
-                                    onKeyDown={(e) => {
-                                      if (e.key === 'Enter') writeWallByte(boff, wallEdit.raw);
-                                      else if (e.key === 'Escape') setWallEdit(null);
-                                    }}
-                                    onBlur={() => setWallEdit(null)}
-                                  />
-                                );
-                              }
-                              return (
-                                <button
-                                  key={i}
-                                  onClick={() => setWallEdit({ off: boff, raw: String(b) })}
-                                  title={`0x${hex8(boff)} · DEC ${b} · 0x${b.toString(16).padStart(2, '0').toUpperCase()} — клик, чтобы вписать своё значение`}
-                                  className={`cursor-pointer hover:text-gold ${wallView.prev && wallView.prev[row * 16 + i] !== b ? 'text-coral' : 'text-paper/85'}`}
-                                >
-                                  {b.toString(16).padStart(2, '0').toUpperCase()}
-                                  {i < 15 ? ' ' : ''}
-                                </button>
-                              );
-                            })}
-                            {'  '}
-                            <span className="text-faint">{bytes.map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '·')).join('')}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
+                  {wallPinned ? (
+                    <GhostBtn small onClick={unpinWall} title="Убрать стену из нижней панели обратно в это окно">⇱ Вернуть в окно</GhostBtn>
                   ) : (
-                    <div className="tick-label text-faint py-4 text-center">ждём память ядра…</div>
+                    <GhostBtn small onClick={pinWall} title="Закрепить стену ПОД ИГРОЙ: окно свернётся, стена останется панелью снизу — идите по игре и смотрите изменения байт вживую">📌 Закрепить под игрой</GhostBtn>
                   )}
                 </div>
+                {wallPinned ? (
+                  <div className="tick-label text-sky border border-edge/60 bg-[#05070f] px-3 py-3 leading-relaxed">
+                    Стена сейчас ЗАКРЕПЛЕНА ПОД ИГРОЙ и живёт в панели внизу экрана. Сверните CodeSearch кнопкой ▾ в шапке — увидите игру и стену одновременно;
+                    кнопка «CodeSearch» на той панели развернёт это окно обратно (поиск, результаты и заморозка сохраняются).
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto border border-edge bg-[#05070f] p-2">{wallDump}</div>
+                )}
                 <p className="text-[10.5px] text-dim leading-tight">
                   Каждый байт памяти: адрес строки, 16 байт в hex и те же байты как символы. Красным подсвечиваются байты, изменившиеся с прошлого обновления —
                   рядом с адресом жизней обычно лежат соседние счётчики игры. Стена живёт вместе с игрой (галка «живой»).

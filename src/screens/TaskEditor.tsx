@@ -732,8 +732,15 @@ export default function TaskEditor() {
             onContextMenu={(e) => e.preventDefault()}
             onWheel={(e) => setView((v) => ({ ...v, zoom: Math.min(3, Math.max(0.25, v.zoom * Math.exp(-e.deltaY * 0.0012))) }))}
           />
+          {/* v0.72: зум кнопками — как колесом, клик по % возвращает 100% */}
+          <div className="absolute top-2 right-2 flex items-center gap-1">
+            <button onClick={() => setView((v) => ({ ...v, zoom: Math.min(3, Math.max(0.25, v.zoom / 1.25)) }))} className="px-2 py-0.5 border-2 border-edge bg-[rgba(7,9,18,0.9)] text-dim font-display text-[11px] cursor-pointer hover:text-paper" title="Отдалить">−</button>
+            <span className="px-1 text-[9px] text-faint font-pixel bg-[rgba(7,9,18,0.9)] border-2 border-edge pointer-events-none min-w-[40px] text-center">{Math.round(view.zoom * 100)}%</span>
+            <button onClick={() => setView((v) => ({ ...v, zoom: Math.min(3, Math.max(0.25, v.zoom * 1.25)) }))} className="px-2 py-0.5 border-2 border-edge bg-[rgba(7,9,18,0.9)] text-dim font-display text-[11px] cursor-pointer hover:text-paper" title="Приблизить">＋</button>
+            <button onClick={() => setView((v) => ({ ...v, zoom: 1 }))} className="px-1.5 py-0.5 border-2 border-edge bg-[rgba(7,9,18,0.9)] text-dim font-pixel text-[8px] uppercase cursor-pointer hover:text-gold" title="Масштаб 100%">100%</button>
+          </div>
           <div className="absolute bottom-3 left-3 hud-chip pixel-corners px-3 py-2 text-[11px] text-dim">
-            Тяните карту мышью · клик по ячейке — редактировать · колесо — зум
+            Тяните карту мышью · клик по ячейке — редактировать · колесо или ＋/− — зум
           </div>
         </div>
 

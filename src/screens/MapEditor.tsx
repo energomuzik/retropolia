@@ -2024,6 +2024,11 @@ export default function MapEditor() {
     setView({ x: wx - (wx - v.x) * (v.zoom / z2), y: wy - (wy - v.y) * (v.zoom / z2), zoom: z2 });
   };
 
+  /* v0.72: кнопки зума — шаг ×1.25, центр — центр канваса (как колесо без курсора) */
+  const zoomStep = (factor: number) => {
+    setView((v) => ({ ...v, zoom: Math.min(4, Math.max(0.12, v.zoom * factor)) }));
+  };
+
   /* ---------- горячие клавиши ---------- */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -4004,6 +4009,16 @@ export default function MapEditor() {
                 <span className="w-px bg-edge mx-1" />
                 <button onClick={() => setShowGrid((x) => !x)} className={`px-2 py-1.5 font-pixel text-[8px] uppercase cursor-pointer ${showGrid ? 'text-sky' : 'text-faint'}`} title="Сетка">сетка</button>
                 <button onClick={() => setSnap((x) => !x)} className={`px-2 py-1.5 font-pixel text-[8px] uppercase cursor-pointer ${snap ? 'text-sky' : 'text-faint'}`} title="Привязка к мелкой сетке 16px">привязка</button>
+                <span className="w-px bg-edge mx-1" />
+                {/* v0.72: зум кнопками — как колесо, клик по % возвращает 100% */}
+                <button onClick={() => zoomStep(1 / 1.25)} className="px-2 py-1.5 font-display text-[10px] text-dim hover:text-paper cursor-pointer" title="Отдалить — как колесо вниз">−</button>
+                <button
+                  onClick={() => setView((v) => ({ ...v, zoom: 1 }))}
+                  className="px-1 py-1.5 font-pixel text-[8px] text-sky hover:text-paper cursor-pointer min-w-[44px]"
+                  title="Сбросить масштаб — 100%"
+                >{Math.round(view.zoom * 100)}%</button>
+                <button onClick={() => zoomStep(1.25)} className="px-2 py-1.5 font-display text-[10px] text-dim hover:text-paper cursor-pointer" title="Приблизить — как колесо вверх">＋</button>
+                <span className="w-px bg-edge mx-1" />
                 <button
                   onClick={() => { const cv = canvasRef.current; if (cv && map) setView(fitView(map, cv.clientWidth, cv.clientHeight)); }}
                   className="px-3 py-1.5 font-display text-[10px] uppercase text-sky hover:text-paper cursor-pointer"
@@ -4028,7 +4043,7 @@ export default function MapEditor() {
               {/* подсказки мыши (v0.46.0: фон + лимит ширины; скрыта, пока открыта правая панель, — раньше текст НАКЛАДЫВАЛСЯ на панель и на статус) */}
               {!(selCellDef && selCell !== null) && !selStampDef && !selAnimDef && !selBossDef && !selNpcDef && (
                 <div className="absolute bottom-3 right-3 hud-chip pixel-corners px-2.5 py-1.5 max-w-[min(560px,44%)] tick-label text-faint text-right pointer-events-none">
-                  колесо — зум · ПКМ — камера · Delete — удалить (по режиму из Опций) · R — поворот · жёлтый угол тайла — размер
+                  колесо или ＋/− сверху — зум · ПКМ — камера · Delete — удалить (по режиму из Опций) · R — поворот · жёлтый угол тайла — размер
                 </div>
               )}
 
