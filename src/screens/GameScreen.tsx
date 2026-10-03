@@ -19,7 +19,7 @@ import {
 import { saveSessionSnapshot } from './Lobby';
 import QuizOverlay from './QuizOverlay';
 import { AnimPreview, EmuVolumeChip, Field, GhostBtn, Ic, Modal, PxBtn, Stepper, Coin, CoinRow } from '../ui';
-import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, isQuestMode, isSoloMode, questGoalText, tileAt, tileRectOf, tileNumOf, coinsStr, normResMode, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS, doorKeyHex, doorKeyName } from '../types';
+import { PLAYER_COLORS, SKIP_COST, SKIP_COINS_DEFAULT, SKILL_TURNS, CHAOS_LIST, chaosLabel, JOY_LIST, SAVE_KIND_LABEL, saveKindOf, isJourneyLike, isQuestMode, isBossCatchMode, isSoloMode, questGoalText, tileAt, tileRectOf, tileNumOf, tilePlayPorts, tilePlayHidden, coinsStr, normResMode, RUBG_ITEMS, RUBG_ZONE_PHASES, RUBG_STOP_CD, RUBG_STEAL_RANGE, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_BELT_SLOTS, doorKeyHex, doorKeyName } from '../types';
 import type { AnimClip, CardDef, ChaosKind, CutsceneDef, GameMap, GameSession, NpcLibEntry, PlacedNpc, PortalZone, PlayerState, QuestGoal, TaskDef, TokenDef, TokenDir, RubgItem } from '../types';
 import Randomizer from './Randomizer';
 import TradeWindow from './TradeWindow';
@@ -260,6 +260,10 @@ export default function GameScreen() {
   const myStealing = isRubg && rubg ? Object.values(rubg.steals ?? {}).find((x) => x.thief === me) : undefined; // я ворую
   /* ---------- QUEST / QUEST SOLO: индивидуальная игра ---------- */
   const isQuest = isQuestMode(map?.mode);
+  /* v0.76: ПАТРУЛЬНЫЕ боссы ловят игроков в QUEST и (новое) JOURNEY/JOURNEY SOLO */
+  const bossCatch = isBossCatchMode(map?.mode);
+  /* v0.76: плитки «невидимые соседи» — вспышка перехода работает и вне режима комнат */
+  const tileHiddenUi = !!map?.tileGrid && tilePlayHidden(map.tileGrid);
   const isQuestSolo = map?.mode === 'quest1p';
   const myQJob = isQuest && s ? s.qJobs?.[me] : undefined;
   const myQTask = s && map && myQJob !== undefined ? cellTaskOf(s, map, myQJob.cellIdx) : null;
@@ -993,7 +997,7 @@ export default function GameScreen() {
       const cur = useApp.getState();
       const sess = cur.session;
       const mp = cur.sessionMap;
-      if (!mp || !sess || sess.phase !== 'playing' || !isQuestMode(mp.mode)) return;
+      if (!mp || !sess || sess.phase !== 'playing' || !isBossCatchMode(mp.mode)) return;
       const self = sess.players.find((x) => x.id === cur.selfId);
       if (!self || !self.alive || self.spect) return;
       const myPos = sess.journeyPos?.[cur.selfId];
@@ -1022,7 +1026,8 @@ export default function GameScreen() {
 
   /* v0.53: звуковой сигнал и короткая тряска при захвате (факт захвата — s.qCaptureAt) */
   const lastCaptureRef = useRef(0);
-  const myCaptureTs = isQuest && s ? s.qCaptureAt?.[me] : undefined;
+  const walkTileRef = useRef<string | null>(null); // v0.76: последняя плитка СВОЕЙ фишки — вспышка свободного перехода
+  const myCaptureTs = bossCatch && s ? s.qCaptureAt?.[me] : undefined;
   /* v0.54→v0.65: КИНО-ЗАХВАТ — босс ЛОВИТ И НЕСЁТ фишку к своей первой точке патруля:
      анимация делается в rAF-цикле (bossDragRef) — босс идёт от места поимки к точке 1,
      а фишка едет РЯДОМ с ним (сбоку по ходу движения), барахтаясь. После прибытия
@@ -1352,7 +1357,7 @@ export default function GameScreen() {
                  идёт сам (видно по полю), фишка едет РЯДОМ (сбоку по ходу движения).
                  + КИНО-ПОЛОСЫ: с момента поимки управление у босса — экран в полосах
                  кат-сцены, как в кино; полосы уйдут, когда откроется задание. */
-              if (isQuest && sess.qCaptureAt?.[me] && jp && sess.qCaptureAt[me] === jp.ts && lastCapTsRef.current !== jp.ts && !cutActiveRef.current) {
+              if (bossCatch && sess.qCaptureAt?.[me] && jp && sess.qCaptureAt[me] === jp.ts && lastCapTsRef.current !== jp.ts && !cutActiveRef.current) {
                 lastCapTsRef.current = jp.ts;
                 const capBossId = sess.qCaptureBoss?.[me];
                 const capBoss = capBossId ? (m.bosses ?? []).find((x) => x.id === capBossId) : null;
@@ -1450,9 +1455,10 @@ export default function GameScreen() {
                 let nx = Math.max(8, Math.min((mszJ?.w ?? 2048) - 8, self.x + (vx / len) * spd));
                 let ny = Math.max(8, Math.min((mszJ?.h ?? 2048) - 8, self.y + (vy / len) * spd));
                 // ПЛИТОЧНЫЙ РЕЖИМ КАРТ: фишка НЕ выходит за край СВОЕЙ карты-плитки
-                // (скользит по краю, как по стене); портал переносит НАПРЯМУЮ — без зажима
+                // (скользит по краю, как по стене); портал переносит НАПРЯМУЮ — без зажима.
+                // v0.76: зажим только у «порталов» (ports-*); «свободный переход» (free-*) ходит через край
                 const tgJ = m.tileGrid;
-                if (tgJ) {
+                if (tgJ && tilePlayPorts(tgJ)) {
                   const ct = tileAt(tgJ, self.x, self.y) ?? tileAt(tgJ, nx, ny);
                   if (ct) {
                     const tr = tileRectOf(tgJ, ct);
@@ -1497,6 +1503,18 @@ export default function GameScreen() {
                   if (inside) self.pinside.add(pz.id);
                   else self.pinside.delete(pz.id);
                 }
+              }
+              /* v0.76: «НЕВИДИМЫЕ соседи + СВОБОДНЫЙ переход» — переход ходьбой через край
+                 плитки отыгрывается как смена комнаты: вспышка + звук портала (через портал
+                 звук уже прозвучал — не дублируем). */
+              const tgF = m.tileGrid;
+              if (tgF && tilePlayHidden(tgF)) {
+                const ntJ = tileAt(tgF, self.x, self.y);
+                if (ntJ && walkTileRef.current && ntJ.id !== walkTileRef.current && Date.now() - portalTpAtRef.current > 300) {
+                  sfx.portal();
+                  setRoomFlashTs(Date.now());
+                }
+                if (ntJ) walkTileRef.current = ntJ.id;
               }
               d.x = self.x; d.y = self.y;
               if (self.moving) anyoneMoving = true;
@@ -1723,15 +1741,21 @@ export default function GameScreen() {
           const msz = mapSize(m);
           let gx = (followP?.x ?? msz.w / 2) + lookPanRef.current.x;
           let gy = (followP?.y ?? msz.h / 2) + lookPanRef.current.y;
-          /* ПЛИТОЧНЫЙ РЕЖИМ КАРТ: камера НЕ показывает соседние карты-локации —
-             центр кадра зажат в прямоугольник карты-плитки, ЗА КОТОРОЙ следует
-             наблюдаемый (своя фишка в свободном режиме / игрок задания) */
+          /* ПЛИТОЧНЫЙ РЕЖИМ КАРТ — тип «НЕВИДИМЫЕ соседи»: камера НЕ показывает соседние
+             карты-локации (зажим в прямоугольник плитки, за которой следует наблюдаемый —
+             своя фишка в свободном режиме / игрок задания). Тип «ВИДИМЫЕ соседи» (v0.76) —
+             зажима нет, видно весь мир. */
           const tgC = m.tileGrid;
-          if (tgC && followP) {
+          let gzoom = zx * lookZoomRef.current;
+          if (tgC && followP && tilePlayHidden(tgC)) {
+            /* v0.76: «НЕВИДИМЫЕ соседи» — кадр целиком внутри ТЕКУЩЕЙ карты-плитки;
+               плитка мельче экрана — зум приподнимается, чтобы соседняя плитка не выглянула.
+               «ВИДИМЫЕ соседи» — зажима в плитку нет: соседние карты-локации ВИДНЫ. */
             const ft = tileAt(tgC, followP.x, followP.y);
             if (ft) {
               const fr = tileRectOf(tgC, ft);
-              const vw = w / (zx * lookZoomRef.current), vh = h / (zx * lookZoomRef.current);
+              gzoom = Math.max(gzoom, w / fr.w, h / fr.h);
+              const vw = w / gzoom, vh = h / gzoom;
               gx = vw >= fr.w ? fr.x + fr.w / 2 : Math.max(fr.x + vw / 2, Math.min(fr.x + fr.w - vw / 2, gx));
               gy = vh >= fr.h ? fr.y + fr.h / 2 : Math.max(fr.y + vh / 2, Math.min(fr.y + fr.h - vh / 2, gy));
             }
@@ -1775,7 +1799,7 @@ export default function GameScreen() {
           goal = {
             x: gx,
             y: gy,
-            zoom: zx * lookZoomRef.current,
+            zoom: gzoom,
           };
         }
         /* v0.56: КАТ-СЦЕНА — камера летит по маршруту ПОВЕРХ обычной камеры:
@@ -1874,7 +1898,7 @@ export default function GameScreen() {
         }
         /* v0.58: боссы, ДЕРЖАЩИЕ МЕНЯ ПОСЛЕ ЗАХВАТА (после поимки босс прекращает патруль
            — qBossHoldAt пишется движком при захвате); у остальных игроков — свой тайминг */
-        const myHolds = isQuest && me ? sess.qBossHoldAt?.[me] : undefined;
+        const myHolds = bossCatch && me ? sess.qBossHoldAt?.[me] : undefined;
         if (myHolds) {
           /* v0.65: босс, ДОВОЛОКШИЙ фишку до точки 1 (bossHoldPinRef), рисуется на ПЕРВОЙ
              точке патруля, пока держит меня (hold ещё жив): t=0 цикла = pts[0];
@@ -2584,7 +2608,7 @@ export default function GameScreen() {
           const fp = dispRef.current[followId];
           const ft = fp ? tileAt(tg, fp.x, fp.y) : null;
           if (!ft) return null;
-          return <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal" title="Плиточный режим: каждая плитка — отдельная карта-локация; между ними — порталы">📍 ЛОКАЦИЯ {tileNumOf(tg, ft.id)}/{tg.tiles.length}</span>;
+          return <span className="hud-chip pixel-corners px-2 py-1 font-pixel text-[8px] text-teal" title="Плиточный режим: каждая плитка — отдельная карта-локация; видимость соседей и способ перехода — тип игры карт-плиток (задаётся в редакторе)">📍 ЛОКАЦИЯ {tileNumOf(tg, ft.id)}/{tg.tiles.length}</span>;
         })()}
         {(() => {
           /* РЕЖИМ КОМНАТ (АЙЗЕК): номер текущей плитки-комнаты — брат «ЛОКАЦИИ» плиточного режима */
@@ -2677,7 +2701,7 @@ export default function GameScreen() {
          оверлей кат-сцены (полосы, плашка, «Пропустить») отмечен просто cut-keep и не гасится */}
       <div className="flex-1 relative min-h-0 cut-keep cut-board-keep">
         {/* РЕЖИМ КОМНАТ: короткое затемнение при смене комнаты (key = метка времени — анимация перезапускается) */}
-        {roomsOnUi && roomFlashTs > 0 && <div key={roomFlashTs} className="room-flash pointer-events-none absolute inset-0 z-10" />}
+        {(roomsOnUi || tileHiddenUi) && roomFlashTs > 0 && <div key={roomFlashTs} className="room-flash pointer-events-none absolute inset-0 z-10" />}
         <canvas
           ref={canvasRef}
           className="w-full h-full block cut-keep-canvas"

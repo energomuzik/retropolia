@@ -1,5 +1,5 @@
 import type { CardDef, GameFx, GameMap, GameOptions, GameSession, MapMode, NpcReward, NpcShopOffer, PlayerState, QuestGoal, RubgItemKind, RubgZonePhasePlan, TaskDef, TradeOffer, TokenDir } from './types';
-import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, isQuestMode, questGoalText, tileAt, tileRectOf, coinsStr, normResMode, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, RUBG_ZONE_DEFAULT_SEC, rubgFmtZone, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx, doorKeyName } from './types';
+import { APP_VERSION, SKIP_COST, SKIP_COINS_DEFAULT, COINS_MAX, START_SEC, START_TRIES, JOY_LIST, mkJoyCard, SKILL_TURNS, isJourneyLike, isSoloMode, isQuestMode, isBossCatchMode, questGoalText, tileAt, tileRectOf, tilePlayPorts, coinsStr, normResMode, RUBG_ITEMS, RUBG_HP_MAX, RUBG_WIN_HP, RUBG_LOSE_HP, RUBG_ZONE_PHASES, RUBG_ZONE_TOTAL, RUBG_ZONE_DEFAULT_SEC, rubgFmtZone, RUBG_STEAL_RANGE, RUBG_STOP_CD, RUBG_BELT_SLOTS, rubgMkItem, rubgRandomKind, playerPx, doorKeyName } from './types';
 import type { RubgItem } from './types';
 import type { JoyId } from './types';
 import { CELL, cellAtPoint, cellCenter, hopTargetOf, prevCellOf, startCellIdx, stepNext, stepPrev, clampMoveSpeed, DEF_MOVE_SPEED } from './render';
@@ -1044,6 +1044,21 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
     const noReward = t0?.chaos === 'noReward';
     const halfWin = t0?.chaos === 'halfWin';
     if (success) {
+      /* v0.76 JOURNEY: задание на ячейке босса пройдено — босс ПОВЕРЖЕН ДЛЯ ВСЕЙ ПАРТИИ
+         (в QUEST у каждого свой прогресс qBossDown; в JOURNEY задание общее — и победа общая).
+         Клип гибели (defeated) — НЕ блокирующий (after:'none'), встанет в очередь. */
+      if (map.mode === 'journey' || map.mode === 'journey1p') {
+        for (const b of map.bosses ?? []) {
+          if (s.bossDown?.[b.id]) continue;
+          if (cellAtPoint(map, b.x, b.y) !== ch.cellIdx) continue;
+          s.bossDown = s.bossDown ?? {};
+          s.bossDown[b.id] = true;
+          const bdef = (map.bossLib ?? []).find((x) => x.id === b.bid);
+          const dms = bdef ? clipMs(bdef.defeated) : 0;
+          if (bdef && dms) pushFx({ kind: 'bossDef', player: p.id, cellIdx: ch.cellIdx, bossId: b.id, ms: dms, after: 'none' });
+          if (bdef) log(`👹 Босс «${bdef.name}» ПОБЕЖДЕН игроком ${p.name}!`);
+        }
+      }
       const winMs = clipMs(tokAnimOf(p)?.win);
       if (noReward) {
         log(`😈 Без очков: ${p.name} прошёл задание, но ячейка не захвачена и награды нет`);
@@ -1739,8 +1754,10 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const prev = s.journeyPos?.[p.id] ?? null;
       /* ПЛИТОЧНЫЙ РЕЖИМ КАРТ: фишка не может покинуть СВОЮ карту-плитку — ходьба
          зажимается в её прямоугольник. Обновление с tp (прыжок через портал)
-         НЕ зажимается — оно легально попадает на ДРУГУЮ карту-плитку. */
-      if (map.tileGrid && !a.tp) {
+         НЕ зажимается — оно легально попадает на ДРУГУЮ карту-плитку.
+         v0.76: зажим только у типов «порталы» (ports-*); «свободный переход» (free-*)
+         ходит через край плитки — на соседнюю. */
+      if (map.tileGrid && !a.tp && tilePlayPorts(map.tileGrid)) {
         const cl = clampToTile(map, x, y, prev?.x ?? x, prev?.y ?? y);
         x = cl.x; y = cl.y;
       }
@@ -2298,12 +2315,12 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       break;
     }
     case 'bossCapture': {
-      /* v0.53/v0.54 ЗАХВАТ ИГРОКА БОССОМ: только в QUEST, живой для игрока ПАТРУЛЬНЫЙ босс,
+      /* v0.53/v0.54 ЗАХВАТ ИГРОКА БОССОМ: в QUEST и (v0.76) JOURNEY, живой для игрока ПАТРУЛЬНЫЙ босс,
          дистанция сходится, кулдаун 6 с прошёл, игрок НЕ в диалоге (в диалоге босс ждёт —
          финальное решение приходит позже action'ом bossHold off). Фишка ПЛАВНО оттаскивается
          на ПЕРВУЮ ТОЧКУ ПАТРУЛЯ босса (не на стартовую ячейку), патруль босса замирает,
          незаконченное задание бросается, в лог — запись, у игрока — уведомление. */
-      if (s.phase !== 'playing' || !isQuestMode(map.mode)) break;
+      if (s.phase !== 'playing' || !isBossCatchMode(map.mode)) break;
       const p = s.players.find((x) => x.id === a.id);
       if (!p || !p.alive || p.spect) break;
       const b = (map.bosses ?? []).find((x) => x.id === a.bossId);
@@ -2370,11 +2387,12 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       /* v0.56 ОТЛОЖЕННЫЙ ЗАПУСК ЗАДАНИЯ БОССА: в момент поимки задание НЕ открывается —
        сначала фишку ПЛАВНО тащат на первую точку патруля (0.7–2.4 с), потом пауза 1 С.
        Клиент пойманного игрока после этого шлёт bossTaskGo; хост проверяет, что время
-       пришло (qTaskAt), и открывает задание на ячейке босса (если там есть задание). */
-      if (s.phase !== 'playing' || !isQuestMode(map.mode)) break;
+       пришло (qTaskAt), и открывает задание на ячейке босса (если там есть задание).
+       v0.76: в QUEST — личное задание (qJobs); в JOURNEY/JOURNEY SOLO — ОБЩЕЕ задание
+       партии (тот же объект challenge, что при проходе ячейки ходьбой). */
+      if (s.phase !== 'playing' || !isBossCatchMode(map.mode)) break;
       const p = s.players.find((x) => x.id === a.id);
       if (!p || !p.alive || p.spect) break;
-      if (s.qJobs?.[p.id]) break; // задание уже идёт
       const capTs = s.qCaptureAt?.[p.id];
       const bossId = s.qCaptureBoss?.[p.id];
       if (!capTs || !bossId) break; // игрока никто не ловил
@@ -2383,12 +2401,35 @@ export function applyAction(s0: GameSession, a: Action, map: GameMap, opts: Game
       const bossCell = cellAtPoint(map, b.x, b.y);
       if (bossCell < 0) break;
       const bc = map.cells[bossCell];
-      const done = s.qDone?.[p.id] ?? [];
-      if (!bc || bc.type !== 'task' || done.includes(bossCell) || !cellTaskOf(s, map, bossCell)) break;
+      if (!bc || bc.type !== 'task' || !cellTaskOf(s, map, bossCell)) break;
       const plannedAt = s.qTaskAt?.[p.id] ?? 0;
       if (Date.now() < plannedAt - 450) break; // ещё тянут/пауза не прошла — рановато (допуск 450 мс на дрожь таймеров)
-      s.qJobs = s.qJobs ?? {};
-      s.qJobs[p.id] = { cellIdx: bossCell, startedAt: Date.now() };
+      if (isQuestMode(map.mode)) {
+        if (s.qJobs?.[p.id]) break; // задание уже идёт
+        const done = s.qDone?.[p.id] ?? [];
+        if (done.includes(bossCell)) break; // это задание игрок УЖЕ победил
+        s.qJobs = s.qJobs ?? {};
+        s.qJobs[p.id] = { cellIdx: bossCell, startedAt: Date.now() };
+      } else {
+        /* v0.76 JOURNEY: ОБЩЕЕ задание — те же проверки и тот же объект challenge, что при
+           проходе ячейки задания ходьбой (journeyMove); пойманный игрок — «текущий». */
+        if (s.challenge || s.moving || s.pendingCard || s.quiz || s.awaitPost) break;
+        if ((s.fxs ?? []).some((f) => f.gate)) break;
+        p.pos = bossCell;
+        if (!s.revealed.includes(bossCell)) s.revealed.push(bossCell);
+        s.turn = Math.max(0, s.players.indexOf(p));
+        s.challenge = {
+          cellIdx: bossCell, mode: null, started: false, paused: false, startedAt: 0, accMs: 0, loads: 0, reloadId: 0,
+          status: 'choose', approvals: [], violations: [], lowStart: false,
+        };
+        if (map.coinsOnly && map.startCoins !== undefined) {
+          s.challenge.mode = 'coins';
+          s.challenge.status = 'ready';
+        } else if (map.resMode === 'hp') {
+          s.challenge.mode = 'hp'; // ресурс «полоска HP» — плата по итогам
+          s.challenge.status = 'ready';
+        }
+      }
       log(`👹 Задание босса${bossNameOf(bossId)} НАЧАЛОСЬ для игрока ${p.name} — босс доволок фишку до места.`);
       break;
     }

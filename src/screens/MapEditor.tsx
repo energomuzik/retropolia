@@ -12,8 +12,8 @@ import {
 import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
-import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, CutsceneDef, GameMap, MapEnding, MapTileInfo, NpcAnimDef, NpcLibEntry, NpcQuest, NpcShopOffer, PatrolDef, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, RubgItemKind, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
-import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, doorKeyHex, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, normResMode, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileGridDims, tileRectOf, DOOR_KEYS, RUBG_ITEMS, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
+import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, CutsceneDef, GameMap, MapEnding, MapTileInfo, NpcAnimDef, NpcLibEntry, NpcQuest, NpcShopOffer, PatrolDef, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, RubgItemKind, Stamp, TileGrid, TilePlay, TokenDef, TileGroup, TileImg, WallRect } from '../types';
+import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, doorKeyHex, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, normResMode, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileGridDims, tileRectOf, tilePlayOf, TILE_PLAY_OPTS, DOOR_KEYS, RUBG_ITEMS, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
 import type { MapMode } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { effSpoilerCollapsed, effSpoilerOpen, loadSpoilerRec, saveSpoilerRec } from '../spoilers';
@@ -3294,7 +3294,7 @@ export default function MapEditor() {
 
       <div className="flex-1 min-h-0 flex">
         {/* левая колонка: карты + фон + тайлы */}
-        <div className="w-[248px] shrink-0 border-r-[3px] border-edge bg-[rgba(11,14,28,0.75)] overflow-y-auto p-3 space-y-4 hidden md:block">
+        <div className="w-[248px] shrink-0 border-r-[3px] border-edge bg-[rgba(11,14,28,0.75)] overflow-y-auto p-3 gap-4 hidden md:flex md:flex-col">
           <div>
             <div className="tick-label mb-2">Мои карты · {maps.length}</div>
             <div className="space-y-1.5">
@@ -3400,8 +3400,12 @@ export default function MapEditor() {
               </div>
 
               {/* СЛОИ: фон — самый низ, тайловые слои (выбор + добавление), ячейки и стрелки — всегда самый верх */}
+              {/* v0.76: ЛЕВАЯ ПАНЕЛЬ — ГРУППЫ ПО ТЕМАМ (flex + order): «ПОЛЕ И ОФОРМЛЕНИЕ» (слои, плитки, стены,
+                  порталы) → «ПЕРСОНАЖИ И ОБЪЕКТЫ» (анимации, боссы, NPC, фишки) → «СОБЫТИЯ И ПРАВИЛА» (кат-сцены, концовки);
+                  порядок задают style={{order}} на обёртках — блоки в JSX не перемещались */}
+              <div style={{ order: 10 }} className="tick-label text-faint uppercase tracking-wider border-t-2 border-edge pt-2">🗺 Поле и оформление</div>
               {map && (
-                <div>
+                <div style={{ order: 11 }}>
                   <button onClick={() => setPanelOpen('layers', !panelOpen('layers'))} className="w-full flex items-center gap-1.5 mb-2 cursor-pointer group" title={panelOpen('layers') ? 'Свернуть' : 'Развернуть'}>
                     <span className={`text-[10px] ${panelOpen('layers') ? 'text-gold' : 'text-faint'}`}>{panelOpen('layers') ? '▾' : '▸'}</span>
                     <span className="tick-label group-hover:text-paper">🗂 Слои карты</span>
@@ -3811,7 +3815,7 @@ export default function MapEditor() {
                 </div>
               )}
 
-              <div>
+              <div style={{ order: 13 }}>
                 <button
                   onClick={() => setPanelOpen('walls', !panelOpen('walls'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
@@ -3867,7 +3871,7 @@ export default function MapEditor() {
               </div>
 
               {/* ПЛИТОЧНЫЙ РЕЖИМ КАРТ: схема плиток-локаций, добавление/выбор/удаление */}
-              <div>
+              <div style={{ order: 12 }}>
                 <button
                   onClick={() => setPanelOpen('tiles', !panelOpen('tiles'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
@@ -3886,7 +3890,7 @@ export default function MapEditor() {
                       </>
                     ) : (
                       <>
-                        <p className="text-[10px] text-teal leading-tight border-2 border-teal/40 px-2 py-1.5">Плиточный режим ВКЛЮЧЁН: каждая плитка — отдельная карта-локация {map.tileGrid.w}×{map.tileGrid.h} px. В ИГРЕ фишка зажата в своей карте, на другие — только через порталы.</p>
+                        <p className="text-[10px] text-teal leading-tight border-2 border-teal/40 px-2 py-1.5">Плиточный режим ВКЛЮЧЁН: каждая плитка — отдельная карта-локация {map.tileGrid.w}×{map.tileGrid.h} px. Как соседние карты выглядят и соединяются В ИГРЕ — задаёт «Тип игры» ниже (по умолчанию: соседи невидимы, переход — через порталы).</p>
                         {/* СХЕМА ПЛИТОК: клик — перейти на карту, ЛКМ-зажатие — перетащить (обмен/свободный слот), крестик — удалить */}
                         <div>
                           <div className="flex items-center justify-between gap-2 mb-1">
@@ -3966,6 +3970,25 @@ export default function MapEditor() {
                         </div>
                         <PxBtn color="teal" small className="w-full" onClick={addMapTile}>{Ic.plus(12)} Добавить карту-плитку</PxBtn>
                         <p className="text-[10px] text-faint leading-tight">Новая плитка встаёт на свободный слот рядом с выбранной. Схему стройте КАК УГОДНО: «+ столбец / + ряд» добавляют пустые ряды и столбцы (хоть 6 вправо и 3 вниз), «−» убирает пустой край. Перетаскивание ПЛАВНОЕ: зажали ЛКМ — плитка приподнялась, за курсором едет призрак «КАРТА N → сюда», отпустили — плитка доезжает до слота (на свободный или обмен с другой — вместе с содержимым). «⛶ Весь экран» — вся схема на мониторе. Порталы связывают ЛЮБЫЕ плитки.</p>
+                        {/* v0.76: ТИП ИГРЫ КАРТ-ПЛИТОК — видимость соседей × способ перехода (во время игры) */}
+                        <div className="border-2 border-edge px-2 py-1.5 space-y-1">
+                          <div className="tick-label">Тип игры карт-плиток — во время игры</div>
+                          {TILE_PLAY_OPTS.map((o) => {
+                            const on = tilePlayOf(map.tileGrid) === o.id;
+                            return (
+                              <button
+                                key={o.id}
+                                onClick={() => { updTileGrid({ ...(map.tileGrid as TileGrid), play: o.id }); sfx.hover(); }}
+                                title={o.hint}
+                                className={`w-full text-left px-2 py-1 border-2 cursor-pointer transition-colors ${on ? 'border-teal text-teal bg-teal/10' : 'border-edge text-faint hover:text-dim'}`}
+                              >
+                                <span className="font-display text-[9px] uppercase">{on ? '✓ ' : ''}{o.name}</span>
+                                <span className="block text-[9px] leading-tight text-faint">{o.hint}</span>
+                              </button>
+                            );
+                          })}
+                          <p className="text-[9px] text-faint leading-tight">Старые карты без выбора играются как «Невидимые соседи · порталы».</p>
+                        </div>
                         <PxBtn color="coral" small className="w-full" onClick={disableTileMode}>Выключить плиточный режим</PxBtn>
                       </>
                     )}
@@ -3973,7 +3996,9 @@ export default function MapEditor() {
                 )}
               </div>
 
-              <div>
+              {/* v0.76: группа «СОБЫТИЯ И ПРАВИЛА» */}
+              <div style={{ order: 30 }} className="tick-label text-faint uppercase tracking-wider border-t-2 border-edge pt-2">🎬 События и правила</div>
+              <div style={{ order: 31 }}>
                 {/* v0.56: КАТ-СЦЕНЫ — маршруты камеры, зоны-триггеры, выдача NPC */}
                 <button
                   onClick={() => setPanelOpen('cuts', !panelOpen('cuts'))}
@@ -4116,6 +4141,10 @@ export default function MapEditor() {
                     })()}
                   </div>
                 )}
+              </div>
+
+              {/* v0.76: «Плитки и порталы» вынесены из обёртки кат-сцен в свою панель (группа «ПОЛЕ И ОФОРМЛЕНИЕ») */}
+              <div style={{ order: 14 }}>
                 <button
                   onClick={() => setPanelOpen('plates', !panelOpen('plates'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
@@ -4211,7 +4240,10 @@ export default function MapEditor() {
                 )}
               </div>
 
-              <div>
+              {/* v0.76: группа «ПЕРСОНАЖИ И ОБЪЕКТЫ» */}
+              <div style={{ order: 20 }} className="tick-label text-faint uppercase tracking-wider border-t-2 border-edge pt-2">👤 Персонажи и объекты</div>
+
+              <div style={{ order: 24 }}>
                 <button
                   onClick={() => setPanelOpen('tok', !panelOpen('tok'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
@@ -4268,7 +4300,7 @@ export default function MapEditor() {
                 <p className="text-[10px] text-faint mt-1 leading-tight">Как двигаются фишки на этой карте: прыжками по клеткам (по умолчанию) или плавно — одним непрерывным движением от клетки до клетки назначения. Скорость — одна для ВСЕХ фишек карты, в клетках в секунду: подбирается автором карты и работает в обоих режимах.</p>
               </div>
 
-              <div>
+              <div style={{ order: 21 }}>
                 <button
                   onClick={() => setPanelOpen('anim', !panelOpen('anim'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(90,169,255,0.08)] px-1 py-0.5"
@@ -4324,7 +4356,7 @@ export default function MapEditor() {
                 )}
               </div>
 
-              <div>
+              <div style={{ order: 22 }}>
                 <button
                   onClick={() => setPanelOpen('boss', !panelOpen('boss'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(192,122,255,0.08)] px-1 py-0.5"
@@ -4380,7 +4412,7 @@ export default function MapEditor() {
                 )}
               </div>
 
-              <div>
+              <div style={{ order: 23 }}>
                 <button
                   onClick={() => setPanelOpen('npc', !panelOpen('npc'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(46,230,168,0.08)] px-1 py-0.5"
@@ -4437,7 +4469,7 @@ export default function MapEditor() {
               </div>
 
               {isQuestMode(map.mode) && (
-              <div>
+              <div style={{ order: 32 }}>
                 <button
                   onClick={() => setPanelOpen('end', !panelOpen('end'))}
                   className="flex items-center gap-1 w-full text-left mb-2 cursor-pointer hover:bg-[rgba(255,207,63,0.08)] px-1 py-0.5"
