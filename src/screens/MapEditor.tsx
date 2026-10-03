@@ -7,7 +7,7 @@ import { allDlgFlags, ensureQuestDialog, ensureShopDialog } from '../dialogHubs'
 import { patrolLen, patrolTimeline } from '../patrol';
 import {
   CELL, mapSize, drawBoard, fitView, cellAtPoint, stampAtPoint, animAtPoint, bossAtPoint, cellBox, cellCenter,
-  renumberByPath, normCellsLegacy, fixLinksAfterDelete, startCellIdx,
+  renumberByPath, normCellsLegacy, fixLinksAfterDelete, startCellIdx, tileContentShift,
 } from '../render';
 import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
@@ -1126,7 +1126,11 @@ export default function MapEditor() {
         }
       }
     }
-    if (!spot) return;
+    if (!spot) {
+      toast('Свободных слотов в схеме нет — нажмите «+ столбец» или «+ ряд» под схемой (или перетащите плитку на пустой слот), затем добавьте новую карту', 'err');
+      sfx.fail();
+      return;
+    }
     const nt = { id: uid('mt'), col: spot.col, row: spot.row };
     const g = { ...tg, tiles: [...tg.tiles, nt] };
     updTileGrid(g, { mw: Math.max(m.mw ?? 0, (spot.col + 1) * g.w), mh: Math.max(m.mh ?? 0, (spot.row + 1) * g.h) });
@@ -1160,7 +1164,24 @@ export default function MapEditor() {
     const walls = (m.walls ?? []).filter((w) => !inRect(w.x + w.w / 2, w.y + w.h / 2));
     const portals = (m.portals ?? []).filter((p) => !inRect(p.x + p.w / 2, p.y + p.h / 2) && !(p.tx !== undefined && p.ty !== undefined && inRect(p.tx, p.ty)));
     const anims = (m.anims ?? []).filter((a) => !inRect(a.x, a.y));
-    const bosses = (m.bosses ?? []).filter((b) => !inRect(b.x, b.y));
+    // v0.75: у выживших боссов/NPC вырезаем ТОЧКИ ПАТРУЛЯ внутри удалённой плитки (пустой патруль — убираем)
+    const prunePatrol = <T extends { patrol?: PatrolDef }>(o: T): T => {
+      if (!o.patrol) return o;
+      const pts = o.patrol.pts.filter((p) => !inRect(p.x, p.y));
+      return pts.length === o.patrol.pts.length ? o : { ...o, patrol: pts.length ? { ...o.patrol, pts } : undefined };
+    };
+    const bosses = (m.bosses ?? []).filter((b) => !inRect(b.x, b.y)).map(prunePatrol);
+    // v0.75: NPC и КАТ-СЦЕНЫ тоже уходят вместе с плиткой (раньше оставались висеть в воздухе):
+    // NPC — по центру; у кат-сцен вырезаются точки камеры и зона-триггер внутри плитки,
+    // кат-сцена без точек — удаляется целиком
+    const npcs = (m.npcs ?? []).filter((n) => !inRect(n.x, n.y)).map(prunePatrol);
+    const cutscenes = (m.cutscenes ?? [])
+      .map((c) => {
+        const pts = (c.pts ?? []).filter((p) => !inRect(p.x, p.y));
+        const zone = c.zone && !inRect(c.zone.x + c.zone.w / 2, c.zone.y + c.zone.h / 2) ? c.zone : undefined;
+        return pts.length === (c.pts ?? []).length && zone === c.zone ? c : { ...c, pts, zone };
+      })
+      .filter((c) => (c.pts ?? []).length > 0);
     const tileBgs = { ...(m.tileBgs ?? {}) };
     delete tileBgs[id];
     const tiles = tg.tiles.filter((t) => t.id !== id);
@@ -1181,7 +1202,7 @@ export default function MapEditor() {
       if (next.hop !== null && next.hop !== undefined) next.hop = remap.get(next.hop);
       return next;
     });
-    const upd: Partial<GameMap> = { cells: cleaned, stamps, walls, portals, anims, bosses, tileBgs: Object.keys(tileBgs).length ? tileBgs : undefined, mw, mh };
+    const upd: Partial<GameMap> = { cells: cleaned, stamps, walls, portals, anims, bosses, npcs, cutscenes, tileBgs: Object.keys(tileBgs).length ? tileBgs : undefined, mw, mh };
     updTileGrid({ ...tg, tiles }, upd);
     if (selTileId === id) setSelTileId(tiles[0]?.id ?? null);
     setSelCell(null);
@@ -1191,10 +1212,13 @@ export default function MapEditor() {
   };
 
   /** v0.73: ПЕРЕСТАНОВКА карт-плиток (перетаскивание в схеме и на весь экран).
-      Переместить плитку в слот (col,row) — СЛОТ СВОБОДЕН: содержимое плитки
-      (ячейки маршрута, штампы, стены, порталы, анимации, боссы) переезжает ВМЕСТЕ
+      Переместить плитку в слот (col,row) — СЛОТ СВОБОДЕН: содержимое плитки переезжает ВМЕСТЕ
       с ней; СЛОТ ЗАНЯТ другой плиткой — плитки ОБМЕНИВАЮТСЯ содержимым и местами.
-      Свой фон (tileBgs по id) и номер следуют за плиткой сами. Ctrl+Z вернёт. */
+      v0.75: перенос считает tileContentShift (render.ts) и несёт с собой ВСЁ: ячейки маршрута,
+      штампы, стены, порталы (зоны и точки перехода), анимации, боссов и NPC (с точками
+      патрулей), КАТ-СЦЕНЫ (точки камеры и зоны-триггеры). Свой фон (tileBgs по id) и номер
+      следуют за плиткой сами; общий фон карты (map.bg — одна картинка на всё поле) остаётся
+      на месте — для него есть нарезка на фоны плиток в панели «Фон». Ctrl+Z вернёт. */
   const moveTileTo = (id: string, col: number, row: number) => {
     const m = mapRef.current;
     if (!m?.tileGrid) return;
@@ -1213,39 +1237,12 @@ export default function MapEditor() {
       },
     });
     const w = tg.w, h = tg.h;
-    const dxT = (col - t.col) * w, dyT = (row - t.row) * h; // сдвиг содержимого переносимой плитки
-    const dxO = other ? (t.col - other.col) * w : 0;        // сдвиг содержимого второй плитки (обмен)
-    const dyO = other ? (t.row - other.row) * h : 0;
-    const inSrc = (x: number, y: number) => x >= t.col * w && x < (t.col + 1) * w && y >= t.row * h && y < (t.row + 1) * h;
-    const inOth = other ? (x: number, y: number) => x >= other.col * w && x < (other.col + 1) * w && y >= other.row * h && y < (other.row + 1) * h : () => false;
-    const deltaFor = (x: number, y: number): [number, number] => {
-      if (inSrc(x, y)) return [dxT, dyT];
-      if (other && inOth(x, y)) return [dxO, dyO];
-      return [0, 0];
-    };
-    const moved = (x: number, y: number) => { const [dx, dy] = deltaFor(x, y); return dx !== 0 || dy !== 0; };
-    // ячейки маршрута: принадлежность по центру, порядок в массиве (и стрелки-индексы) не меняется
-    const cells = m.cells.map((c, ci) => {
-      const cc = cellCenter(m, ci);
-      const [dx, dy] = deltaFor(cc.x, cc.y);
-      if (dx === 0 && dy === 0) return c;
-      return c.cx !== undefined && c.cy !== undefined
-        ? { ...c, cx: c.cx + dx, cy: c.cy + dy }
-        : { ...c, x: c.x + dx / CELL, y: c.y + dy / CELL };
-    });
-    const stamps = (m.stamps ?? []).map((s) => (moved(s.x, s.y) ? { ...s, x: s.x + deltaFor(s.x, s.y)[0], y: s.y + deltaFor(s.x, s.y)[1] } : s));
-    const walls = (m.walls ?? []).map((wl) => (moved(wl.x + wl.w / 2, wl.y + wl.h / 2) ? { ...wl, x: wl.x + deltaFor(wl.x + wl.w / 2, wl.y + wl.h / 2)[0], y: wl.y + deltaFor(wl.x + wl.w / 2, wl.y + wl.h / 2)[1] } : wl));
-    // порталы: зона переезжает по своему центру, точка перехода — по своей позиции (независимо)
-    const portals = (m.portals ?? []).map((p) => {
-      const zc = moved(p.x + p.w / 2, p.y + p.h / 2);
-      const tc = p.tx !== undefined && p.ty !== undefined && moved(p.tx, p.ty);
-      if (!zc && !tc) return p;
-      const [zx, zy] = zc ? deltaFor(p.x + p.w / 2, p.y + p.h / 2) : [0, 0];
-      const [tx, ty] = tc ? deltaFor(p.tx!, p.ty!) : [0, 0];
-      return { ...p, x: p.x + zx, y: p.y + zy, tx: p.tx !== undefined && tc ? p.tx + tx : p.tx, ty: p.ty !== undefined && tc ? p.ty + ty : p.ty };
-    });
-    const anims = (m.anims ?? []).map((a) => (moved(a.x, a.y) ? { ...a, x: a.x + deltaFor(a.x, a.y)[0], y: a.y + deltaFor(a.x, a.y)[1] } : a));
-    const bosses = (m.bosses ?? []).map((b) => (moved(b.x, b.y) ? { ...b, x: b.x + deltaFor(b.x, b.y)[0], y: b.y + deltaFor(b.x, b.y)[1] } : b));
+    // v0.75: ВСЁ содержимое (включая NPC, кат-сцены и патрули) считает чистая функция tileContentShift
+    const shifted = tileContentShift(
+      m, w, h,
+      { from: { col: t.col, row: t.row }, to: { col, row } },
+      other ? { from: { col: other.col, row: other.row }, to: { col: t.col, row: t.row } } : undefined,
+    );
     const tiles = tg.tiles.map((x) => (x.id === id ? { ...x, col, row } : other && x.id === other.id ? { ...x, col: t.col, row: t.row } : x));
     const maxCol = Math.max(0, ...tiles.map((x) => x.col));
     const maxRow = Math.max(0, ...tiles.map((x) => x.row));
@@ -1255,12 +1252,13 @@ export default function MapEditor() {
     const prevCols = Math.max(0, ...tg.tiles.map((x) => x.col)) + 1; // границы схемы ДО переезда
     const prevRows = Math.max(0, ...tg.tiles.map((x) => x.row)) + 1;
     const g2: TileGrid = { ...tg, tiles, cols: Math.max(tg.cols ?? 0, prevCols, maxCol + 1), rows: Math.max(tg.rows ?? 0, prevRows, maxRow + 1) };
-    updTileGrid(g2, { cells, stamps, walls, portals, anims, bosses, mw: (maxCol + 1) * w, mh: (maxRow + 1) * h });
+    updTileGrid(g2, { ...shifted, mw: (maxCol + 1) * w, mh: (maxRow + 1) * h });
     if (selTileId === id || (other && selTileId === other.id)) jumpToTile(tiles.find((x) => x.id === selTileId)!);
     sfx.hover();
+    const bgHint = m.bg ? ' Общий фон карты (одна картинка на всё поле) остаётся на месте — нарежьте его на фоны карт: панель «Фон» → «Нарезать общий фон».' : '';
     toast(other
-      ? `Карты-плитки №${tg.tiles.indexOf(t) + 1} и №${tg.tiles.indexOf(other) + 1} обменялись местами вместе с содержимым — вернуть: Ctrl+Z`
-      : `Карта-плитка №${tg.tiles.indexOf(t) + 1} переехала на свободный слот вместе с содержимым — вернуть: Ctrl+Z`, 'ok');
+      ? `Карты-плитки №${tg.tiles.indexOf(t) + 1} и №${tg.tiles.indexOf(other) + 1} обменялись местами ВМЕСТЕ СО ВСЕМ содержимым (ячейки, штампы, стены, порталы, анимации, боссы, NPC, кат-сцены и их зоны) — вернуть: Ctrl+Z.${bgHint}`
+      : `Карта-плитка №${tg.tiles.indexOf(t) + 1} переехала на свободный слот ВМЕСТЕ СО ВСЕМ содержимым (ячейки, штампы, стены, порталы, анимации, боссы, NPC, кат-сцены и их зоны) — вернуть: Ctrl+Z.${bgHint}`, 'ok');
   };
 
   /* v0.73: оконные обработчики перетаскивания плитки в схеме (вешаются только пока тащим):
@@ -1380,6 +1378,48 @@ export default function MapEditor() {
     if (pb) rest[id] = pb;
     else delete rest[id];
     updMap({ tileBgs: Object.keys(rest).length ? rest : undefined } as Partial<GameMap>);
+  };
+
+  /** v0.75: НАРЕЗКА ОБЩЕГО ФОНА НА ФОНЫ КАРТ-ПЛИТОК. Общий фон (map.bg) — ОДНА картинка
+      на всё поле: она прибита к координатам поля и НЕ переезжает при перестановке плиток
+      (переехать может только отдельный фон каждой карты). Кнопка режет общий фон на куски
+      по прямоугольникам карт-плиток (с учётом bgMode: «растянуть» — кусок = доля картинки;
+      «1:1» — кусок в пикселях картинки) и раздаёт их как tileBgs (bgMode «растянуть» —
+      картинка на экране НЕ меняется), общий фон убирается. После этого фон каждой карты
+      переезжает ВМЕСТЕ с ней при перестановке. */
+  const sliceMapBgToTiles = async () => {
+    const m = mapRef.current;
+    if (!m?.tileGrid || !m.bg) return;
+    const tg = m.tileGrid;
+    if (!tg.tiles.length) return;
+    const img = new Image();
+    try {
+      await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('img')); img.src = m.bg!; });
+    } catch { toast('Не удалось прочитать картинку общего фона', 'err'); return; }
+    const sz = mapSize(m);
+    const real = m.bgMode === 'real'; // 1:1 — координаты поля = пиксели картинки; «растянуть» — картинка сжата в поле
+    const kx = real ? 1 : img.width / Math.max(1, sz.w);
+    const ky = real ? 1 : img.height / Math.max(1, sz.h);
+    const c = document.createElement('canvas');
+    const ctx = c.getContext('2d');
+    if (!ctx) { toast('Не удалось нарезать фон (канва недоступна)', 'err'); return; }
+    const rest: { [id: string]: PlateBg } = { ...(m.tileBgs ?? {}) };
+    for (const t of tg.tiles) {
+      const r = tileRectOf(tg, t);
+      const sx = r.x * kx, sy = r.y * ky;
+      const sw = Math.max(1, Math.min(img.width - sx, r.w * kx));
+      const sh = Math.max(1, Math.min(img.height - sy, r.h * ky));
+      if (sw <= 0 || sh <= 0 || sx >= img.width || sy >= img.height) continue; // плитка за краем картинки — оставляем как было
+      c.width = Math.round(sw);
+      c.height = Math.round(sh);
+      ctx.clearRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
+      rest[t.id] = { bg: c.toDataURL('image/png'), bgMode: 'stretch' };
+    }
+    updMap({ tileBgs: rest, bg: undefined } as Partial<GameMap>);
+    dirtyRef.current = true;
+    sfx.coin();
+    toast(`Общий фон нарезан на фоны ${tg.tiles.length} карт-плиток — теперь фон каждой карты переезжает ВМЕСТЕ с ней. Картинка на экране не изменилась`, 'ok');
   };
 
   const updStamp = (idx: number, patch: Partial<Stamp>) =>
@@ -3350,6 +3390,13 @@ export default function MapEditor() {
                     : ''}
                   Фон лежит ВНУТРИ карты и уедет игрокам сам. Большая картинка сожмётся до 2000px.
                 </p>
+                {bgIsTile && map.bg && (
+                  <div className="mt-1 border-2 border-gold/40 px-2 py-1.5 space-y-1">
+                    <p className="text-[10px] text-gold leading-tight">У карты есть ОБЩИЙ фон («На всю карту») — одна картинка на всё поле: она НЕ переезжает при перестановке плиток.</p>
+                    <GhostBtn small className="w-full" onClick={() => void sliceMapBgToTiles()}>✂ Нарезать общий фон на карты-плитки</GhostBtn>
+                    <p className="text-[9px] text-faint leading-tight">Общий фон будет разрезан на куски по картам и станет ИХ фонами — после этого фон каждой карты переезжает вместе с ней. Картинка на экране не изменится.</p>
+                  </div>
+                )}
               </div>
 
               {/* СЛОИ: фон — самый низ, тайловые слои (выбор + добавление), ячейки и стрелки — всегда самый верх */}

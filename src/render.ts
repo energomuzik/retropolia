@@ -1,4 +1,4 @@
-import type { AnimClip, CellDef, GameMap, NpcLibEntry, PlacedNpc, TileDef, TileImg, TokenAnim, TokenDir } from './types';
+import type { AnimClip, CellDef, CutsceneDef, GameMap, NpcLibEntry, PlacedAnim, PlacedBoss, PlacedNpc, PortalZone, Stamp, TileDef, TileImg, TokenAnim, TokenDir, WallRect } from './types';
 import { doorKeyHex } from './types';
 import { getImage } from './assets';
 import { patrolPos } from './patrol';
@@ -30,6 +30,80 @@ export function cellBox(map: GameMap, idx: number) {
     return { x: c.cx - w / 2, y: c.cy - h / 2, w, h };
   }
   return { x: c.x * CELL, y: c.y * CELL, w: (c.w || 1) * CELL, h: (c.h || 1) * CELL };
+}
+
+/* ---------- v0.75: ПЕРЕНОС СОДЕРЖИМОГО КАРТ-ПЛИТОК (перестановка в схеме) ----------
+   ЕДИНАЯ чистая функция для moveTileTo: считает сдвиг ВСЕГО координатного содержимого
+   карты при переезде/обмене карт-плиток. Принадлежность точки — по прямоугольнику
+   ИСХОДНОГО слота (a.from / b.from), сдвиг — на разницу слотов × (w, h). Переносится
+   ВСЁ: ячейки маршрута, штампы, стены, порталы (зоны и точки перехода независимо),
+   анимации, боссы и NPC — вместе с ТОЧКАМИ ПАТРУЛЯ, и КАТ-СЦЕНЫ — точки камеры
+   и зоны-триггеры. Фоны карт-плиток (tileBgs) следуют за плитками сами (ключ по id);
+   общий фон карты (map.bg — одна картинка на всё поле) остаётся на месте по определению. */
+export interface TileMoveSpec {
+  from: { col: number; row: number };
+  to: { col: number; row: number };
+}
+export function tileContentShift(
+  m: GameMap, w: number, h: number, a: TileMoveSpec, b?: TileMoveSpec,
+): {
+  cells: CellDef[]; stamps: Stamp[]; walls: WallRect[]; portals: PortalZone[];
+  anims: PlacedAnim[]; bosses: PlacedBoss[]; npcs: PlacedNpc[]; cutscenes: CutsceneDef[];
+} {
+  const inRect = (x: number, y: number, r: { col: number; row: number }) =>
+    x >= r.col * w && x < (r.col + 1) * w && y >= r.row * h && y < (r.row + 1) * h;
+  const deltaFor = (x: number, y: number): [number, number] => {
+    if (inRect(x, y, a.from)) return [(a.to.col - a.from.col) * w, (a.to.row - a.from.row) * h];
+    if (b && inRect(x, y, b.from)) return [(b.to.col - b.from.col) * w, (b.to.row - b.from.row) * h];
+    return [0, 0];
+  };
+  const moved = (x: number, y: number) => { const [dx, dy] = deltaFor(x, y); return dx !== 0 || dy !== 0; };
+  // точка с координатами-якорем (x, y): штампы, анимации, точки патруля, точки камеры
+  const shiftPt = <P extends { x: number; y: number }>(p: P): P => {
+    const [dx, dy] = deltaFor(p.x, p.y);
+    return dx === 0 && dy === 0 ? p : { ...p, x: p.x + dx, y: p.y + dy };
+  };
+  // прямоугольник: принадлежность по ЦЕНТРУ, сдвиг верхнего угла (стены, зоны-триггеры)
+  const shiftByCenter = <R extends { x: number; y: number; w: number; h: number }>(r: R): R => {
+    const [dx, dy] = deltaFor(r.x + r.w / 2, r.y + r.h / 2);
+    return dx === 0 && dy === 0 ? r : { ...r, x: r.x + dx, y: r.y + dy };
+  };
+  // объект с позицией и патрулём (босс, NPC): сам объект + каждая точка патруля отдельно
+  const shiftWithPatrol = <T extends { x: number; y: number; patrol?: { pts: { x: number; y: number }[] } }>(o: T): T => {
+    const s = shiftPt(o);
+    if (!s.patrol || !s.patrol.pts.length) return s;
+    const pts = s.patrol.pts.map(shiftPt);
+    return pts.every((p, i) => p === s.patrol!.pts[i]) ? s : { ...s, patrol: { ...s.patrol, pts } };
+  };
+  // ячейки маршрута: принадлежность по центру, порядок в массиве (и стрелки-индексы) не меняется
+  const cells = m.cells.map((c, ci) => {
+    const cc = cellCenter(m, ci);
+    const [dx, dy] = deltaFor(cc.x, cc.y);
+    if (dx === 0 && dy === 0) return c;
+    return c.cx !== undefined && c.cy !== undefined
+      ? { ...c, cx: c.cx + dx, cy: c.cy + dy }
+      : { ...c, x: c.x + dx / CELL, y: c.y + dy / CELL };
+  });
+  const stamps = (m.stamps ?? []).map(shiftPt);
+  const walls = (m.walls ?? []).map(shiftByCenter);
+  // порталы: зона переезжает по своему центру, точка перехода — по своей позиции (независимо)
+  const portals = (m.portals ?? []).map((p) => {
+    const zc = moved(p.x + p.w / 2, p.y + p.h / 2);
+    const tc = p.tx !== undefined && p.ty !== undefined && moved(p.tx, p.ty);
+    if (!zc && !tc) return p;
+    const [zx, zy] = zc ? deltaFor(p.x + p.w / 2, p.y + p.h / 2) : [0, 0];
+    const [tx, ty] = tc ? deltaFor(p.tx!, p.ty!) : [0, 0];
+    return { ...p, x: p.x + zx, y: p.y + zy, tx: p.tx !== undefined && tc ? p.tx + tx : p.tx, ty: p.ty !== undefined && tc ? p.ty + ty : p.ty };
+  });
+  const anims = (m.anims ?? []).map(shiftPt);
+  const bosses = (m.bosses ?? []).map(shiftWithPatrol);
+  const npcs = (m.npcs ?? []).map(shiftWithPatrol);
+  const cutscenes = (m.cutscenes ?? []).map((c) => {
+    const pts = (c.pts ?? []).map(shiftPt);
+    const zone = c.zone ? shiftByCenter(c.zone) : undefined;
+    return pts.every((p, i) => p === (c.pts ?? [])[i]) && zone === c.zone ? c : { ...c, pts, zone };
+  });
+  return { cells, stamps, walls, portals, anims, bosses, npcs, cutscenes };
 }
 
 /* Ячейка под точкой (координаты поля в px); возвращает индекс или -1 */
