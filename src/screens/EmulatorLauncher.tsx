@@ -172,16 +172,24 @@ export default function EmulatorLauncher() {
 
   /* загрузка СРАЗУ НЕСКОЛЬКИХ ромов в выбранную папку (select над кнопкой);
      v0.60: folderOverride — имя папки при загрузке ЦЕЛОЙ ПАПКИ кнопкой «Загрузить папку» */
-  const onUpload = async (files: FileList | null, folderOverride?: string) => {
+  const onUpload = async (files: FileList | null, folderOverride?: string, dedupeNames = false) => {
     const list = Array.from(files ?? []);
     if (!list.length) return;
     const folder = (folderOverride ?? uploadFolder).trim().slice(0, 24);
     let lastId: string | null = null;
-    let loaded = 0, skipped = 0;
+    let loaded = 0, skipped = 0, dupNames = 0;
+    // v0.74: дубли по ИМЕНИ ФАЙЛА (без md5 — хаки/мод-версии с другим именем добавляются):
+    // при загрузке ПАПКИ ром, чьё имя файла уже есть в базе (в любой папке) или уже
+    // попал в эту же загрузку, ПРОПУСКАЕТСЯ — можно скидывать ромы от всех в одну папку
+    const existing = dedupeNames ? new Set(roms.map((r) => r.fileName.toLowerCase())) : null;
+    const batch = new Set<string>();
     for (const f of list) {
       const ext = (f.name.split('.').pop() ?? '').toLowerCase();
       const romExt = romFileExt(ext);
       if (!romExt) { skipped++; continue; }
+      const nameKey = f.name.toLowerCase();
+      if (existing && (existing.has(nameKey) || batch.has(nameKey))) { dupNames++; continue; }
+      if (existing) batch.add(nameKey);
       const buf = await f.arrayBuffer();
       const r: RomDef = {
         id: uid('rom'), name: f.name.replace(/\.[^.]+$/, ''), fileName: f.name,
@@ -199,7 +207,8 @@ export default function EmulatorLauncher() {
     if (lastId) setRomId(lastId);
     setRunning(false);
     sfx.coin();
-    toast(skipped ? `Ромов загружено: ${loaded} → папка «${folder || 'Без папки'}» · пропущено чужих: ${skipped}` : `Ромов загружено: ${loaded}${folder ? ` → папка «${folder}»` : ''}`, 'ok');
+    const dupNote = dupNames > 0 ? ` · дубликатов пропущено: ${dupNames} (имя файла уже есть)` : '';
+    toast(skipped ? `Ромов загружено: ${loaded} → папка «${folder || 'Без папки'}» · пропущено чужих: ${skipped}${dupNote}` : `Ромов загружено: ${loaded}${folder ? ` → папка «${folder}»` : ''}${dupNote}`, 'ok');
   };
 
   /* v0.60: «ЗАГРУЗИТЬ ПАПКУ» — скрытый input с webkitdirectory выбирает папку на диске;
@@ -211,7 +220,7 @@ export default function EmulatorLauncher() {
     const raw = ((list[0] as File & { webkitRelativePath?: string }).webkitRelativePath || '').split('/')[0].trim();
     const folder = (raw || 'Ромы').slice(0, 24);
     setUploadFolder(folder);
-    await onUpload(files, folder);
+    await onUpload(files, folder, true); // v0.74: в папке пропускаем дубли по имени файла
   };
 
   /* v0.65: БАЗА РОМОВ — сохранить ВСЮ базу (ромы + обложки картриджей) одним файлом

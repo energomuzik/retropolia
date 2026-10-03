@@ -71,15 +71,20 @@ const taskModeLabel = (m: GameMap): string | null => {
 
 type LcdPlatKey = 'nes' | 'md' | 'sms' | 'gg' | 'sega32' | 'snes' | 'gb' | 'gba' | 'a26' | 'pce';
 
-/* «зажжённый» цвет каждой платформы — в цвет её картриджа/этикетки (как на бейджах v0.65) */
+/* «зажжённый» цвет каждой платформы — ТОТ ЖЕ, что у названия приставки в подсказках
+   лаунчера и редактора заданий (PlatName / PLAT_COLOR в cartridge.tsx): NES и
+   Game Boy/Color — серый dim (#8f97c9), вся семья SEGA (Mega Drive / Master System) —
+   синий sky (#5aa9ff), SNES — светлый paper (#e9ecff), GBA — фиолет (#8f7bff),
+   32X — красный coral (#ff5d73), Atari — оранжевый magma (#ff8b3f),
+   PC Engine — золотой gold (#ffcf3f), GAME GEAR — пурпур этикетки (#c048b8) */
 const LCD_PLATS: { key: LcdPlatKey; label: string; hex: string; title: string }[] = [
   { key: 'nes', label: 'NES', hex: '#8f97c9', title: 'Задания на NES / Dendy' },
   { key: 'md', label: 'MEGA DRIVE', hex: '#5aa9ff', title: 'Задания на SEGA Mega Drive / Genesis' },
-  { key: 'sms', label: 'MASTER SYSTEM', hex: '#7ec3ff', title: 'Задания на SEGA Master System' },
+  { key: 'sms', label: 'MASTER SYSTEM', hex: '#5aa9ff', title: 'Задания на SEGA Master System' },
   { key: 'gg', label: 'GAME GEAR', hex: '#c048b8', title: 'Задания на SEGA Game Gear' },
   { key: 'sega32', label: '32X', hex: '#ff5d73', title: 'Задания на SEGA 32X' },
   { key: 'snes', label: 'SNES', hex: '#e9ecff', title: 'Задания на Super Nintendo' },
-  { key: 'gb', label: 'GAME BOY/COLOR', hex: '#9be84d', title: 'Задания на Game Boy / Game Boy Color' },
+  { key: 'gb', label: 'GAME BOY/COLOR', hex: '#8f97c9', title: 'Задания на Game Boy / Game Boy Color' },
   { key: 'gba', label: 'GBA', hex: '#8f7bff', title: 'Задания на Game Boy Advance' },
   { key: 'a26', label: 'ATARI 2600', hex: '#ff8b3f', title: 'Задания на Atari 2600' },
   { key: 'pce', label: 'PC ENGINE', hex: '#ffcf3f', title: 'Задания на PC Engine (HuCARD)' },

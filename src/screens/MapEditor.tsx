@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../store';
 import { AnimPreview, GhostBtn, Ic, Modal, PxBtn, Stepper, Coin } from '../ui';
 import { DialogTreeEditor } from './DialogTreeEditor';
@@ -13,7 +13,7 @@ import { extractTilesFromImage, scaleTileImg } from '../tilecut';
 import type { ExtractInfo } from '../tilecut';
 import { idbDel, idbGet, idbPut, uid } from '../db';
 import type { AnimDef, BossAnimDef, CellDef, CellType, CustomChallenge, CutsceneDef, GameMap, MapEnding, MapTileInfo, NpcAnimDef, NpcLibEntry, NpcQuest, NpcShopOffer, PatrolDef, PlacedAnim, PlacedBoss, PlacedNpc, PlateBg, PortalZone, QuestGoal, QuestGoalKind, RubgItemKind, Stamp, TileGrid, TokenDef, TileGroup, TileImg, WallRect } from '../types';
-import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, doorKeyHex, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, normResMode, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileRectOf, DOOR_KEYS, RUBG_ITEMS, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
+import { baseModeOf, bossLibEntryOf, challengeSummaryLines, coinsStr, doorKeyHex, isJourneyLike, isQuestMode, isSoloMode, mapModeModified, MAP_MODES, MAP_MODES_TOP, MAX_FIELD, MODE_PRESETS, normResMode, npcLibEntryOf, PLATE_SIZES, questGoalText, soloVariantOf, tileGridDims, tileRectOf, DOOR_KEYS, RUBG_ITEMS, RUBG_ZONE_PHASES, rubgFmtZone } from '../types';
 import type { MapMode } from '../types';
 import { HoldDeleteButton, rememberDeleted, TileSizeBtns, useKeyDelete } from '../delGuard';
 import { effSpoilerCollapsed, effSpoilerOpen, loadSpoilerRec, saveSpoilerRec } from '../spoilers';
@@ -230,8 +230,7 @@ function TileMapFullscreen({ tg, tileBgs, activeId, onSelect, onMove, onClose }:
   onMove: (id: string, col: number, row: number) => void;
   onClose: () => void;
 }) {
-  const cols = Math.max(1, ...tg.tiles.map((t) => t.col)) + 1;
-  const rows = Math.max(1, ...tg.tiles.map((t) => t.row)) + 1;
+  const { cols, rows } = tileGridDims(tg); // v0.74: явные размеры схемы — пустые ряды/столбцы видны и тут
   const vpRef = useRef<HTMLDivElement>(null);
   const [cell, setCell] = useState(160); // размер слота на экране, px
   const [zoom, setZoom] = useState(1);
@@ -244,6 +243,28 @@ function TileMapFullscreen({ tg, tileBgs, activeId, onSelect, onMove, onClose }:
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropSlot, setDropSlot] = useState<{ col: number; row: number } | null>(null);
   const [ghost, setGhost] = useState<{ x: number; y: number; n: number } | null>(null);
+
+  /* v0.74: анимация перестановки — плитка (и вторая при обмене) ПЛАВНО доезжает
+     до нового слота (280 мс), а не телепортировалась скачком в момент отпускания */
+  const fsRef = useRef<HTMLDivElement>(null);
+  const fsSlotsRef = useRef<Map<string, { c: number; r: number }> | null>(null);
+  useLayoutEffect(() => {
+    const root = fsRef.current;
+    if (!root) return;
+    const prev = fsSlotsRef.current;
+    const next = new Map<string, { c: number; r: number }>();
+    for (const t of tg.tiles) next.set(t.id, { c: t.col, r: t.row });
+    if (prev) {
+      for (const t of tg.tiles) {
+        const o = prev.get(t.id);
+        if (o && (o.c !== t.col || o.r !== t.row)) {
+          const el = root.querySelector<HTMLElement>(`[data-fstid="${t.id}"]`);
+          if (el) el.animate([{ transform: `translate(${(o.c - t.col) * (cell + 6)}px, ${(o.r - t.row) * (cell + 6)}px)` }, { transform: 'translate(0, 0)' }], { duration: 280, easing: 'cubic-bezier(0.2, 0.85, 0.25, 1)' });
+        }
+      }
+    }
+    fsSlotsRef.current = next;
+  }, [tg.tiles, cols, rows, cell]);
 
   /* вписать всю схему в экран при открытии */
   useEffect(() => {
@@ -347,6 +368,7 @@ function TileMapFullscreen({ tg, tileBgs, activeId, onSelect, onMove, onClose }:
         }}
       >
         <div
+          ref={fsRef}
           className="absolute left-1/2 top-1/2"
           style={{
             width: cols * (cell + 6),
@@ -377,6 +399,7 @@ function TileMapFullscreen({ tg, tileBgs, activeId, onSelect, onMove, onClose }:
             return (
               <div
                 key={i}
+                data-fstid={t.id}
                 data-fsslot
                 data-col={col}
                 data-row={row}
@@ -392,8 +415,13 @@ function TileMapFullscreen({ tg, tileBgs, activeId, onSelect, onMove, onClose }:
                   }}
                   onClick={() => { if (Date.now() - guardRef.current < 350) return; onSelect(t); }}
                   title={`КАРТА ${idx + 1}: клик — выбрать (камера редактора перейдёт сюда) · зажать и тащить — переставить`}
-                  style={{ touchAction: 'none' }}
-                  className={`relative w-full h-full border-2 cursor-pointer overflow-hidden ${isActive ? 'border-gold' : isDrop ? 'border-teal' : 'border-edge2 hover:border-sky'} ${dragId === t.id ? 'opacity-35' : ''}`}
+                  style={{
+                    touchAction: 'none',
+                    ...(dragId === t.id
+                      ? { transform: 'scale(1.05)', boxShadow: '0 12px 26px rgba(0,0,0,0.6), 0 0 0 2px rgba(255,207,63,0.6)', zIndex: 5 }
+                      : {}),
+                  }}
+                  className={`relative w-full h-full border-2 cursor-pointer overflow-hidden ${isActive ? 'border-gold' : isDrop ? 'border-teal' : 'border-edge2 hover:border-sky'}`}
                 >
                   {bg?.bg && <img src={bg.bg} alt="" draggable={false} className="absolute inset-0 w-full h-full object-cover opacity-70 pointer-events-none" />}
                   <span
@@ -483,7 +511,8 @@ export default function MapEditor() {
      на другой слот — плитка переезжает на свободный слот или МЕНЯЕТСЯ местами с занявшей его */
   const [tileDragId, setTileDragId] = useState<string | null>(null);
   const [tileDropSlot, setTileDropSlot] = useState<{ col: number; row: number } | null>(null);
-  const tileDragRef = useRef<{ id: string; col: number; row: number; moved: boolean; sx: number; sy: number } | null>(null);
+  const [tileGhost, setTileGhost] = useState<{ x: number; y: number; n: number } | null>(null); // v0.74: призрак «КАРТА N → сюда» за курсором в схеме
+  const tileDragRef = useRef<{ id: string; col: number; row: number; moved: boolean; sx: number; sy: number; n: number } | null>(null);
   const tileDropRef = useRef<{ col: number; row: number } | null>(null);
   const tileClickGuard = useRef(0); // ms-метка конца перетаскивания: click сразу после него — хвост жеста, не выбор
   const [bgScope, setBgScope] = useState<'plate' | 'all'>('plate'); // куда ложится НОВЫЙ фон: «на эту плитку» (своя локация) или «на всю карту»
@@ -1032,6 +1061,36 @@ export default function MapEditor() {
     updTileGrid(g, { mw: (maxCol + 1) * g.w, mh: (maxRow + 1) * g.h });
   };
 
+  /** v0.74: «Разбить поле на плитки» — главная разбивка теперь создаёт КАРТЫ-ПЛИТКИ:
+      поле режется на сетку nx×ny равных карт-локаций, и ВСЯ сетка СРАЗУ появляется
+      в схеме «Карты-плитки» (раньше кнопка делила поле на «страницы» одного
+      непрерывного поля, а плитки в схему добавлялись по одной — схема оставалась
+      одинарной). Содержимое остаётся на своих местах — каждая плитка «забирает»
+      свой прямоугольник. Сторона — первая стандартная (1024/2048/4096), дающая
+      2..24 плиток; маленькое поле — сетка 2×2 пополам. */
+  const splitFieldToTiles = () => {
+    const m = mapRef.current;
+    if (!m || m.tileGrid) return;
+    const sz = mapSize(m);
+    let tw = 0, th = 0, nx = 1, ny = 1;
+    for (const cand of PLATE_SIZES) { // по возрастанию: первая стандартная, дающая 2..24 плиток
+      const cx = Math.max(1, Math.ceil(sz.w / cand)), cy = Math.max(1, Math.ceil(sz.h / cand));
+      if (cx * cy >= 2 && cx * cy <= 24) { tw = cand; th = cand; nx = cx; ny = cy; break; }
+    }
+    if (!tw) { // стандартными в 2..24 не делится (маленькое поле) — сетка 2×2 пополам
+      nx = 2; ny = 2;
+      tw = Math.max(320, Math.ceil(sz.w / 2));
+      th = Math.max(320, Math.ceil(sz.h / 2));
+    }
+    const tiles = Array.from({ length: nx * ny }, (_, i) => ({ id: uid('mt'), col: i % nx, row: Math.floor(i / nx) }));
+    const tg: TileGrid = { w: tw, h: th, tiles };
+    updTileGrid(tg, { mw: Math.max(sz.w, nx * tw), mh: Math.max(sz.h, ny * th) });
+    setSelTileId(tiles[0].id);
+    setPanelOpen('tiles', true);
+    sfx.coin();
+    toast(`Поле разбито на ${nx * ny} карт-плиток (${nx}×${ny}, ${tw}×${th} px) — вся сетка уже в схеме «Карты-плитки». Лишние пустые плитки удалите крестиком (удержание)`, 'ok');
+  };
+
   /** Новая карта-плитка: свободный слот схемы рядом с активной.
       v0.73: слот ищется ТОЛЬКО в неотрицательных столбцах/строках (col ≥ 0, row ≥ 0) —
       раньше при занятых правых слотах плитка вставала СЛЕВА от плитки №1 (col = −1)
@@ -1054,9 +1113,10 @@ export default function MapEditor() {
       if (!taken.has(`${c},${r}`)) { spot = { col: c, row: r }; break; }
     }
     if (!spot) {
-      // вокруг активной всё занято — ближайший СВОБОДНЫЙ слот схемы (кольца по расстоянию)
-      const maxCol = Math.max(0, ...tg.tiles.map((t) => t.col));
-      const maxRow = Math.max(0, ...tg.tiles.map((t) => t.row));
+      // вокруг активной всё занято — ближайший СВОБОДНЫЙ слот СХЕМЫ (кольца по расстоянию;
+      // v0.74: границы берутся от явных cols/rows — «+ столбец/+ ряд» — тоже заполняются)
+      const d = tileGridDims(tg);
+      const maxCol = d.cols - 1, maxRow = d.rows - 1;
       outer: for (let rad = 1; rad <= maxCol + maxRow + 2; rad++) {
         for (let r = Math.max(0, ar - rad); r <= ar + rad; r++) {
           for (let c = Math.max(0, ac - rad); c <= ac + rad; c++) {
@@ -1189,7 +1249,13 @@ export default function MapEditor() {
     const tiles = tg.tiles.map((x) => (x.id === id ? { ...x, col, row } : other && x.id === other.id ? { ...x, col: t.col, row: t.row } : x));
     const maxCol = Math.max(0, ...tiles.map((x) => x.col));
     const maxRow = Math.max(0, ...tiles.map((x) => x.row));
-    updTileGrid({ ...tg, tiles }, { cells, stamps, walls, portals, anims, bosses, mw: (maxCol + 1) * w, mh: (maxRow + 1) * h });
+    // v0.74: схема НЕ СХЛОПЫВАЕТСЯ — ряд/столбец, из которого ушла последняя плитка,
+    // остаётся на месте (пустым): перестановку можно откатить и обратно. Обрезать
+    // пустой край можно кнопками «− столбец / − ряд» в панели схемы.
+    const prevCols = Math.max(0, ...tg.tiles.map((x) => x.col)) + 1; // границы схемы ДО переезда
+    const prevRows = Math.max(0, ...tg.tiles.map((x) => x.row)) + 1;
+    const g2: TileGrid = { ...tg, tiles, cols: Math.max(tg.cols ?? 0, prevCols, maxCol + 1), rows: Math.max(tg.rows ?? 0, prevRows, maxRow + 1) };
+    updTileGrid(g2, { cells, stamps, walls, portals, anims, bosses, mw: (maxCol + 1) * w, mh: (maxRow + 1) * h });
     if (selTileId === id || (other && selTileId === other.id)) jumpToTile(tiles.find((x) => x.id === selTileId)!);
     sfx.hover();
     toast(other
@@ -1207,6 +1273,7 @@ export default function MapEditor() {
       if (!d) return;
       if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 6) { d.moved = true; setTileDragId(d.id); }
       if (!d.moved) return;
+      setTileGhost({ x: e.clientX, y: e.clientY, n: d.n }); // v0.74: призрак едет за курсором
       const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
       const slot = el?.closest('[data-tslot]') as HTMLElement | null;
       const sc = slot ? Number(slot.dataset.col) : NaN;
@@ -1226,6 +1293,7 @@ export default function MapEditor() {
       tileDropRef.current = null;
       setTileDragId(null);
       setTileDropSlot(null);
+      setTileGhost(null);
       if (d?.moved) {
         tileClickGuard.current = Date.now(); // click сразу после жеста — его хвост, а не выбор плитки
         if (drop) moveTileTo(d.id, drop.col, drop.row);
@@ -1258,9 +1326,52 @@ export default function MapEditor() {
     jumpToTile(t);
   };
 
-  /** Схема плиток: размер клетки — 26px, масштаб по самой длинной стороне сетки. */
-  const tgCols = TG ? Math.max(1, ...TG.tiles.map((t) => t.col)) + 1 : 1;
-  const tgRows = TG ? Math.max(1, ...TG.tiles.map((t) => t.row)) + 1 : 1;
+  /** Схема плиток: ЯВНЫЕ размеры (v0.74: TileGrid.cols/rows — вместе с пустыми
+      рядами/столбцами), но не меньше bounding box плиток. Старые карты без
+      cols/rows работают как раньше — размеры выводятся из плиток. */
+  const tgDims = TG ? tileGridDims(TG) : { cols: 1, rows: 1 };
+  const tgCols = tgDims.cols;
+  const tgRows = tgDims.rows;
+
+  /** v0.74: пустые ряды/столбцы схемы — «+» добавляет пустой столбец СПРАВА / ряд СНИЗУ
+      (стройте сетку как угодно: хоть 6 вправо и 3 вниз — пустые слоты ждут плитки),
+      «−» убирает последний столбец/ряд, если в нём не осталось плиток. */
+  const growTileScheme = (axis: 'cols' | 'rows') => {
+    if (!TG) return;
+    updTileGrid({ ...TG, [axis]: tgDims[axis] + 1 });
+    sfx.hover();
+  };
+  const shrinkTileScheme = (axis: 'cols' | 'rows') => {
+    if (!TG) return;
+    const last = tgDims[axis] - 1;
+    if (last < 1) { toast('Схема не может стать меньше одной клетки', 'err'); return; }
+    const busy = TG.tiles.some((t) => (axis === 'cols' ? t.col : t.row) === last);
+    if (busy) { toast(axis === 'cols' ? 'В последнем столбце ещё есть плитки — передвиньте или удалите их' : 'В последнем ряду ещё есть плитки — передвиньте или удалите их', 'err'); return; }
+    updTileGrid({ ...TG, [axis]: last });
+    sfx.hover();
+  };
+
+  /* v0.74: FLIP-анимация перестановки в схеме — после смены слота плитка (и вторая
+     при обмене) ПЛАВНО доезжает на место (280 мс), а не телепортировалась скачком */
+  const schemeRef = useRef<HTMLDivElement | null>(null);
+  const schemeRectsRef = useRef<Map<string, { x: number; y: number }> | null>(null);
+  useLayoutEffect(() => {
+    const root = schemeRef.current;
+    if (!root) return;
+    const prev = schemeRectsRef.current;
+    const next = new Map<string, { x: number; y: number }>();
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>('[data-tid]'))) {
+      const id = el.dataset.tid as string;
+      const r = el.getBoundingClientRect();
+      const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+      next.set(id, { x: cx, y: cy });
+      const o = prev?.get(id);
+      if (o && (Math.abs(o.x - cx) > 1 || Math.abs(o.y - cy) > 1)) {
+        el.animate([{ transform: `translate(${o.x - cx}px, ${o.y - cy}px)` }, { transform: 'translate(0, 0)' }], { duration: 280, easing: 'cubic-bezier(0.2, 0.85, 0.25, 1)' });
+      }
+    }
+    schemeRectsRef.current = next;
+  }, [TG?.tiles, tgCols, tgRows]);
 
   /** Свой фон КАРТЫ-ПЛИТКИ (плиточный режим): ключ — id плитки. */
   const setTileBg = (id: string, pb: PlateBg | undefined) => {
@@ -3740,6 +3851,7 @@ export default function MapEditor() {
                             >⛶ Весь экран</button>
                           </div>
                           <div
+                            ref={schemeRef}
                             className="grid gap-1"
                             style={{ gridTemplateColumns: `repeat(${Math.min(tgCols, 8)}, minmax(0, 1fr))` }}
                           >
@@ -3761,17 +3873,22 @@ export default function MapEditor() {
                               const isActive = activeTile?.id === t.id;
                               const hasBg = !!(map.tileBgs ?? {})[t.id];
                               return (
-                                <div key={i} data-tslot data-col={col} data-row={row} className="relative">
+                                <div key={i} data-tid={t.id} data-tslot data-col={col} data-row={row} className="relative">
                                   <button
                                     onPointerDown={(e) => {
                                       if (e.button !== 0) return;
-                                      tileDragRef.current = { id: t.id, col: t.col, row: t.row, moved: false, sx: e.clientX, sy: e.clientY };
+                                      tileDragRef.current = { id: t.id, col: t.col, row: t.row, moved: false, sx: e.clientX, sy: e.clientY, n: idx + 1 };
                                       setTileDragId(t.id);
                                     }}
                                     onClick={() => { if (Date.now() - tileClickGuard.current < 350) return; selectTile(t); }}
                                     title={`КАРТА ${idx + 1}: клик — редактировать эту локацию · зажать и тащить — переставить местами${hasBg ? ' · свой фон есть' : ''}`}
-                                    style={{ touchAction: 'none' }}
-                                    className={`relative w-full aspect-square border-2 cursor-pointer font-pixel text-[9px] ${isActive ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim hover:border-edge2'} ${tileDragId === t.id ? 'opacity-40' : ''} ${isDrop ? 'border-teal text-teal bg-teal/10' : ''}`}
+                                    style={{
+                                      touchAction: 'none',
+                                      ...(tileDragId === t.id
+                                        ? { transform: 'scale(1.09) rotate(-1.5deg)', boxShadow: '0 10px 22px rgba(0,0,0,0.55), 0 0 0 2px rgba(46,230,168,0.55)', zIndex: 10 }
+                                        : {}),
+                                    }}
+                                    className={`relative w-full aspect-square border-2 cursor-pointer font-pixel text-[9px] ${isActive ? 'border-gold text-gold bg-gold/10' : 'border-edge text-faint hover:text-dim hover:border-edge2'} ${isDrop ? 'border-teal text-teal bg-teal/10' : ''}`}
                                   >
                                     {idx + 1}
                                     {hasBg && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-teal pointer-events-none" title="У этой карты свой фон" />}
@@ -3790,10 +3907,18 @@ export default function MapEditor() {
                               );
                             })}
                           </div>
+                          {/* v0.74: пустые ряды/столбцы схемы — стройте сетку как угодно */}
+                          <div className="flex items-center gap-1 mt-1">
+                            <span className="tick-label text-faint mr-auto">Пустые:</span>
+                            <button onClick={() => growTileScheme('cols')} title="Добавить ПУСТОЙ столбец справа — перетащите туда плитку или добавьте новую" className="px-1.5 py-0.5 font-pixel text-[9px] border-2 border-edge text-faint hover:text-teal hover:border-teal cursor-pointer">+ столбец</button>
+                            <button onClick={() => growTileScheme('rows')} title="Добавить ПУСТОЙ ряд снизу — перетащите туда плитку или добавьте новую" className="px-1.5 py-0.5 font-pixel text-[9px] border-2 border-edge text-faint hover:text-teal hover:border-teal cursor-pointer">+ ряд</button>
+                            <button onClick={() => shrinkTileScheme('cols')} title="Убрать последний столбец справа (если он пуст)" className="px-1.5 py-0.5 font-pixel text-[9px] border-2 border-edge text-faint hover:text-coral hover:border-coral cursor-pointer">− столбец</button>
+                            <button onClick={() => shrinkTileScheme('rows')} title="Убрать последний ряд снизу (если он пуст)" className="px-1.5 py-0.5 font-pixel text-[9px] border-2 border-edge text-faint hover:text-coral hover:border-coral cursor-pointer">− ряд</button>
+                          </div>
                           {tileBgCount > 0 && <p className="text-[9px] text-teal mt-1 leading-tight"><span className="inline-block w-1.5 h-1.5 bg-teal align-middle mr-0.5" /> — у карты свой фон ({tileBgCount} шт., загрузка в панели «Фон» выше)</p>}
                         </div>
                         <PxBtn color="teal" small className="w-full" onClick={addMapTile}>{Ic.plus(12)} Добавить карту-плитку</PxBtn>
-                        <p className="text-[10px] text-faint leading-tight">Новая плитка встаёт на свободный слот РЯДОМ с выбранной (вправо/вниз — внутри схемы, за её края не выйдет). Плитки можно ПЕРЕТАСКИВАТЬ: зажмите ЛКМ и тяните — на свободный слот или на другую плитку (обменяются местами вместе с содержимым). Кнопка «⛶ Весь экран» — вся схема на мониторе. Порталы (инструмент «Портал») связывают ЛЮБЫЕ плитки.</p>
+                        <p className="text-[10px] text-faint leading-tight">Новая плитка встаёт на свободный слот рядом с выбранной. Схему стройте КАК УГОДНО: «+ столбец / + ряд» добавляют пустые ряды и столбцы (хоть 6 вправо и 3 вниз), «−» убирает пустой край. Перетаскивание ПЛАВНОЕ: зажали ЛКМ — плитка приподнялась, за курсором едет призрак «КАРТА N → сюда», отпустили — плитка доезжает до слота (на свободный или обмен с другой — вместе с содержимым). «⛶ Весь экран» — вся схема на мониторе. Порталы связывают ЛЮБЫЕ плитки.</p>
                         <PxBtn color="coral" small className="w-full" onClick={disableTileMode}>Выключить плиточный режим</PxBtn>
                       </>
                     )}
@@ -3954,9 +4079,17 @@ export default function MapEditor() {
                 </button>
                 {panelOpen('plates') && (
                   <div className="space-y-1.5">
-                    <p className="text-[10px] text-faint leading-tight">Два способа сделать карту БОЛЬШОЙ: 1) просто увеличьте «Размер поля» выше; 2) ПЛИТКИ — страницы поля одинакового размера: СОСЕДНИЕ плитки стыкуются краями (фишка переходит ходьбой в любом месте стыка), ЛЮБЫЕ плитки связываются порталами-телепортами. У каждой плитки — СВОЙ ФОН («другая локация»): навигатором прыгните на плитку и загрузите фон в панели «Фон» выше (переключатель «На эту плитку / На всю карту»).</p>
+                    <p className="text-[10px] text-faint leading-tight">Сделать мир большим: 1) просто увеличьте «Размер поля» выше; 2) РАЗБИТЬ ПОЛЕ НА ПЛИТКИ — карта режется на КАРТЫ-ПЛИТКИ (отдельные карты-локации), и ВСЯ сетка сразу появляется в схеме «Карты-плитки»; 3) СТРАНИЦЫ ОДНОГО ПОЛЯ (прежняя разбивка) — поле непрерывно, страницы стыкуются краями, у каждой свой фон, есть режим комнат (Айзек) и хаб. Любые плитки связываются порталами-телепортами.</p>
                     {!map.plateSize ? (
-                      <PxBtn color="sky" small className="w-full" onClick={enablePlates}>{Ic.grid(12)} Разбить поле на плитки</PxBtn>
+                      <>
+                        {!map.tileGrid ? (
+                          <PxBtn color="sky" small className="w-full" onClick={splitFieldToTiles}>{Ic.grid(12)} Разбить поле на плитки</PxBtn>
+                        ) : (
+                          <p className="text-[10px] text-teal leading-tight border-2 border-teal/40 px-2 py-1.5">Разбивка на КАРТЫ-ПЛИТКИ уже включена — схема, добавление, перетаскивание и пустые ряды — в спойлере «Карты-плитки» ниже. Здесь остаются порталы.</p>
+                        )}
+                        <PxBtn color="sky" small className="w-full" onClick={enablePlates}>{Ic.grid(12)} Страницы одного поля (старая разбивка + комнаты «Айзек»)</PxBtn>
+                        <p className="text-[10px] text-faint leading-tight">«Разбить поле на плитки» создаёт КАРТЫ-ПЛИТКИ: каждую рисуете отдельно, фишка ходит по своей, между картами — порталы; лишние пустые плитки удалите крестиком в схеме. «Страницы одного поля» — прежний способ: одно непрерывное поле, разрезанное на страницы (стыки проходятся ходьбой, режим комнат «Айзек», хаб-плитка).</p>
+                      </>
                     ) : (
                       <>
                         <div className="flex items-center justify-between">
@@ -5236,6 +5369,15 @@ export default function MapEditor() {
       )}
 
       {/* ---------- v0.73: ПОЛНОЭКРАННАЯ КАРТА ПЛИТОК (ПКМ — двигать, ЛКМ — выбрать/перетащить) ---------- */}
+      {/* v0.74: призрак перетаскиваемой плитки в схеме панели — едет за курсором */}
+      {tileGhost && (
+        <div
+          className="fixed z-[80] pointer-events-none px-2 py-1 border-2 border-teal bg-[rgba(7,9,18,0.92)] font-pixel text-[9px] text-teal"
+          style={{ left: tileGhost.x + 14, top: tileGhost.y + 14, boxShadow: '0 6px 16px rgba(0,0,0,0.5)' }}
+        >
+          КАРТА {tileGhost.n} → сюда
+        </div>
+      )}
       {tileFsOpen && TG && (
         <TileMapFullscreen
           tg={TG}
