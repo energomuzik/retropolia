@@ -12,6 +12,7 @@ import QuestEditor from './screens/QuestEditor';
 import EditorsHub from './screens/EditorsHub';
 import EmulatorLauncher from './screens/EmulatorLauncher';
 import OptionsScreen from './screens/OptionsScreen';
+import TrainingScreen from './screens/TrainingScreen';
 import GameScreen from './screens/GameScreen';
 import ChallengeWizard from './screens/ChallengeWizard';
 import { CreateScreen, JoinScreen, LoadScreen, LobbyScreen } from './screens/Lobby';
@@ -146,6 +147,7 @@ export default function App() {
       {screen === 'editorsHub' && <EditorsHub />}
       {screen === 'emulator' && <EmulatorLauncher />}
       {screen === 'options' && <OptionsScreen />}
+      {screen === 'training' && <TrainingScreen />}
       <Toasts items={toasts} />
       {/* v0.56: полосатый фильтр; v0.57: NES NTSC — РЕЖИМОМ из общих опций
          (1 «Полосатый» — старый фильтр, 2 «Мягкий CRT» — новый, действует и на кадр эмулятора) */}

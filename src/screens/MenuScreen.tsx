@@ -9,6 +9,7 @@ const MENU: { key: string; label: string; screen: Screen; desc: string; color: s
   { key: 'create', label: 'Создать игру', screen: 'create', desc: 'выбрать карту · открыть комнату', color: '#ffcf3f', icon: Ic.dice },
   { key: 'join', label: 'Подключиться', screen: 'join', desc: 'войти в комнату по коду', color: '#5aa9ff', icon: Ic.globe },
   { key: 'load', label: 'Загрузить игру', screen: 'load', desc: 'сохранённые партии', color: '#8f97c9', icon: Ic.save },
+  { key: 'training', label: 'Обучение', screen: 'training', desc: 'слайды по режимам, картам и CodeSearch — с озвучкой', color: '#b48bff', icon: Ic.book },
   { key: 'challenge', label: 'Создать челлендж', screen: 'challenge', desc: 'свой режим: ответы на вопросы — и правила готовы', color: '#ff8b3f', icon: Ic.trophy },
   { key: 'editors', label: 'Все редакторы', screen: 'editorsHub', desc: 'карты · задания · квизы · фишки', color: '#2ee6a8', icon: Ic.pen },
   { key: 'emulator', label: 'Запуск эмулятора', screen: 'emulator', desc: 'тест ромов · запись сохранений', color: '#ff5d73', icon: Ic.chip },
